@@ -1,10 +1,10 @@
 (function () {
     'use strict';
 
-    var VERSION = '0.6.1';
-    var PLUGIN_ID = 'mnogotv_ui_v061';
-    var COMPONENT = 'mnogotv_ui_v06';
-    var PLAYER_COMPONENT = 'mnogotv_player_v06';
+    var VERSION = '0.7.0';
+    var PLUGIN_ID = 'mnogotv_ui_v070';
+    var COMPONENT = 'mnogotv_ui_v07';
+    var PLAYER_COMPONENT = 'mnogotv_player_v06'; // legacy, больше не используется
 
     if (window[PLUGIN_ID]) return;
     window[PLUGIN_ID] = true;
@@ -430,6 +430,429 @@
         return appendQuery(base, params);
     }
 
+
+    function getOnlineProxy(name) {
+        var proxy = '';
+
+        try {
+            proxy = Lampa.Storage.get('online_proxy_all') || '';
+            var specific = Lampa.Storage.get('online_proxy_' + name) || '';
+            if (specific) proxy = specific;
+        } catch (e) {}
+
+        if (proxy && proxy.slice(-1) !== '/') proxy += '/';
+
+        return proxy;
+    }
+
+    function proxify(name, url) {
+        var proxy = getOnlineProxy(name);
+        return proxy ? proxy + url : url;
+    }
+
+    function requestText(network, url, ok, fail) {
+        var finished = false;
+        var target = proxify('collaps', url);
+
+        function done(data) {
+            if (finished) return;
+            finished = true;
+            ok(typeof data === 'string' ? data : String(data || ''));
+        }
+
+        function bad(firstError) {
+            if (finished) return;
+
+            try {
+                if (network) {
+                    var method = typeof network.silent === 'function'
+                        ? 'silent'
+                        : (typeof network.quiet === 'function' ? 'quiet' : null);
+
+                    if (method) {
+                        network[method](
+                            target,
+                            done,
+                            function (secondError) {
+                                if (finished) return;
+                                finished = true;
+                                fail(secondError || firstError || new Error('Не удалось получить HTML плеера'));
+                            },
+                            false,
+                            {
+                                dataType: 'text',
+                                headers: {
+                                    'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8'
+                                }
+                            }
+                        );
+                        return;
+                    }
+                }
+            } catch (e) {}
+
+            finished = true;
+            fail(firstError || new Error('Не удалось получить HTML плеера'));
+        }
+
+        try {
+            if (typeof fetch === 'function') {
+                var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+                var timer = setTimeout(function () {
+                    try { if (controller) controller.abort(); } catch (e) {}
+                }, 15000);
+
+                fetch(target, {
+                    method: 'GET',
+                    mode: 'cors',
+                    cache: 'no-store',
+                    credentials: 'omit',
+                    signal: controller ? controller.signal : undefined
+                }).then(function (response) {
+                    clearTimeout(timer);
+                    if (!response.ok) throw new Error('HTTP ' + response.status);
+                    return response.text();
+                }).then(done).catch(function (error) {
+                    clearTimeout(timer);
+                    bad(error);
+                });
+
+                return;
+            }
+        } catch (e) {}
+
+        bad(new Error('fetch unavailable'));
+    }
+
+    function extractBalancedArgument(source, callName) {
+        var pos = source.indexOf(callName + '(');
+        if (pos < 0) return '';
+
+        var start = source.indexOf('(', pos) + 1;
+        var depth = 1;
+        var quote = '';
+        var escape = false;
+        var templateDepth = 0;
+
+        for (var i = start; i < source.length; i++) {
+            var ch = source[i];
+
+            if (escape) {
+                escape = false;
+                continue;
+            }
+
+            if (quote) {
+                if (ch === '\\') {
+                    escape = true;
+                    continue;
+                }
+
+                if (quote === '`' && ch === '$' && source[i + 1] === '{') {
+                    templateDepth++;
+                    i++;
+                    continue;
+                }
+
+                if (quote === '`' && ch === '}' && templateDepth > 0) {
+                    templateDepth--;
+                    continue;
+                }
+
+                if (ch === quote && templateDepth === 0) {
+                    quote = '';
+                }
+
+                continue;
+            }
+
+            if (ch === '"' || ch === "'" || ch === '`') {
+                quote = ch;
+                continue;
+            }
+
+            if (ch === '(' || ch === '{' || ch === '[') depth++;
+            else if (ch === ')' || ch === '}' || ch === ']') depth--;
+
+            if (depth === 0) {
+                return source.slice(start, i).trim();
+            }
+        }
+
+        return '';
+    }
+
+    function parseMakePlayer(html) {
+        var arg = extractBalancedArgument(html, 'makePlayer');
+
+        if (!arg) {
+            throw new Error('Collaps: makePlayer не найден');
+        }
+
+        try {
+            return (new Function('"use strict"; return (' + arg + ');'))();
+        } catch (e) {
+            // Совместимость с тем же форматом, который разбирает штатный Collaps-провайдер Lampa.
+            try {
+                return (0, eval)('(' + arg + ')');
+            } catch (second) {
+                throw new Error('Collaps: не удалось разобрать конфигурацию плеера');
+            }
+        }
+    }
+
+    function numberFrom(value) {
+        if (value === undefined || value === null) return null;
+        var m = String(value).match(/\d+/);
+        return m ? parseInt(m[0], 10) : null;
+    }
+
+    function contextFromObject(obj, ctx) {
+        var next = {
+            season: ctx.season,
+            episode: ctx.episode,
+            title: ctx.title || ''
+        };
+
+        var seasonKeys = ['season', 'season_number', 'seasonNumber', 'seasonNum', 's'];
+        var episodeKeys = ['episode', 'episode_number', 'episodeNumber', 'episodeNum', 'e'];
+
+        for (var i = 0; i < seasonKeys.length; i++) {
+            if (obj[seasonKeys[i]] !== undefined) {
+                var sn = numberFrom(obj[seasonKeys[i]]);
+                if (sn !== null) next.season = sn;
+                break;
+            }
+        }
+
+        for (var j = 0; j < episodeKeys.length; j++) {
+            if (obj[episodeKeys[j]] !== undefined) {
+                var en = numberFrom(obj[episodeKeys[j]]);
+                if (en !== null) next.episode = en;
+                break;
+            }
+        }
+
+        var name = obj.title || obj.name || obj.label || '';
+
+        if (name) {
+            next.title = String(name);
+
+            var se = next.title.match(/[Ss](\d{1,2})[Ee](\d{1,3})/);
+            if (se) {
+                next.season = parseInt(se[1], 10);
+                next.episode = parseInt(se[2], 10);
+            }
+            else {
+                var sr = next.title.match(/(?:сезон|season)\s*(\d+)/i);
+                var er = next.title.match(/(?:серия|episode)\s*(\d+)/i);
+
+                if (sr) next.season = parseInt(sr[1], 10);
+                if (er) next.episode = parseInt(er[1], 10);
+            }
+        }
+
+        return next;
+    }
+
+    function normalizeSubtitles(cc) {
+        if (!Array.isArray(cc)) return [];
+
+        return cc.map(function (item) {
+            if (!item) return null;
+
+            if (typeof item === 'string') {
+                return {
+                    label: 'Субтитры',
+                    url: item
+                };
+            }
+
+            var url = item.url || item.file || item.src || '';
+            if (!url) return null;
+
+            return {
+                label: item.name || item.label || item.lang || 'Субтитры',
+                url: url
+            };
+        }).filter(Boolean);
+    }
+
+    function collectNativeStreams(config) {
+        var result = [];
+        var visited = [];
+
+        function seen(obj) {
+            for (var i = 0; i < visited.length; i++) {
+                if (visited[i] === obj) return true;
+            }
+            visited.push(obj);
+            return false;
+        }
+
+        function pushStream(url, obj, ctx) {
+            if (!url || typeof url !== 'string') return;
+            if (url.indexOf('.m3u8') === -1 && url.indexOf('http') !== 0) return;
+
+            var subtitles = normalizeSubtitles(
+                (obj && (obj.cc || obj.subtitles)) || []
+            );
+
+            result.push({
+                url: url,
+                season: ctx.season,
+                episode: ctx.episode,
+                title: ctx.title || '',
+                subtitles: subtitles
+            });
+        }
+
+        function walk(node, ctx, parentKey) {
+            if (!node || typeof node !== 'object') return;
+            if (seen(node)) return;
+
+            var next = contextFromObject(node, ctx);
+
+            if (typeof node.hls === 'string') {
+                pushStream(node.hls, node, next);
+            }
+
+            if (node.source && typeof node.source === 'object' && typeof node.source.hls === 'string') {
+                pushStream(node.source.hls, node, next);
+            }
+
+            Object.keys(node).forEach(function (key) {
+                var child = node[key];
+                var childCtx = {
+                    season: next.season,
+                    episode: next.episode,
+                    title: next.title
+                };
+
+                var lower = String(parentKey || key).toLowerCase();
+                var numericKey = /^\d+$/.test(key) ? parseInt(key, 10) : null;
+
+                if (numericKey !== null) {
+                    if (lower.indexOf('season') >= 0) childCtx.season = numericKey;
+                    if (lower.indexOf('episode') >= 0) childCtx.episode = numericKey;
+                }
+
+                if (Array.isArray(child)) {
+                    child.forEach(function (entry, index) {
+                        var arrayCtx = {
+                            season: childCtx.season,
+                            episode: childCtx.episode,
+                            title: childCtx.title
+                        };
+
+                        var k = key.toLowerCase();
+
+                        if (k.indexOf('season') >= 0 && arrayCtx.season === null) {
+                            arrayCtx.season = index + 1;
+                        }
+
+                        if ((k.indexOf('episode') >= 0 || k.indexOf('playlist') >= 0) && arrayCtx.episode === null) {
+                            arrayCtx.episode = index + 1;
+                        }
+
+                        walk(entry, arrayCtx, key);
+                    });
+                }
+                else if (child && typeof child === 'object') {
+                    walk(child, childCtx, key);
+                }
+            });
+        }
+
+        walk(config, { season: null, episode: null, title: '' }, '');
+
+        // Убираем дубли одного и того же HLS.
+        var unique = [];
+        var urls = {};
+
+        result.forEach(function (item) {
+            var key = [
+                item.url,
+                item.season === null ? '' : item.season,
+                item.episode === null ? '' : item.episode
+            ].join('|');
+
+            if (!urls[key]) {
+                urls[key] = true;
+                unique.push(item);
+            }
+        });
+
+        return unique;
+    }
+
+    function findCollapsPlayer(source) {
+        var players = source && source.players ? source.players : [];
+
+        for (var i = 0; i < players.length; i++) {
+            if (String(players[i].type || '').toLowerCase() === 'collaps' && players[i].iframeUrl) {
+                return players[i];
+            }
+        }
+
+        return null;
+    }
+
+    function loadNativeCatalog(source, network, ok, fail) {
+        var player = findCollapsPlayer(source);
+
+        if (!player) {
+            fail(new Error('MnogoTV не вернул Collaps для нативного плеера'));
+            return;
+        }
+
+        requestText(network, player.iframeUrl, function (html) {
+            try {
+                var config = parseMakePlayer(html);
+                var streams = collectNativeStreams(config);
+
+                if (!streams.length) {
+                    fail(new Error('Collaps не вернул HLS-потоки'));
+                    return;
+                }
+
+                ok({
+                    player: player,
+                    config: config,
+                    streams: streams
+                });
+            } catch (e) {
+                fail(e);
+            }
+        }, fail);
+    }
+
+    function nativeTitle(movie, season, episode, meta) {
+        var base = titleOf(movie);
+
+        if (season && episode) {
+            return base + ' • S' + season + 'E' + episode +
+                (meta && meta.name ? ' • ' + meta.name : '');
+        }
+
+        return base;
+    }
+
+    function timelineView(movie, season, episode) {
+        try {
+            var base = movie.original_title || movie.original_name || titleOf(movie);
+            var hash = Lampa.Utils.hash(
+                season && episode
+                    ? [season, episode, base].join('')
+                    : base
+            );
+
+            return Lampa.Timeline.view(hash);
+        } catch (e) {
+            return undefined;
+        }
+    }
+
     function addCss() {
         if (document.getElementById('mnogotv-v06-style')) return;
 
@@ -707,8 +1130,13 @@
             error: '',
             data: null,
             translations: [],
-            translationIndex: 0
+            translationIndex: 0,
+            nativeLoading: false,
+            nativeError: '',
+            native: null
         };
+
+        var episodeMetaBySeason = {};
 
         var scroll = new Lampa.Scroll({
             mask: true,
@@ -731,8 +1159,8 @@
 
         var voiceButton = $(
             '<div class="mnogotv-v06__filter selector">' +
-                '<span class="mnogotv-v06__filter-title">Озвучка</span>' +
-                '<span class="mnogotv-v06__filter-value">Загрузка…</span>' +
+                '<span class="mnogotv-v06__filter-title">Аудио</span>' +
+                '<span class="mnogotv-v06__filter-value">В плеере Lampa</span>' +
             '</div>'
         );
 
@@ -748,21 +1176,7 @@
         }
 
         function refreshVoiceLabel() {
-            var tr = currentTranslation();
-
-            if (sourceState.loading) {
-                voiceButton.find('.mnogotv-v06__filter-value').text('Загрузка…');
-                return;
-            }
-
-            if (sourceState.error) {
-                voiceButton.find('.mnogotv-v06__filter-value').text('Недоступно');
-                return;
-            }
-
-            voiceButton.find('.mnogotv-v06__filter-value').text(
-                tr ? tr.name : 'По умолчанию'
-            );
+            voiceButton.find('.mnogotv-v06__filter-value').text('В плеере Lampa');
         }
 
         function buildAside() {
@@ -829,6 +1243,10 @@
         function loadSource() {
             sourceState.loading = true;
             sourceState.error = '';
+            sourceState.nativeLoading = false;
+            sourceState.nativeError = '';
+            sourceState.native = null;
+
             status.text('Подключение к MnogoTV…');
             refreshVoiceLabel();
 
@@ -838,27 +1256,36 @@
                 sourceState.translations = data.translations || [];
                 sourceState.translationIndex = preferredTranslationIndex(sourceState.translations);
 
-                var tr = currentTranslation();
-                var playerName = (data.player && data.player.type) || 'плеер';
+                sourceState.nativeLoading = true;
+                status.text('MnogoTV • получаем прямой поток для Lampa.Player…');
 
-                status.text(
-                    'MnogoTV • ' + playerName +
-                    (data.fallback ? ' • резервный режим' : '') +
-                    (tr ? ' • ' + tr.name : '')
-                );
+                loadNativeCatalog(data, network, function (native) {
+                    sourceState.nativeLoading = false;
+                    sourceState.native = native;
 
-                refreshVoiceLabel();
-                log('Source resolved', {
-                    tmdb: id,
-                    imdb: data.imdb,
-                    player: playerName,
-                    translations: sourceState.translations.length
+                    status.text(
+                        'MnogoTV • Collaps • Lampa.Player • ' +
+                        native.streams.length + ' поток(ов)'
+                    );
+
+                    log('Native source resolved', {
+                        tmdb: id,
+                        imdb: data.imdb,
+                        streams: native.streams.length
+                    });
+                }, function (err) {
+                    sourceState.nativeLoading = false;
+                    sourceState.nativeError = err && err.message
+                        ? err.message
+                        : String(err || 'unknown error');
+
+                    status.text('MnogoTV: ' + sourceState.nativeError);
+                    log('Native source error', err);
                 });
             }, function (err) {
                 sourceState.loading = false;
                 sourceState.error = err && err.message ? err.message : String(err || 'unknown error');
                 status.text('MnogoTV: ' + sourceState.error);
-                refreshVoiceLabel();
                 log('Source resolve error', err);
             });
         }
@@ -882,48 +1309,7 @@
         }
 
         function showVoiceSelect() {
-            if (sourceState.loading) {
-                notify('MnogoTV: источник ещё загружается');
-                return;
-            }
-
-            if (sourceState.error) {
-                notify('MnogoTV: ' + sourceState.error);
-                return;
-            }
-
-            var enabled = Lampa.Controller.enabled().name;
-            var items = sourceState.translations.map(function (tr, index) {
-                return {
-                    title: tr.name,
-                    subtitle: tr.quality || '',
-                    index: index,
-                    selected: index === sourceState.translationIndex
-                };
-            });
-
-            if (!items.length) {
-                notify('MnogoTV: озвучки не найдены');
-                return;
-            }
-
-            Lampa.Select.show({
-                title: 'Озвучка',
-                items: items,
-                onBack: function () {
-                    Lampa.Controller.toggle(enabled);
-                },
-                onSelect: function (item) {
-                    sourceState.translationIndex = item.index;
-                    refreshVoiceLabel();
-
-                    Lampa.Select.close();
-
-                    setTimeout(function () {
-                        Lampa.Controller.toggle('mnogotv_v06');
-                    }, 10);
-                }
-            });
+            notify('MnogoTV: аудиодорожка выбирается в стандартном плеере Lampa');
         }
 
         function showSeasonSelect() {
@@ -958,8 +1344,8 @@
         }
 
         function openPlayback(episode, episodeMeta) {
-            if (sourceState.loading) {
-                notify('MnogoTV: источник ещё загружается');
+            if (sourceState.loading || sourceState.nativeLoading) {
+                notify('MnogoTV: прямой поток ещё загружается');
                 return;
             }
 
@@ -968,38 +1354,100 @@
                 return;
             }
 
-            var translation = currentTranslation();
-            var url = buildPlayerUrl(
-                sourceState.data,
-                season,
-                episode,
-                translation,
-                serial
-            );
+            if (sourceState.nativeError || !sourceState.native) {
+                notify('MnogoTV: ' + (sourceState.nativeError || 'прямой поток недоступен'));
+                return;
+            }
 
-            log('Open playback', {
-                title: titleOf(movie),
+            var streams = sourceState.native.streams || [];
+            var chosen = null;
+
+            if (serial) {
+                for (var i = 0; i < streams.length; i++) {
+                    if (Number(streams[i].season) === Number(season) &&
+                        Number(streams[i].episode) === Number(episode)) {
+                        chosen = streams[i];
+                        break;
+                    }
+                }
+
+                // Некоторые версии Collaps не подписывают сезон у каждого эпизода.
+                if (!chosen) {
+                    var episodeOnly = streams.filter(function (item) {
+                        return Number(item.episode) === Number(episode);
+                    });
+
+                    if (episodeOnly.length === 1) chosen = episodeOnly[0];
+                }
+            }
+            else {
+                chosen = streams[0] || null;
+            }
+
+            if (!chosen || !chosen.url) {
+                notify(
+                    'MnogoTV: прямой HLS для ' +
+                    (serial ? ('S' + season + 'E' + episode) : 'фильма') +
+                    ' не найден'
+                );
+                return;
+            }
+
+            var title = nativeTitle(movie, season, episode, episodeMeta);
+            var entry = {
+                url: chosen.url,
+                title: title,
+                subtitles: chosen.subtitles || [],
+                timeline: timelineView(movie, season, episode),
+                isonline: true
+            };
+
+            var playlist = [];
+
+            if (serial) {
+                var currentSeason = streams.filter(function (item) {
+                    return Number(item.season) === Number(season) && item.episode !== null;
+                }).sort(function (a, b) {
+                    return Number(a.episode) - Number(b.episode);
+                });
+
+                currentSeason.forEach(function (item) {
+                    var meta = null;
+                    var arr = episodeMetaBySeason[season] || [];
+
+                    for (var m = 0; m < arr.length; m++) {
+                        if (Number(arr[m].episode_number) === Number(item.episode)) {
+                            meta = arr[m];
+                            break;
+                        }
+                    }
+
+                    playlist.push({
+                        url: item.url,
+                        title: nativeTitle(movie, season, item.episode, meta),
+                        subtitles: item.subtitles || [],
+                        timeline: timelineView(movie, season, item.episode),
+                        isonline: true
+                    });
+                });
+            }
+
+            if (!playlist.length) playlist = [entry];
+
+            entry.playlist = playlist;
+
+            log('Native playback', {
+                title: title,
                 season: season,
                 episode: episode,
-                translation: translation && translation.name,
-                url: url
+                url: chosen.url,
+                playlist: playlist.length
             });
 
-            notify(
-                'MnogoTV: ' +
-                (translation ? translation.name + ' • ' : '') +
-                (serial ? ('S' + season + 'E' + episode) : titleOf(movie))
-            );
+            notify('MnogoTV → плеер Lampa');
 
-            Lampa.Activity.push({
-                title: 'MnogoTV',
-                component: PLAYER_COMPONENT,
-                movie: movie,
-                url: url,
-                season: season,
-                episode: episode,
-                noinfo: true
-            });
+            Lampa.Player.play(entry);
+            Lampa.Player.playlist(playlist);
         }
 
         function makeEpisode(ep) {
@@ -1114,6 +1562,7 @@
                     scroll.clear();
 
                     var episodes = (data && data.episodes) || [];
+                    episodeMetaBySeason[season] = episodes;
 
                     if (!episodes.length) {
                         scroll.append(
@@ -1261,8 +1710,6 @@
             return;
         }
 
-        registerComponent(PLAYER_COMPONENT, MnogoPlayerComponent);
-
         Lampa.Activity.push({
             title: 'MnogoTV',
             component: COMPONENT,
@@ -1332,7 +1779,6 @@
             addCss();
 
             registerComponent(COMPONENT, MnogoComponent);
-            registerComponent(PLAYER_COMPONENT, MnogoPlayerComponent);
 
             if (!Lampa.Listener || typeof Lampa.Listener.follow !== 'function') {
                 throw new Error('Lampa.Listener.follow is unavailable');
