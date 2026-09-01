@@ -1,9 +1,9 @@
 (function () {
     'use strict';
 
-    var VERSION = '0.7.0';
-    var PLUGIN_ID = 'mnogotv_ui_v070';
-    var COMPONENT = 'mnogotv_ui_v07';
+    var VERSION = '0.7.1';
+    var PLUGIN_ID = 'mnogotv_ui_v071';
+    var COMPONENT = 'mnogotv_ui_v071';
     var PLAYER_COMPONENT = 'mnogotv_player_v06'; // legacy, больше не используется
 
     if (window[PLUGIN_ID]) return;
@@ -119,6 +119,52 @@
         } catch (e) {}
 
         bad(new Error('fetch unavailable'));
+    }
+
+
+    function requestPlayers(network, imdb, ok, fail) {
+        var directUrl = API_PLAYERS + encodeURIComponent(imdb);
+
+        requestJson(network, directUrl, ok, function (directError) {
+            var proxies = [];
+
+            try {
+                var collaps = Lampa.Storage.get('online_proxy_collaps') || '';
+                var all = Lampa.Storage.get('online_proxy_all') || '';
+
+                if (collaps) proxies.push(collaps);
+                if (all && all !== collaps) proxies.push(all);
+            } catch (e) {}
+
+            function normalizeProxy(proxy) {
+                proxy = String(proxy || '').trim();
+                if (!proxy) return '';
+                return proxy.slice(-1) === '/' ? proxy : proxy + '/';
+            }
+
+            function next(index, previousError) {
+                if (index >= proxies.length) {
+                    fail(previousError || directError || new Error('API плееров недоступен'));
+                    return;
+                }
+
+                var proxy = normalizeProxy(proxies[index]);
+                if (!proxy) {
+                    next(index + 1, previousError);
+                    return;
+                }
+
+                var proxiedUrl = proxy + directUrl;
+
+                log('Пробуем API плееров через proxy:', proxiedUrl);
+
+                requestJson(network, proxiedUrl, ok, function (proxyError) {
+                    next(index + 1, proxyError || previousError);
+                }, 1);
+            }
+
+            next(0, directError);
+        }, 1);
     }
 
     function tmdbId(movie) {
@@ -361,7 +407,7 @@
                 return;
             }
 
-            requestJson(network, API_PLAYERS + encodeURIComponent(imdb), function (response) {
+            requestPlayers(network, imdb, function (response) {
                 var players = response && response.data ? response.data : [];
 
                 if (!Array.isArray(players)) players = [];
@@ -798,11 +844,28 @@
         return null;
     }
 
+    function playerTypes(source) {
+        var players = source && source.players ? source.players : [];
+
+        if (!players.length) {
+            return source && source.player && source.player.type
+                ? String(source.player.type)
+                : 'нет списка';
+        }
+
+        return players.map(function (item) {
+            return item && item.type ? item.type : '?';
+        }).join(', ');
+    }
+
     function loadNativeCatalog(source, network, ok, fail) {
         var player = findCollapsPlayer(source);
 
         if (!player) {
-            fail(new Error('MnogoTV не вернул Collaps для нативного плеера'));
+            fail(new Error(
+                'Collaps не получен. Плееры: ' + playerTypes(source) +
+                '. Если виден только MnogoTV/Alloha — API плееров блокируется на устройстве; нужен online proxy.'
+            ));
             return;
         }
 
