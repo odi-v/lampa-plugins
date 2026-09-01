@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_ID = 'mnogotv_ui_v05';
+    var PLUGIN_ID = 'mnogotv_ui_v051';
     var COMPONENT = 'mnogotv_ui';
 
     if (window[PLUGIN_ID]) return;
@@ -15,7 +15,6 @@
 
     function tmdbId(movie) {
         if (!movie) return null;
-
         var source = movie.source || 'tmdb';
         var id = (source === 'cub' || source === 'tmdb') ? movie.id : (movie.tmdb_id || movie.id);
 
@@ -237,6 +236,13 @@
         document.head.appendChild(style);
     }
 
+    /*
+     * Playback backend hook.
+     * UI v0.5.1 intentionally keeps the same hook contract as v0.5.
+     * A resolver can later return:
+     *   "https://.../stream.m3u8"
+     * or {url, quality, subtitles}
+     */
     function playViaHook(movie, season, episode, episodeMeta) {
         var resolver = window.MnogoTVResolveStream;
 
@@ -263,6 +269,7 @@
                 }
 
                 var url = typeof result === 'string' ? result : result.url;
+
                 if (!url) {
                     Lampa.Noty.show('MnogoTV: ссылка воспроизведения отсутствует');
                     return;
@@ -310,12 +317,14 @@
         var aside = $('<div class="mnogotv-v05__aside"></div>');
         var main = $('<div class="mnogotv-v05__main"></div>');
         var toolbar = $('<div class="mnogotv-v05__toolbar"></div>');
+
         var sourceButton = $(
             '<div class="mnogotv-v05__filter selector">' +
                 '<span class="mnogotv-v05__filter-title">Источник</span>' +
                 '<span class="mnogotv-v05__filter-value">MnogoTV</span>' +
             '</div>'
         );
+
         var seasonButton = $(
             '<div class="mnogotv-v05__filter selector">' +
                 '<span class="mnogotv-v05__filter-title">Фильтр</span>' +
@@ -327,6 +336,7 @@
             aside.empty();
 
             var poster = posterUrl(movie);
+
             if (poster) {
                 aside.append(
                     '<div class="mnogotv-v05__poster"><img src="' + poster + '"></div>'
@@ -338,12 +348,23 @@
 
             var meta = [];
             var year = ((movie.first_air_date || movie.release_date || '') + '').slice(0, 4);
+
             if (year) meta.push(year);
-            if (movie.origin_country && movie.origin_country.length) meta.push(movie.origin_country.join(', '));
-            else if (movie.production_countries && movie.production_countries.length) {
-                meta.push(movie.production_countries.map(function (x) { return x.iso_3166_1 || x.name; }).join(', '));
+
+            if (movie.origin_country && movie.origin_country.length) {
+                meta.push(movie.origin_country.join(', '));
             }
-            if (movie.vote_average) meta.push('★ ' + parseFloat(movie.vote_average).toFixed(1));
+            else if (movie.production_countries && movie.production_countries.length) {
+                meta.push(
+                    movie.production_countries.map(function (x) {
+                        return x.iso_3166_1 || x.name;
+                    }).join(', ')
+                );
+            }
+
+            if (movie.vote_average) {
+                meta.push('★ ' + parseFloat(movie.vote_average).toFixed(1));
+            }
 
             aside.append('<div class="mnogotv-v05__meta"></div>');
             aside.find('.mnogotv-v05__meta').text(meta.join('  •  '));
@@ -362,7 +383,10 @@
             if (!seasons.length) {
                 var count = parseInt(movie.number_of_seasons || 1, 10);
                 if (!count || count < 1) count = 1;
-                for (var i = 1; i <= count; i++) seasons.push(i);
+
+                for (var i = 1; i <= count; i++) {
+                    seasons.push(i);
+                }
             }
 
             season = seasons[0] || 1;
@@ -407,8 +431,10 @@
                 onSelect: function (item) {
                     season = item.season;
                     seasonButton.find('.mnogotv-v05__filter-value').text('Сезон ' + season);
+
                     Lampa.Select.close();
                     renderEpisodes();
+
                     setTimeout(function () {
                         Lampa.Controller.toggle('mnogotv');
                     }, 10);
@@ -440,16 +466,25 @@
             item.find('.mnogotv-v05__duration').text(runtime);
 
             var info = [];
-            if (ep.vote_average) info.push('★ ' + parseFloat(ep.vote_average).toFixed(1));
-            if (ep.air_date) info.push(formatDate(ep.air_date));
+
+            if (ep.vote_average) {
+                info.push('★ ' + parseFloat(ep.vote_average).toFixed(1));
+            }
+
+            if (ep.air_date) {
+                info.push(formatDate(ep.air_date));
+            }
+
             item.find('.mnogotv-v05__episode-info').text(info.join('  •  '));
 
             var img = item.find('img');
+
             if (ep.still_path) {
                 try {
                     img.attr('src', Lampa.TMDB.image('t/p/w300' + ep.still_path));
                 } catch (e) {}
-            } else {
+            }
+            else {
                 img.hide();
             }
 
@@ -523,8 +558,13 @@
             );
         }
 
-        sourceButton.on('hover:focus', function (e) { last = e.target; });
-        seasonButton.on('hover:focus', function (e) { last = e.target; });
+        sourceButton.on('hover:focus', function (e) {
+            last = e.target;
+        });
+
+        seasonButton.on('hover:focus', function (e) {
+            last = e.target;
+        });
 
         sourceButton.on('hover:enter click', showSourceSelect);
         seasonButton.on('hover:enter click', showSeasonSelect);
@@ -544,7 +584,9 @@
 
                 toolbar.append(sourceButton);
 
-                if (serial) toolbar.append(seasonButton);
+                if (serial) {
+                    toolbar.append(seasonButton);
+                }
 
                 main.append(toolbar);
                 scroll.render().addClass('mnogotv-v05__scroll');
@@ -620,6 +662,7 @@
 
         try {
             var root = e.object.activity.render();
+
             if (!root || !root.length) return;
             if (root.find('.mnogotv-v05-button').length) return;
 
@@ -639,12 +682,34 @@
                 openComponent(movie);
             });
 
-            var container = root.find('.full-start-new__buttons').first();
-            if (!container.length) container = root.find('.full-start__buttons').first();
+            /*
+             * v0.5.1 fix for CUB/Lampa builds:
+             * append() into the generic buttons container can leave the item
+             * outside the "Источник" chooser. Insert it next to an existing
+             * source button first, with generic container only as fallback.
+             */
+            var torrent = root.find('.view--torrent').first();
+            var online = root.find('.view--online').last();
 
-            if (container.length) {
+            var container = root.find('.full-start-new__buttons').first();
+            if (!container.length) {
+                container = root.find('.full-start__buttons').first();
+            }
+
+            if (torrent.length) {
+                torrent.after(button);
+                log('Source button inserted after torrent', titleOf(movie));
+            }
+            else if (online.length) {
+                online.after(button);
+                log('Source button inserted after online', titleOf(movie));
+            }
+            else if (container.length) {
                 container.append(button);
-                log('Source button added', titleOf(movie));
+                log('Source button appended as fallback', titleOf(movie));
+            }
+            else {
+                log('Source button container not found', titleOf(movie));
             }
         } catch (err) {
             log('addButton error', err);
@@ -662,18 +727,21 @@
 
         try {
             if (Lampa.Noty && Lampa.Noty.show) {
-                Lampa.Noty.show('MnogoTV UI v0.5 загружен');
+                Lampa.Noty.show('MnogoTV UI v0.5.1 загружен');
             }
         } catch (e) {}
 
-        log('Plugin started');
+        log('Plugin started v0.5.1');
     }
 
     if (window.appready) {
         startPlugin();
-    } else {
+    }
+    else {
         Lampa.Listener.follow('app', function (e) {
-            if (e && e.type === 'ready') startPlugin();
+            if (e && e.type === 'ready') {
+                startPlugin();
+            }
         });
     }
 })();
