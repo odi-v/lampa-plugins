@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '0.6.0';
-    var PLUGIN_ID = 'mnogotv_ui_v060';
+    var VERSION = '0.6.1';
+    var PLUGIN_ID = 'mnogotv_ui_v061';
     var COMPONENT = 'mnogotv_ui_v06';
     var PLAYER_COMPONENT = 'mnogotv_player_v06';
 
@@ -38,42 +38,87 @@
     }
 
     function requestJson(network, url, ok, fail, cacheLife) {
-        if (!network) {
-            fail(new Error('Lampa network API unavailable'));
-            return;
-        }
+        var finished = false;
 
-        function success(data) {
+        function done(data) {
+            if (finished) return;
+            finished = true;
+
             try {
                 if (typeof data === 'string') data = JSON.parse(data);
+                ok(data);
             } catch (e) {
                 fail(e);
+            }
+        }
+
+        function bad(error) {
+            if (finished) return;
+
+            // MnogoTV сам использует обычный fetch. Если он не сработал
+            // в конкретной сборке Lampa, пробуем штатный сетевой слой.
+            if (network) {
+                var params = { dataType: 'json' };
+
+                if (cacheLife) params.cache = { life: cacheLife };
+
+                try {
+                    var method = typeof network.silent === 'function'
+                        ? 'silent'
+                        : (typeof network.quiet === 'function' ? 'quiet' : null);
+
+                    if (method) {
+                        network[method](url, done, function (secondError) {
+                            if (finished) return;
+                            finished = true;
+                            fail(secondError || error || new Error('Network request failed'));
+                        }, false, params);
+                        return;
+                    }
+                } catch (e) {}
+            }
+
+            finished = true;
+            fail(error || new Error('Network request failed'));
+        }
+
+        // Сначала повторяем способ, которым работает сам mnogotv.com.
+        try {
+            if (typeof fetch === 'function') {
+                var timedOut = false;
+                var timer = setTimeout(function () {
+                    timedOut = true;
+                    bad(new Error('timeout: ' + url));
+                }, 12000);
+
+                fetch(url, {
+                    method: 'GET',
+                    mode: 'cors',
+                    cache: 'no-store',
+                    credentials: 'omit',
+                    headers: { 'Accept': 'application/json' }
+                }).then(function (response) {
+                    if (timedOut || finished) return null;
+
+                    clearTimeout(timer);
+
+                    if (!response.ok) {
+                        throw new Error('HTTP ' + response.status + ': ' + url);
+                    }
+
+                    return response.json();
+                }).then(function (data) {
+                    if (data !== null && data !== undefined) done(data);
+                }).catch(function (error) {
+                    clearTimeout(timer);
+                    bad(error);
+                });
+
                 return;
             }
-            ok(data);
-        }
+        } catch (e) {}
 
-        var params = {
-            dataType: 'json'
-        };
-
-        if (cacheLife) {
-            params.cache = { life: cacheLife };
-        }
-
-        try {
-            if (typeof network.silent === 'function') {
-                network.silent(url, success, fail, false, params);
-            }
-            else if (typeof network.quiet === 'function') {
-                network.quiet(url, success, fail, false, params);
-            }
-            else {
-                fail(new Error('No supported Lampa request method'));
-            }
-        } catch (e) {
-            fail(e);
-        }
+        bad(new Error('fetch unavailable'));
     }
 
     function tmdbId(movie) {
@@ -233,12 +278,78 @@
         var serial = isSeries(movie);
 
         if (!id) {
-            fail(new Error('TMDB ID not found'));
+            fail(new Error('TMDB ID не найден'));
             return;
         }
 
         var type = serial ? 'tv/' : 'movie/';
         var metaUrl = API_META + type + id + '?language=ru-RU&append_to_response=external_ids';
+
+        function fallbackPlayer(meta, imdb, originalError) {
+            // Это тот же fallback, который использует сам mnogotv.com.
+            var fallbackUrl = 'https://cdn.mnogotv.com/b?tmdb=' + encodeURIComponent(id);
+
+            requestJson(network, fallbackUrl, function (response) {
+                var data = response && response.data ? response.data : {};
+                var iframe = data.iframe || '';
+
+                if (!iframe && data.translation_iframe) {
+                    try {
+                        var variants = Object.keys(data.translation_iframe);
+
+                        for (var i = 0; i < variants.length; i++) {
+                            var entry = data.translation_iframe[variants[i]];
+                            if (entry && entry.iframe) {
+                                iframe = entry.iframe;
+                                break;
+                            }
+                        }
+                    } catch (e) {}
+                }
+
+                if (!iframe) {
+                    // Последний безопасный fallback: официальный watch-tv MnogoTV.
+                    iframe = 'https://mnogotv.com/watch-tv/?tmdb=' + encodeURIComponent(id);
+                }
+
+                done({
+                    imdb: imdb || '',
+                    metadata: meta || {},
+                    player: {
+                        type: 'MnogoTV',
+                        iframeUrl: iframe
+                    },
+                    translations: [{
+                        id: null,
+                        name: 'По умолчанию',
+                        quality: '',
+                        iframeUrl: iframe
+                    }],
+                    fallback: true,
+                    originalError: originalError ? String(originalError.message || originalError) : ''
+                });
+            }, function () {
+                // Даже если API fallback недоступен, сам watch-tv остаётся рабочим запасным вариантом.
+                var iframe = 'https://mnogotv.com/watch-tv/?tmdb=' + encodeURIComponent(id);
+
+                done({
+                    imdb: imdb || '',
+                    metadata: meta || {},
+                    player: {
+                        type: 'MnogoTV',
+                        iframeUrl: iframe
+                    },
+                    translations: [{
+                        id: null,
+                        name: 'По умолчанию',
+                        quality: '',
+                        iframeUrl: iframe
+                    }],
+                    fallback: true,
+                    originalError: originalError ? String(originalError.message || originalError) : ''
+                });
+            }, 1);
+        }
 
         requestJson(network, metaUrl, function (meta) {
             var imdb = meta && meta.external_ids && meta.external_ids.imdb_id;
@@ -246,49 +357,56 @@
             if (!imdb && movie && movie.imdb_id) imdb = movie.imdb_id;
 
             if (!imdb) {
-                fail(new Error('IMDb ID not found'));
+                fallbackPlayer(meta, '', new Error('IMDb ID не найден'));
                 return;
             }
 
             requestJson(network, API_PLAYERS + encodeURIComponent(imdb), function (response) {
                 var players = response && response.data ? response.data : [];
 
-                if (!Array.isArray(players) || !players.length) {
-                    fail(new Error('MnogoTV players not found'));
+                if (!Array.isArray(players)) players = [];
+
+                players = players.filter(function (item) {
+                    return item && item.iframeUrl && item.type;
+                });
+
+                function priority(type) {
+                    type = String(type || '').toLowerCase();
+
+                    if (type === 'alloha') return 0;
+                    if (type === 'collaps') return 1;
+                    if (type === 'turbo') return 3;
+
+                    return 2;
+                }
+
+                players.sort(function (a, b) {
+                    return priority(a.type) - priority(b.type);
+                });
+
+                if (!players.length) {
+                    fallbackPlayer(meta, imdb, new Error('Список плееров пуст'));
                     return;
                 }
 
-                var player = null;
-
-                for (var i = 0; i < players.length; i++) {
-                    if ((players[i].type || '').toLowerCase() === 'alloha' && players[i].iframeUrl) {
-                        player = players[i];
-                        break;
-                    }
-                }
-
-                if (!player) {
-                    for (var j = 0; j < players.length; j++) {
-                        if (players[j].iframeUrl) {
-                            player = players[j];
-                            break;
-                        }
-                    }
-                }
-
-                if (!player || !player.iframeUrl) {
-                    fail(new Error('Compatible MnogoTV player not found'));
-                    return;
-                }
+                var player = players[0];
 
                 done({
                     imdb: imdb,
                     metadata: meta,
                     player: player,
-                    translations: normalizeTranslations(player)
+                    players: players,
+                    translations: normalizeTranslations(player),
+                    fallback: false
                 });
-            }, fail, 3);
-        }, fail, 30);
+            }, function (playersError) {
+                fallbackPlayer(meta, imdb, playersError);
+            }, 1);
+        }, function (metaError) {
+            // Если metadata endpoint не открылся в WebView,
+            // не блокируем пользователя — открываем официальный watch-tv.
+            fallbackPlayer({}, movie && movie.imdb_id || '', metaError);
+        }, 1);
     }
 
     function buildPlayerUrl(source, season, episode, translation, serial) {
@@ -725,6 +843,7 @@
 
                 status.text(
                     'MnogoTV • ' + playerName +
+                    (data.fallback ? ' • резервный режим' : '') +
                     (tr ? ' • ' + tr.name : '')
                 );
 
@@ -845,7 +964,7 @@
             }
 
             if (sourceState.error || !sourceState.data) {
-                notify('MnogoTV: источник недоступен');
+                notify('MnogoTV: не удалось получить источник: ' + (sourceState.error || 'нет данных'));
                 return;
             }
 
