@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var PLUGIN_ID = 'mnogotv_ui_v051';
+    var PLUGIN_ID = 'mnogotv_ui_v052';
     var COMPONENT = 'mnogotv_ui';
 
     if (window[PLUGIN_ID]) return;
@@ -643,9 +643,32 @@
         };
     }
 
-    function openComponent(movie) {
-        if (!Lampa.Component.exist(COMPONENT)) {
+    var componentRegistered = false;
+
+    function registerComponent() {
+        if (componentRegistered) return true;
+        if (!window.Lampa || !Lampa.Component || typeof Lampa.Component.add !== 'function') {
+            log('Lampa.Component.add is unavailable');
+            return false;
+        }
+
+        try {
             Lampa.Component.add(COMPONENT, MnogoComponent);
+            componentRegistered = true;
+            log('Component registered');
+            return true;
+        } catch (e) {
+            // Some builds throw when the component is already registered.
+            log('Component registration warning', e);
+            componentRegistered = true;
+            return true;
+        }
+    }
+
+    function openComponent(movie) {
+        if (!registerComponent()) {
+            try { Lampa.Noty.show('MnogoTV: компонент Lampa недоступен'); } catch (e) {}
+            return;
         }
 
         Lampa.Activity.push({
@@ -716,32 +739,86 @@
         }
     }
 
+    var started = false;
+
     function startPlugin() {
-        addCss();
-
-        if (!Lampa.Component.exist(COMPONENT)) {
-            Lampa.Component.add(COMPONENT, MnogoComponent);
-        }
-
-        Lampa.Listener.follow('full', addButton);
+        if (started) return;
+        started = true;
 
         try {
-            if (Lampa.Noty && Lampa.Noty.show) {
-                Lampa.Noty.show('MnogoTV UI v0.5.1 загружен');
-            }
-        } catch (e) {}
+            addCss();
+            registerComponent();
 
-        log('Plugin started v0.5.1');
+            if (!Lampa.Listener || typeof Lampa.Listener.follow !== 'function') {
+                throw new Error('Lampa.Listener.follow is unavailable');
+            }
+
+            Lampa.Listener.follow('full', addButton);
+
+            // Fallback for CUB/older builds where card lifecycle differs.
+            Lampa.Listener.follow('activity', function (e) {
+                if (!e || e.type !== 'start') return;
+                if (e.component !== 'full' && e.component !== 'showy') return;
+
+                setTimeout(function () {
+                    try {
+                        var obj = e.object;
+                        if (!obj || !obj.activity || typeof obj.activity.render !== 'function') return;
+                        var movie = obj.card || obj.movie || {};
+                        addButton({
+                            type: 'complite',
+                            object: obj,
+                            data: { movie: movie },
+                            movie: movie
+                        });
+                    } catch (err) {
+                        log('activity fallback error', err);
+                    }
+                }, 350);
+            });
+
+            try {
+                if (Lampa.Noty && Lampa.Noty.show) {
+                    Lampa.Noty.show('MnogoTV UI v0.5.2 загружен');
+                }
+            } catch (e) {}
+
+            log('Plugin started v0.5.2');
+        } catch (err) {
+            started = false;
+            log('startPlugin error', err);
+            try {
+                if (Lampa.Noty && Lampa.Noty.show) {
+                    Lampa.Noty.show('MnogoTV: ошибка запуска — ' + (err.message || err));
+                }
+            } catch (e) {}
+        }
     }
 
-    if (window.appready) {
-        startPlugin();
+    function bootstrap() {
+        if (typeof window.Lampa === 'undefined') {
+            setTimeout(bootstrap, 300);
+            return;
+        }
+
+        if (window.appready) {
+            startPlugin();
+            return;
+        }
+
+        if (Lampa.Listener && typeof Lampa.Listener.follow === 'function') {
+            Lampa.Listener.follow('app', function (e) {
+                if (e && e.type === 'ready') startPlugin();
+            });
+
+            setTimeout(function () {
+                if (window.appready) startPlugin();
+            }, 1200);
+        }
+        else {
+            setTimeout(bootstrap, 300);
+        }
     }
-    else {
-        Lampa.Listener.follow('app', function (e) {
-            if (e && e.type === 'ready') {
-                startPlugin();
-            }
-        });
-    }
+
+    bootstrap();
 })();
