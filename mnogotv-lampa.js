@@ -1,14 +1,11 @@
 (function () {
     'use strict';
 
-    var PLUGIN = 'mnogotv_source_v03';
+    var PLUGIN = 'mnogotv_source_v04';
     if (window[PLUGIN]) return;
     window[PLUGIN] = true;
 
-    var URLS = {
-        movie: 'https://mnogotv.com/movies/',
-        tv: 'https://mnogotv.com/tv-shows/'
-    };
+    var BASE = 'https://mnogotv.com/watch-tv/?tmdb=';
 
     var ICON =
         '<svg class="button__icon" width="26" height="26" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
@@ -23,28 +20,58 @@
         } catch (e) {}
     }
 
-    function isSeries(movie) {
-        return !!(
-            movie &&
-            (
-                movie.name ||
-                movie.original_name ||
-                movie.number_of_seasons ||
-                movie.first_air_date ||
-                movie.media_type === 'tv'
-            )
-        );
+    function getTmdb(movie) {
+        if (!movie) return null;
+
+        var candidates = [
+            movie.tmdb_id,
+            movie.tmdb,
+            movie.id,
+            movie.movie_id
+        ];
+
+        for (var i = 0; i < candidates.length; i++) {
+            var value = candidates[i];
+
+            if (value !== undefined && value !== null && value !== '') {
+                value = String(value).trim();
+
+                if (/^\d+$/.test(value)) {
+                    return value;
+                }
+            }
+        }
+
+        return null;
     }
 
-    function openExternal(movie) {
-        var url = isSeries(movie) ? URLS.tv : URLS.movie;
+    function titleOf(movie) {
+        return movie && (
+            movie.title ||
+            movie.name ||
+            movie.original_title ||
+            movie.original_name
+        ) || 'контент';
+    }
+
+    function openExact(movie) {
+        var tmdb = getTmdb(movie);
+
+        if (!tmdb) {
+            try {
+                Lampa.Noty.show('MnogoTV: не удалось определить TMDB ID');
+            } catch (e) {}
+            log('TMDB ID not found', movie);
+            return;
+        }
+
+        var url = BASE + encodeURIComponent(tmdb);
+
+        log('Opening', titleOf(movie), 'TMDB:', tmdb, url);
 
         try {
             if (Lampa.Noty && Lampa.Noty.show) {
-                Lampa.Noty.show(
-                    'MnogoTV: ' +
-                    ((movie && (movie.title || movie.name)) || 'открытие источника')
-                );
+                Lampa.Noty.show('MnogoTV: ' + titleOf(movie));
             }
         } catch (e) {}
 
@@ -59,7 +86,7 @@
         try {
             window.location.href = url;
         } catch (e) {
-            log('Cannot open MnogoTV', e);
+            log('Cannot open MnogoTV URL', e);
         }
     }
 
@@ -67,23 +94,40 @@
         var $jq = window.jQuery || window.$;
         if (!$jq) return null;
 
-        var html =
+        var button = $jq(
             '<div class="full-start__button selector view--online mnogotv--button" data-subtitle="MnogoTV">' +
                 ICON +
                 '<span>MnogoTV</span>' +
-            '</div>';
-
-        var button = $jq(html);
+            '</div>'
+        );
 
         button.on('hover:enter', function () {
-            openExternal(movie);
+            openExact(movie);
         });
 
         button.on('click', function () {
-            openExternal(movie);
+            openExact(movie);
         });
 
         return button;
+    }
+
+    function extractMovie(e) {
+        var candidates = [
+            e && e.data && e.data.movie,
+            e && e.movie,
+            e && e.object && e.object.card,
+            e && e.object && e.object.movie,
+            e && e.object && e.object.activity && e.object.activity.card
+        ];
+
+        for (var i = 0; i < candidates.length; i++) {
+            if (candidates[i] && typeof candidates[i] === 'object') {
+                return candidates[i];
+            }
+        }
+
+        return {};
     }
 
     function addToFull(e) {
@@ -96,20 +140,13 @@
 
             if (root.find('.mnogotv--button').length) return;
 
-            var movie = (e.data && e.data.movie) || e.movie || {};
+            var movie = extractMovie(e);
+            var button = makeButton(movie);
+            if (!button) return;
 
-            /*
-             * Самый совместимый способ для Lampa:
-             * вставляем MnogoTV рядом с системной кнопкой "Торренты".
-             * На узком экране/TV Lampa сама переносит такие источники
-             * в панель "Источник", которая открывается через "...".
-             */
             var torrent = root.find('.view--torrent').first();
             var online = root.find('.view--online').last();
             var buttons = root.find('.full-start-new__buttons, .full-start__buttons').first();
-
-            var button = makeButton(movie);
-            if (!button) return;
 
             if (torrent.length) {
                 torrent.after(button);
@@ -121,11 +158,11 @@
                 buttons.append(button);
             }
             else {
-                log('Full buttons container not found');
+                log('Buttons container not found');
                 return;
             }
 
-            log('MnogoTV source button added', movie.title || movie.name || '');
+            log('Button added:', titleOf(movie), 'tmdb=', getTmdb(movie));
         } catch (err) {
             log('addToFull error', err);
         }
@@ -143,28 +180,13 @@
             }
         });
 
-        /*
-         * Если карточка уже открыта к моменту загрузки плагина,
-         * пробуем добавить кнопку сразу.
-         */
-        try {
-            var active = Lampa.Activity && Lampa.Activity.active
-                ? Lampa.Activity.active()
-                : null;
-
-            if (active && active.component === 'full' && active.activity) {
-                addToFull({
-                    object: active,
-                    data: { movie: active.card || active.movie || {} }
-                });
-            }
-        } catch (e) {}
-
         try {
             if (Lampa.Noty && Lampa.Noty.show) {
-                Lampa.Noty.show('MnogoTV Source v0.3 загружен');
+                Lampa.Noty.show('MnogoTV Source v0.4 загружен');
             }
         } catch (e) {}
+
+        log('Plugin started');
     }
 
     if (window.appready) {
