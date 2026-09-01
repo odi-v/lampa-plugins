@@ -1,9 +1,9 @@
 (function () {
     'use strict';
 
-    var VERSION = '0.7.1';
-    var PLUGIN_ID = 'mnogotv_ui_v071';
-    var COMPONENT = 'mnogotv_ui_v071';
+    var VERSION = '0.8.0';
+    var PLUGIN_ID = 'mnogotv_ui_v080';
+    var COMPONENT = 'mnogotv_ui_v080';
     var PLAYER_COMPONENT = 'mnogotv_player_v06'; // legacy, больше не используется
 
     if (window[PLUGIN_ID]) return;
@@ -11,6 +11,53 @@
 
     var API_META = 'https://cdn.mnogotv.com/c/';
     var API_PLAYERS = 'https://fbphdplay.top/api/players?imdb=';
+
+    function currentScriptConfig() {
+        var config = { proxy: '', key: '' };
+
+        try {
+            var script = document.currentScript;
+            var src = script && script.src ? script.src : '';
+
+            if (src) {
+                var u = new URL(src, window.location.href);
+                config.proxy = (u.searchParams.get('proxy') || '').trim();
+                config.key = (u.searchParams.get('proxy_key') || '').trim();
+            }
+        } catch (e) {}
+
+        try {
+            if (!config.proxy && window.Lampa && Lampa.Storage) {
+                config.proxy = String(Lampa.Storage.get('mnogotv_proxy') || '').trim();
+                config.key = String(Lampa.Storage.get('mnogotv_proxy_key') || config.key || '').trim();
+            }
+        } catch (e) {}
+
+        if (config.proxy) config.proxy = config.proxy.replace(/\/+$/, '');
+        return config;
+    }
+
+    var PROXY_CONFIG = currentScriptConfig();
+
+    function proxyUrl(path, params) {
+        if (!PROXY_CONFIG.proxy) return '';
+
+        var url = PROXY_CONFIG.proxy + path;
+        var query = [];
+
+        Object.keys(params || {}).forEach(function (key) {
+            var value = params[key];
+            if (value !== undefined && value !== null && value !== '') {
+                query.push(encodeURIComponent(key) + '=' + encodeURIComponent(String(value)));
+            }
+        });
+
+        if (PROXY_CONFIG.key) {
+            query.push('key=' + encodeURIComponent(PROXY_CONFIG.key));
+        }
+
+        return url + (query.length ? '?' + query.join('&') : '');
+    }
 
     function log() {
         try {
@@ -124,47 +171,57 @@
 
     function requestPlayers(network, imdb, ok, fail) {
         var directUrl = API_PLAYERS + encodeURIComponent(imdb);
+        var viaProxy = proxyUrl('/players', { imdb: imdb });
 
-        requestJson(network, directUrl, ok, function (directError) {
-            var proxies = [];
+        function direct() {
+            requestJson(network, directUrl, ok, function (directError) {
+                var proxies = [];
 
-            try {
-                var collaps = Lampa.Storage.get('online_proxy_collaps') || '';
-                var all = Lampa.Storage.get('online_proxy_all') || '';
+                try {
+                    var collaps = Lampa.Storage.get('online_proxy_collaps') || '';
+                    var all = Lampa.Storage.get('online_proxy_all') || '';
+                    if (collaps) proxies.push(collaps);
+                    if (all && all !== collaps) proxies.push(all);
+                } catch (e) {}
 
-                if (collaps) proxies.push(collaps);
-                if (all && all !== collaps) proxies.push(all);
-            } catch (e) {}
-
-            function normalizeProxy(proxy) {
-                proxy = String(proxy || '').trim();
-                if (!proxy) return '';
-                return proxy.slice(-1) === '/' ? proxy : proxy + '/';
-            }
-
-            function next(index, previousError) {
-                if (index >= proxies.length) {
-                    fail(previousError || directError || new Error('API плееров недоступен'));
-                    return;
+                function normalizeProxy(proxy) {
+                    proxy = String(proxy || '').trim();
+                    if (!proxy) return '';
+                    return proxy.slice(-1) === '/' ? proxy : proxy + '/';
                 }
 
-                var proxy = normalizeProxy(proxies[index]);
-                if (!proxy) {
-                    next(index + 1, previousError);
-                    return;
+                function next(index, previousError) {
+                    if (index >= proxies.length) {
+                        fail(previousError || directError || new Error('API плееров недоступен'));
+                        return;
+                    }
+
+                    var prefix = normalizeProxy(proxies[index]);
+                    if (!prefix) {
+                        next(index + 1, previousError);
+                        return;
+                    }
+
+                    requestJson(network, prefix + directUrl, ok, function (proxyError) {
+                        next(index + 1, proxyError || previousError);
+                    }, 1);
                 }
 
-                var proxiedUrl = proxy + directUrl;
+                next(0, directError);
+            }, 1);
+        }
 
-                log('Пробуем API плееров через proxy:', proxiedUrl);
-
-                requestJson(network, proxiedUrl, ok, function (proxyError) {
-                    next(index + 1, proxyError || previousError);
-                }, 1);
-            }
-
-            next(0, directError);
-        }, 1);
+        // В v0.8 наш proxy при его наличии является основным путём.
+        // Старый WebView телевизора больше не обязан ходить на fbphdplay.top напрямую.
+        if (viaProxy) {
+            requestJson(network, viaProxy, ok, function (proxyError) {
+                log('MnogoTV proxy /players failed, пробуем direct:', proxyError);
+                direct();
+            }, 1);
+        }
+        else {
+            direct();
+        }
     }
 
     function tmdbId(movie) {
@@ -498,7 +555,11 @@
 
     function requestText(network, url, ok, fail) {
         var finished = false;
-        var target = proxify('collaps', url);
+        var target = '';
+        var viaProxy = proxyUrl('/collaps', { url: url });
+
+        if (viaProxy) target = viaProxy;
+        else target = proxify('collaps', url);
 
         function done(data) {
             if (finished) return;
@@ -864,7 +925,9 @@
         if (!player) {
             fail(new Error(
                 'Collaps не получен. Плееры: ' + playerTypes(source) +
-                '. Если виден только MnogoTV/Alloha — API плееров блокируется на устройстве; нужен online proxy.'
+                (PROXY_CONFIG.proxy
+                    ? '. Proxy: ' + PROXY_CONFIG.proxy
+                    : '. Proxy v0.8 не настроен: добавь &proxy=https://ТВОЙ_СЕРВЕР к URL плагина.')
             ));
             return;
         }
@@ -1872,8 +1935,8 @@
                 }, 350);
             });
 
-            notify('MnogoTV v' + VERSION + ' загружен');
-            log('Plugin started');
+            notify('MnogoTV v' + VERSION + ' загружен' + (PROXY_CONFIG.proxy ? ' • proxy OK' : ''));
+            log('Plugin started', { proxy: PROXY_CONFIG.proxy || 'не настроен' });
         } catch (err) {
             started = false;
             log('startPlugin error', err);
