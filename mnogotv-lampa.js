@@ -1,9 +1,9 @@
 (function () {
     'use strict';
 
-    var VERSION = '0.8.0';
-    var PLUGIN_ID = 'mnogotv_ui_v080';
-    var COMPONENT = 'mnogotv_ui_v080';
+    var VERSION = '1.0.0';
+    var PLUGIN_ID = 'mnogotv_ui_v100';
+    var COMPONENT = 'mnogotv_ui_v100';
     var PLAYER_COMPONENT = 'mnogotv_player_v06'; // legacy, больше не используется
 
     if (window[PLUGIN_ID]) return;
@@ -17,19 +17,40 @@
 
         try {
             var script = document.currentScript;
-            var src = script && script.src ? script.src : '';
+            var scriptSrc = script && script.src ? script.src : '';
 
-            if (src) {
-                var u = new URL(src, window.location.href);
-                config.proxy = (u.searchParams.get('proxy') || '').trim();
-                config.key = (u.searchParams.get('proxy_key') || '').trim();
+            if (scriptSrc) {
+                var u = new URL(scriptSrc, window.location.href);
+
+                // v1.0: relay/relay_key. Старые proxy/proxy_key тоже понимаем.
+                config.proxy = (
+                    u.searchParams.get('relay') ||
+                    u.searchParams.get('proxy') ||
+                    ''
+                ).trim();
+
+                config.key = (
+                    u.searchParams.get('relay_key') ||
+                    u.searchParams.get('proxy_key') ||
+                    ''
+                ).trim();
             }
         } catch (e) {}
 
         try {
             if (!config.proxy && window.Lampa && Lampa.Storage) {
-                config.proxy = String(Lampa.Storage.get('mnogotv_proxy') || '').trim();
-                config.key = String(Lampa.Storage.get('mnogotv_proxy_key') || config.key || '').trim();
+                config.proxy = String(
+                    Lampa.Storage.get('mnogotv_relay') ||
+                    Lampa.Storage.get('mnogotv_proxy') ||
+                    ''
+                ).trim();
+
+                config.key = String(
+                    Lampa.Storage.get('mnogotv_relay_key') ||
+                    Lampa.Storage.get('mnogotv_proxy_key') ||
+                    config.key ||
+                    ''
+                ).trim();
             }
         } catch (e) {}
 
@@ -57,6 +78,19 @@
         }
 
         return url + (query.length ? '?' + query.join('&') : '');
+    }
+
+    function relayMediaUrl(rawUrl, refererUrl) {
+        if (!PROXY_CONFIG.proxy || !rawUrl) return rawUrl;
+
+        return proxyUrl('/media', {
+            url: rawUrl,
+            ref: refererUrl || ''
+        });
+    }
+
+    function relayHealthUrl() {
+        return proxyUrl('/health', {});
     }
 
     function log() {
@@ -211,7 +245,7 @@
             }, 1);
         }
 
-        // В v0.8 наш proxy при его наличии является основным путём.
+        // В v1.0 relay при его наличии является основным путём.
         // Старый WebView телевизора больше не обязан ходить на fbphdplay.top напрямую.
         if (viaProxy) {
             requestJson(network, viaProxy, ok, function (proxyError) {
@@ -919,6 +953,41 @@
         }).join(', ');
     }
 
+    function prepareStreamsForLampa(streams, player) {
+        if (!Array.isArray(streams)) return [];
+
+        var ref = player && player.iframeUrl ? player.iframeUrl : '';
+
+        return streams.map(function (stream) {
+            var copy = {};
+
+            Object.keys(stream || {}).forEach(function (key) {
+                copy[key] = stream[key];
+            });
+
+            if (copy.url && PROXY_CONFIG.proxy) {
+                copy.original_url = copy.url;
+                copy.url = relayMediaUrl(copy.url, ref);
+            }
+
+            if (Array.isArray(copy.subtitles) && PROXY_CONFIG.proxy) {
+                copy.subtitles = copy.subtitles.map(function (sub) {
+                    var item = {};
+
+                    Object.keys(sub || {}).forEach(function (key) {
+                        item[key] = sub[key];
+                    });
+
+                    if (item.url) item.url = relayMediaUrl(item.url, ref);
+
+                    return item;
+                });
+            }
+
+            return copy;
+        });
+    }
+
     function loadNativeCatalog(source, network, ok, fail) {
         var player = findCollapsPlayer(source);
 
@@ -926,8 +995,8 @@
             fail(new Error(
                 'Collaps не получен. Плееры: ' + playerTypes(source) +
                 (PROXY_CONFIG.proxy
-                    ? '. Proxy: ' + PROXY_CONFIG.proxy
-                    : '. Proxy v0.8 не настроен: добавь &proxy=https://ТВОЙ_СЕРВЕР к URL плагина.')
+                    ? '. Relay: ' + PROXY_CONFIG.proxy
+                    : '. Relay не настроен: добавь &relay=https://ТВОЙ_WORKER к URL плагина.')
             ));
             return;
         }
@@ -936,6 +1005,7 @@
             try {
                 var config = parseMakePlayer(html);
                 var streams = collectNativeStreams(config);
+                streams = prepareStreamsForLampa(streams, player);
 
                 if (!streams.length) {
                     fail(new Error('Collaps не вернул HLS-потоки'));
@@ -1391,7 +1461,8 @@
 
                     status.text(
                         'MnogoTV • Collaps • Lampa.Player • ' +
-                        native.streams.length + ' поток(ов)'
+                        native.streams.length + ' поток(ов)' +
+                        (PROXY_CONFIG.proxy ? ' • relay' : ' • direct')
                     );
 
                     log('Native source resolved', {
@@ -1935,8 +2006,8 @@
                 }, 350);
             });
 
-            notify('MnogoTV v' + VERSION + ' загружен' + (PROXY_CONFIG.proxy ? ' • proxy OK' : ''));
-            log('Plugin started', { proxy: PROXY_CONFIG.proxy || 'не настроен' });
+            notify('MnogoTV v' + VERSION + ' загружен' + (PROXY_CONFIG.proxy ? ' • relay' : ' • direct'));
+            log('Plugin started', { relay: PROXY_CONFIG.proxy || 'не настроен' });
         } catch (err) {
             started = false;
             log('startPlugin error', err);
