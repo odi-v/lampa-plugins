@@ -1,9 +1,9 @@
 (function () {
     'use strict';
 
-    var VERSION = '1.0.0';
-    var PLUGIN_ID = 'mnogotv_ui_v100';
-    var COMPONENT = 'mnogotv_ui_v100';
+    var VERSION = '1.0.1';
+    var PLUGIN_ID = 'mnogotv_ui_v101';
+    var COMPONENT = 'mnogotv_ui_v101';
     var PLAYER_COMPONENT = 'mnogotv_player_v06'; // legacy, больше не используется
 
     if (window[PLUGIN_ID]) return;
@@ -200,6 +200,32 @@
         } catch (e) {}
 
         bad(new Error('fetch unavailable'));
+    }
+
+
+    function requestMeta(network, serial, id, ok, fail) {
+        var type = serial ? 'tv' : 'movie';
+        var directUrl = API_META + type + '/' + encodeURIComponent(id) +
+            '?language=ru-RU&append_to_response=external_ids';
+        var viaProxy = proxyUrl('/meta', { type: type, id: id });
+
+        function direct(previousError) {
+            requestJson(network, directUrl, ok, function (directError) {
+                fail(directError || previousError || new Error('Metadata API недоступен'));
+            }, 1);
+        }
+
+        // v1.0.1: metadata тоже идёт через relay.
+        // Это убирает зависимость старого TV WebView от CORS cdn.mnogotv.com.
+        if (viaProxy) {
+            requestJson(network, viaProxy, ok, function (proxyError) {
+                log('MnogoTV relay /meta failed, пробуем direct:', proxyError);
+                direct(proxyError);
+            }, 1);
+        }
+        else {
+            direct();
+        }
     }
 
 
@@ -419,8 +445,6 @@
             return;
         }
 
-        var type = serial ? 'tv/' : 'movie/';
-        var metaUrl = API_META + type + id + '?language=ru-RU&append_to_response=external_ids';
 
         function fallbackPlayer(meta, imdb, originalError) {
             // Это тот же fallback, который использует сам mnogotv.com.
@@ -488,7 +512,7 @@
             }, 1);
         }
 
-        requestJson(network, metaUrl, function (meta) {
+        requestMeta(network, serial, id, function (meta) {
             var imdb = meta && meta.external_ids && meta.external_ids.imdb_id;
 
             if (!imdb && movie && movie.imdb_id) imdb = movie.imdb_id;
@@ -540,7 +564,7 @@
                 fallbackPlayer(meta, imdb, playersError);
             }, 1);
         }, function (metaError) {
-            // Если metadata endpoint не открылся в WebView,
+            // Если metadata не открылся ни через relay, ни напрямую,
             // не блокируем пользователя — открываем официальный watch-tv.
             fallbackPlayer({}, movie && movie.imdb_id || '', metaError);
         }, 1);
