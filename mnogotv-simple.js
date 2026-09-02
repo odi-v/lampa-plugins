@@ -11,8 +11,8 @@
      * чтобы поток ушёл во внешний плеер устройства.
      */
 
-    var VERSION = '2.0.0';
-    var ID = 'mnogotv_simple_v200';
+    var VERSION = '2.0.1';
+    var ID = 'mnogotv_simple_v201';
     var COMPONENT = 'mnogotv_simple';
     var PLAYERS_API = 'https://fbphdplay.top/api/players?imdb=';
     var COLLAPS_FALLBACK = 'https://api.ortified.ws/embed/imdb/';
@@ -378,8 +378,11 @@
         }];
 
         players.forEach(function (p) {
+            var name = sourceName(p);
+            var type = String(p.type || '').toLowerCase();
+
             items.push({
-                title: sourceName(p),
+                title: type.indexOf('collaps') >= 0 ? name : name + ' • экспериментально',
                 player: p
             });
         });
@@ -656,26 +659,42 @@
         return url + (url.indexOf('?') >= 0 ? '&vp' : '?vp');
     }
 
-    function resolveCollaps(player, season, episode, ok, fail) {
-        var iframe = normalizeUrl(player.iframeUrl);
-        if (!iframe) {
-            fail(new Error('У Collaps нет iframe URL'));
-            return;
-        }
+    function resolveCollaps(player, imdb, season, episode, ok, fail) {
+        var hosts = [
+            'https://api.ortified.ws/embed/imdb/' + encodeURIComponent(imdb),
+            'https://api.kinogram.best/embed/imdb/' + encodeURIComponent(imdb)
+        ];
 
-        request(iframe, 'text', iframeHeaders(iframe), function (html) {
-            var data = parseMakePlayer(html);
+        var index = 0;
+        var lastError = null;
 
-            if (!data) {
-                fail(new Error('Collaps: makePlayer не найден'));
-                return;
+        function parseCollaps(html, pageUrl) {
+            html = String(html || '').replace(/\n/g, '');
+
+            // Актуальный online_mod разбирает именно makePlayer({...});
+            var match = html.match(/makePlayer\(({.*?})\);/);
+            var data = null;
+
+            if (match && match[1]) {
+                try {
+                    data = (0, eval)('"use strict"; (' + match[1] + ');');
+                } catch (e) {}
             }
 
-            var stream = null;
+            // Оставляем более терпимый parser как fallback.
+            if (!data) data = parseMakePlayer(html);
+
+            if (!data) {
+                throw new Error('makePlayer не найден');
+            }
+
+            var stream = '';
             var subtitles = [];
             var tracks = [];
 
-            if (season !== null && episode !== null && data.playlist && Array.isArray(data.playlist.seasons)) {
+            if (season !== null && episode !== null &&
+                data.playlist && Array.isArray(data.playlist.seasons)) {
+
                 var seasonNode = null;
 
                 data.playlist.seasons.some(function (s) {
@@ -687,8 +706,7 @@
                 });
 
                 if (!seasonNode) {
-                    fail(new Error('Collaps: сезон ' + season + ' не найден'));
-                    return;
+                    throw new Error('сезон ' + season + ' не найден');
                 }
 
                 var episodeNode = null;
@@ -702,51 +720,103 @@
                 });
 
                 if (!episodeNode) {
-                    fail(new Error('Collaps: серия ' + episode + ' не найдена'));
-                    return;
+                    throw new Error('серия ' + episode + ' не найдена');
                 }
 
                 stream = episodeNode.hls || '';
-                subtitles = normalizeSubtitles(episodeNode.cc);
+
+                if (episodeNode.cc) {
+                    subtitles = normalizeSubtitles(episodeNode.cc);
+                }
 
                 if (episodeNode.audio && Array.isArray(episodeNode.audio.names)) {
-                    tracks = episodeNode.audio.names.filter(function (name) {
-                        return name && name !== 'delete';
-                    }).map(function (name) {
-                        return { language: name };
-                    });
+                    tracks = episodeNode.audio.names
+                        .filter(function (name) {
+                            return name && name !== 'delete';
+                        })
+                        .map(function (name) {
+                            return { language: name };
+                        });
                 }
             }
             else if (data.source) {
                 stream = data.source.hls || '';
-                subtitles = normalizeSubtitles(data.source.cc);
+
+                if (data.source.cc) {
+                    subtitles = normalizeSubtitles(data.source.cc);
+                }
 
                 if (data.source.audio && Array.isArray(data.source.audio.names)) {
-                    tracks = data.source.audio.names.filter(function (name) {
-                        return name && name !== 'delete';
-                    }).map(function (name) {
-                        return { language: name };
-                    });
+                    tracks = data.source.audio.names
+                        .filter(function (name) {
+                            return name && name !== 'delete';
+                        })
+                        .map(function (name) {
+                            return { language: name };
+                        });
                 }
             }
 
-            stream = withVp(stream);
+            stream = normalizeUrl(stream);
 
-            if (!stream) {
-                fail(new Error('Collaps: HLS не найден'));
-                return;
+            if (stream) {
+                // online_mod добавляет &vp к Collaps HLS.
+                if (!/[?&]vp(?:[=&]|$)/i.test(stream)) {
+                    stream += stream.indexOf('?') >= 0 ? '&vp' : '?vp';
+                }
             }
 
-            ok({
+            if (!stream) {
+                throw new Error('HLS не найден');
+            }
+
+            var origin = '';
+            try { origin = new URL(pageUrl).origin; } catch (e) {}
+
+            return {
                 url: stream,
                 subtitles: subtitles,
                 tracks: tracks,
-                headers: iframeHeaders(iframe),
-                provider: sourceName(player)
-            });
-        }, function (e) {
-            fail(new Error('Collaps: ' + errorText(e)));
-        });
+                headers: {
+                    'User-Agent': USER_AGENT,
+                    'Origin': origin || 'https://api.ortified.ws',
+                    'Referer': (origin || 'https://api.ortified.ws') + '/'
+                },
+                provider: 'Collaps'
+            };
+        }
+
+        function next() {
+            if (index >= hosts.length) {
+                fail(new Error(
+                    'Collaps: ' +
+                    (lastError ? errorText(lastError) : 'источник недоступен')
+                ));
+                return;
+            }
+
+            var url = hosts[index++];
+
+            request(
+                url,
+                'text',
+                iframeHeaders(url),
+                function (html) {
+                    try {
+                        ok(parseCollaps(html, url));
+                    } catch (e) {
+                        lastError = e;
+                        next();
+                    }
+                },
+                function (e) {
+                    lastError = e;
+                    next();
+                }
+            );
+        }
+
+        next();
     }
 
     function decodeEscapedUrl(value) {
@@ -893,7 +963,7 @@
         });
     }
 
-    function resolvePlayer(player, season, episode, ok, fail) {
+    function resolvePlayer(player, imdb, season, episode, ok, fail) {
         var type = String(player && player.type || '').toLowerCase();
         var iframe = String(player && player.iframeUrl || '').toLowerCase();
 
@@ -901,26 +971,34 @@
             iframe.indexOf('ortified.ws') >= 0 ||
             iframe.indexOf('kinogram.best') >= 0) {
 
-            resolveCollaps(player, season, episode, ok, fail);
+            resolveCollaps(player, imdb, season, episode, ok, fail);
         }
         else {
             resolveGeneric(player, season, episode, ok, fail);
         }
     }
 
-    function resolveAuto(players, season, episode, ok, fail) {
+    function resolveAuto(players, imdb, season, episode, ok, fail) {
+        var ordered = players.slice().sort(function (a, b) {
+            var aa = String(a.type || '').toLowerCase().indexOf('collaps') >= 0 ? 0 : 1;
+            var bb = String(b.type || '').toLowerCase().indexOf('collaps') >= 0 ? 0 : 1;
+            return aa - bb;
+        });
+
         var index = 0;
         var errors = [];
 
         function next() {
-            if (index >= players.length) {
-                fail(new Error(errors.length ? errors.join(' | ') : 'Рабочий источник не найден'));
+            if (index >= ordered.length) {
+                // На телевизоре не выводим гигантскую строку из всех ошибок.
+                var shortErrors = errors.slice(0, 2).join(' | ');
+                fail(new Error(shortErrors || 'Рабочий источник не найден'));
                 return;
             }
 
-            var p = players[index++];
+            var p = ordered[index++];
 
-            resolvePlayer(p, season, episode, ok, function (e) {
+            resolvePlayer(p, imdb, season, episode, ok, function (e) {
                 errors.push(sourceName(p) + ': ' + errorText(e));
                 next();
             });
@@ -1006,8 +1084,8 @@
             notify('MnogoTV: ' + errorText(e));
         };
 
-        if (player) resolvePlayer(player, season, episode, done, bad);
-        else resolveAuto(players, season, episode, done, bad);
+        if (player) resolvePlayer(player, imdb, season, episode, done, bad);
+        else resolveAuto(players, imdb, season, episode, done, bad);
     }
 
     function openMnogo(movie) {
