@@ -11,12 +11,19 @@
      * чтобы поток ушёл во внешний плеер устройства.
      */
 
-    var VERSION = '2.0.1';
-    var ID = 'mnogotv_simple_v201';
+    var VERSION = '2.0.2';
+    var ID = 'mnogotv_simple_v202';
     var COMPONENT = 'mnogotv_simple';
     var PLAYERS_API = 'https://fbphdplay.top/api/players?imdb=';
     var COLLAPS_FALLBACK = 'https://api.ortified.ws/embed/imdb/';
     var USER_AGENT = 'Mozilla/5.0 (Linux; Android 10; SmartTV) AppleWebKit/537.36 Chrome/120 Safari/537.36';
+
+    // Контроллер, из которого пользователь открыл MnogoTV.
+    // Нужен для надёжного возврата на карточку после Lampa.Select.
+    var FLOW = {
+        controller: '',
+        active: false
+    };
 
     if (window[ID]) return;
     window[ID] = true;
@@ -336,30 +343,104 @@
         });
     }
 
-    function selectBox(title, items, onSelect, onBack) {
-        var previous = '';
-
+    function currentControllerName() {
         try {
-            previous = Lampa.Controller.enabled().name;
+            var enabled = Lampa.Controller.enabled();
+            return enabled && enabled.name ? String(enabled.name) : '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function beginFlow() {
+        var name = currentControllerName();
+
+        // openMnogo вызывается из карточки, до открытия Select.
+        // Не сохраняем случайный controller самого Select.
+        if (name && name !== 'select') FLOW.controller = name;
+
+        FLOW.active = true;
+
+        log('flow begin', {
+            controller: FLOW.controller || 'unknown'
+        });
+    }
+
+    function closeSelect() {
+        try {
+            if (Lampa.Select && typeof Lampa.Select.close === 'function') {
+                Lampa.Select.close();
+            }
         } catch (e) {}
+    }
+
+    function exitFlow() {
+        closeSelect();
+
+        var target = FLOW.controller;
+        FLOW.active = false;
+
+        setTimeout(function () {
+            try {
+                if (target && target !== 'select') {
+                    Lampa.Controller.toggle(target);
+                    return;
+                }
+            } catch (e) {}
+
+            // Запасной возврат: активная Activity сама знает свой controller.
+            try {
+                var active = Lampa.Activity && Lampa.Activity.active
+                    ? Lampa.Activity.active()
+                    : null;
+
+                if (active && active.controller) {
+                    Lampa.Controller.toggle(active.controller);
+                }
+            } catch (e2) {}
+        }, 40);
+    }
+
+    function selectBox(title, items, onSelect, onBack) {
+        var list = (items || []).slice();
+
+        // Явная кнопка нужна для приставок/пультов, где системный Back
+        // WebView иногда перехватывает или не передаёт в Lampa.Select.
+        list.push({
+            title: '← Назад',
+            mnogotv_back: true
+        });
+
+        function backAction() {
+            closeSelect();
+
+            setTimeout(function () {
+                if (typeof onBack === 'function') onBack();
+                else exitFlow();
+            }, 35);
+        }
 
         Lampa.Select.show({
             title: title,
-            items: items,
-            onSelect: function (item) {
-                try { Lampa.Select.close(); } catch (e) {}
+            items: list,
 
-                // Даём Lampa закончить закрытие предыдущего Select перед
-                // открытием следующего (источник -> сезон -> серия).
+            onSelect: function (item) {
+                if (item && item.mnogotv_back) {
+                    backAction();
+                    return;
+                }
+
+                closeSelect();
+
+                // Не открываем следующий Select в тот же event-loop:
+                // некоторые Android WebView после этого теряют controller/back.
                 setTimeout(function () {
                     onSelect(item);
-                }, 30);
+                }, 45);
             },
+
             onBack: function () {
-                try {
-                    if (previous) Lampa.Controller.toggle(previous);
-                } catch (e) {}
-                if (onBack) onBack();
+                backAction();
             }
         });
     }
@@ -390,6 +471,8 @@
         selectBox('MnogoTV — источник', items, function (selected) {
             var player = selected.auto ? null : selected.player;
             chooseTranslation(movie, imdb, ordered, player);
+        }, function () {
+            exitFlow();
         });
     }
 
@@ -429,6 +512,8 @@
             };
 
             chooseMedia(movie, imdb, allPlayers, copy);
+        }, function () {
+            chooseSource(movie, imdb, allPlayers);
         });
     }
 
@@ -468,10 +553,16 @@
                             selectedEpisode.episode,
                             selectedEpisode.meta
                         );
+                    }, function () {
+                        // Назад из серий -> снова выбор сезона.
+                        chooseMedia(movie, imdb, allPlayers, player);
                     });
                 }, function (e) {
                     notify('MnogoTV: серии не получены — ' + errorText(e));
                 });
+            }, function () {
+                // Назад из сезонов -> источники.
+                chooseSource(movie, imdb, allPlayers);
             });
         }, function (e) {
             notify('MnogoTV: сезоны не получены — ' + errorText(e));
@@ -1094,6 +1185,7 @@
             return;
         }
 
+        beginFlow();
         notify('MnogoTV: ищу источники…');
 
         getImdb(movie, function (imdb) {
