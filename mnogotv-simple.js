@@ -11,9 +11,10 @@
      * чтобы поток ушёл во внешний плеер устройства.
      */
 
-    var VERSION = '2.0.2';
-    var ID = 'mnogotv_simple_v202';
+    var VERSION = '2.1.0';
+    var ID = 'mnogotv_simple_v210';
     var COMPONENT = 'mnogotv_simple';
+    var EPISODES_COMPONENT = 'mnogotv_simple_episodes_v210';
     var PLAYERS_API = 'https://fbphdplay.top/api/players?imdb=';
     var COLLAPS_FALLBACK = 'https://api.ortified.ws/embed/imdb/';
     var USER_AGENT = 'Mozilla/5.0 (Linux; Android 10; SmartTV) AppleWebKit/537.36 Chrome/120 Safari/537.36';
@@ -355,8 +356,6 @@
     function beginFlow() {
         var name = currentControllerName();
 
-        // openMnogo вызывается из карточки, до открытия Select.
-        // Не сохраняем случайный controller самого Select.
         if (name && name !== 'select') FLOW.controller = name;
 
         FLOW.active = true;
@@ -366,81 +365,67 @@
         });
     }
 
-    function closeSelect() {
-        try {
-            if (Lampa.Select && typeof Lampa.Select.close === 'function') {
-                Lampa.Select.close();
-            }
-        } catch (e) {}
-    }
-
     function exitFlow() {
-        closeSelect();
-
         var target = FLOW.controller;
         FLOW.active = false;
 
-        setTimeout(function () {
-            try {
-                if (target && target !== 'select') {
-                    Lampa.Controller.toggle(target);
-                    return;
-                }
-            } catch (e) {}
+        /*
+         * В рабочих Lampa-плагинах возврат из Select делается через
+         * Controller.toggle(previous), без ручного Select.close().
+         * Это особенно важно на Android TV / IPTV приставках.
+         */
+        try {
+            if (target && target !== 'select') {
+                Lampa.Controller.toggle(target);
+                return;
+            }
+        } catch (e) {}
 
-            // Запасной возврат: активная Activity сама знает свой controller.
-            try {
-                var active = Lampa.Activity && Lampa.Activity.active
-                    ? Lampa.Activity.active()
-                    : null;
+        try {
+            var active = Lampa.Activity && Lampa.Activity.active
+                ? Lampa.Activity.active()
+                : null;
 
-                if (active && active.controller) {
-                    Lampa.Controller.toggle(active.controller);
-                }
-            } catch (e2) {}
-        }, 40);
+            if (active && active.controller) {
+                Lampa.Controller.toggle(active.controller);
+            }
+        } catch (e2) {}
     }
 
     function selectBox(title, items, onSelect, onBack) {
         var list = (items || []).slice();
 
-        // Явная кнопка нужна для приставок/пультов, где системный Back
-        // WebView иногда перехватывает или не передаёт в Lampa.Select.
         list.push({
             title: '← Назад',
             mnogotv_back: true
         });
 
-        function backAction() {
-            closeSelect();
-
-            setTimeout(function () {
-                if (typeof onBack === 'function') onBack();
-                else exitFlow();
-            }, 35);
+        function goBack() {
+            if (typeof onBack === 'function') onBack();
+            else exitFlow();
         }
 
+        /*
+         * ВАЖНО:
+         * Не вызываем Lampa.Select.close() из onSelect.
+         * Следующий Lampa.Select.show() сам заменяет текущий Select.
+         * Это убирает гонку controller/close на Android-приставках.
+         */
         Lampa.Select.show({
             title: title,
             items: list,
 
             onSelect: function (item) {
                 if (item && item.mnogotv_back) {
-                    backAction();
+                    goBack();
                     return;
                 }
 
-                closeSelect();
-
-                // Не открываем следующий Select в тот же event-loop:
-                // некоторые Android WebView после этого теряют controller/back.
-                setTimeout(function () {
-                    onSelect(item);
-                }, 45);
+                onSelect(item);
             },
 
             onBack: function () {
-                backAction();
+                goBack();
             }
         });
     }
@@ -454,8 +439,7 @@
 
         var items = [{
             title: 'Авто — первый рабочий',
-            auto: true,
-            selected: true
+            auto: true
         }];
 
         players.forEach(function (p) {
@@ -464,7 +448,8 @@
 
             items.push({
                 title: type.indexOf('collaps') >= 0 ? name : name + ' • экспериментально',
-                player: p
+                player: p,
+                selected: type.indexOf('collaps') >= 0
             });
         });
 
@@ -533,35 +518,14 @@
             });
 
             selectBox('MnogoTV — сезон', items, function (selected) {
-                getEpisodes(movie, selected.season, function (episodes) {
-                    var epItems = episodes.map(function (ep, index) {
-                        var n = parseInt(ep.episode_number || (index + 1), 10);
-                        return {
-                            title: ('0' + n).slice(-2) + '. ' + (ep.name || ('Серия ' + n)),
-                            episode: n,
-                            meta: ep
-                        };
-                    });
-
-                    selectBox('MnogoTV — серия', epItems, function (selectedEpisode) {
-                        resolveAndPlay(
-                            movie,
-                            imdb,
-                            allPlayers,
-                            player,
-                            selected.season,
-                            selectedEpisode.episode,
-                            selectedEpisode.meta
-                        );
-                    }, function () {
-                        // Назад из серий -> снова выбор сезона.
-                        chooseMedia(movie, imdb, allPlayers, player);
-                    });
-                }, function (e) {
-                    notify('MnogoTV: серии не получены — ' + errorText(e));
-                });
+                openEpisodesActivity(
+                    movie,
+                    imdb,
+                    allPlayers,
+                    player,
+                    selected.season
+                );
             }, function () {
-                // Назад из сезонов -> источники.
                 chooseSource(movie, imdb, allPlayers);
             });
         }, function (e) {
@@ -1200,6 +1164,501 @@
         });
     }
 
+
+    function episodeImage(ep) {
+        try {
+            if (ep && ep.still_path && Lampa.TMDB && Lampa.TMDB.image) {
+                return Lampa.TMDB.image('t/p/w300' + ep.still_path);
+            }
+        } catch (e) {}
+
+        return '';
+    }
+
+    function episodeDate(raw) {
+        if (!raw) return '';
+
+        try {
+            var parts = String(raw).split('-');
+            if (parts.length === 3) {
+                var months = [
+                    'Января','Февраля','Марта','Апреля','Мая','Июня',
+                    'Июля','Августа','Сентября','Октября','Ноября','Декабря'
+                ];
+
+                var month = parseInt(parts[1], 10) - 1;
+                return parseInt(parts[2], 10) + ' ' +
+                    (months[month] || parts[1]) + ' ' + parts[0];
+            }
+        } catch (e) {}
+
+        return String(raw);
+    }
+
+    function episodeRuntime(minutes) {
+        minutes = parseInt(minutes || 0, 10);
+        if (!minutes) return '';
+
+        var h = Math.floor(minutes / 60);
+        var m = minutes % 60;
+
+        if (h) return h + ' ч ' + (m ? m + ' мин' : '');
+        return m + ' мин';
+    }
+
+    function addEpisodesCss() {
+        if (document.getElementById('mnogotv-simple-episodes-v210-style')) return;
+
+        var css = `
+        .mnogotv-simple-episodes{
+            width:100%;
+            box-sizing:border-box;
+            padding:.4em 1.3em 2em;
+        }
+
+        .mnogotv-simple-episodes__header{
+            display:flex;
+            align-items:center;
+            gap:.8em;
+            padding:.7em 0 1em;
+        }
+
+        .mnogotv-simple-episodes__season{
+            padding:.65em 1.1em;
+            border-radius:.45em;
+            background:rgba(255,255,255,.12);
+            font-size:1.05em;
+        }
+
+        .mnogotv-simple-episodes__season.focus{
+            background:rgba(255,255,255,.22);
+            box-shadow:0 0 0 .16em #fff;
+        }
+
+        .mnogotv-simple-episodes__status{
+            opacity:.7;
+            font-size:.9em;
+        }
+
+        .mnogotv-simple-episodes__scroll{
+            padding-bottom:2em;
+        }
+
+        .mnogotv-simple-episodes__item{
+            position:relative;
+            display:flex;
+            align-items:center;
+            gap:1.5em;
+            width:100%;
+            min-height:9.2em;
+            box-sizing:border-box;
+            padding:1em .5em;
+            border-top:.13em solid rgba(255,255,255,.65);
+        }
+
+        .mnogotv-simple-episodes__item:last-child{
+            border-bottom:.13em solid rgba(255,255,255,.65);
+        }
+
+        .mnogotv-simple-episodes__item.focus{
+            background:rgba(255,255,255,.07);
+        }
+
+        .mnogotv-simple-episodes__thumb{
+            position:relative;
+            width:18em;
+            height:10.1em;
+            flex:0 0 18em;
+            border-radius:.45em;
+            overflow:hidden;
+            background:rgba(255,255,255,.08);
+        }
+
+        .mnogotv-simple-episodes__thumb img{
+            width:100%;
+            height:100%;
+            object-fit:cover;
+            display:block;
+        }
+
+        .mnogotv-simple-episodes__num{
+            position:absolute;
+            left:.55em;
+            bottom:.35em;
+            font-size:2.2em;
+            font-weight:700;
+            line-height:1;
+            text-shadow:0 .08em .16em #000;
+        }
+
+        .mnogotv-simple-episodes__body{
+            min-width:0;
+            flex:1;
+        }
+
+        .mnogotv-simple-episodes__title{
+            font-size:1.65em;
+            font-weight:500;
+            line-height:1.15;
+            margin-bottom:.45em;
+            white-space:nowrap;
+            overflow:hidden;
+            text-overflow:ellipsis;
+        }
+
+        .mnogotv-simple-episodes__meta{
+            font-size:1.05em;
+            opacity:.88;
+            display:flex;
+            gap:.35em;
+            flex-wrap:wrap;
+        }
+
+        @media(max-width:700px){
+            .mnogotv-simple-episodes{
+                padding:.4em .8em 1.5em;
+            }
+
+            .mnogotv-simple-episodes__item{
+                gap:.9em;
+                min-height:6.4em;
+                padding:.7em .2em;
+            }
+
+            .mnogotv-simple-episodes__thumb{
+                width:10.5em;
+                height:5.9em;
+                flex-basis:10.5em;
+            }
+
+            .mnogotv-simple-episodes__num{
+                font-size:1.5em;
+            }
+
+            .mnogotv-simple-episodes__title{
+                font-size:1.15em;
+                margin-bottom:.3em;
+            }
+
+            .mnogotv-simple-episodes__meta{
+                font-size:.85em;
+            }
+        }`;
+
+        var style = document.createElement('style');
+        style.id = 'mnogotv-simple-episodes-v210-style';
+        style.textContent = css;
+        document.head.appendChild(style);
+    }
+
+    function MnogoEpisodesComponent(object) {
+        var movie = object.movie || {};
+        var imdb = object.imdb || '';
+        var allPlayers = object.allPlayers || [];
+        var player = object.player || null;
+        var season = parseInt(object.season || 1, 10);
+
+        var initialized = false;
+        var last = null;
+
+        var root = $('<div class="mnogotv-simple-episodes"></div>');
+        var header = $('<div class="mnogotv-simple-episodes__header"></div>');
+        var seasonButton = $('<div class="mnogotv-simple-episodes__season selector"></div>');
+        var status = $('<div class="mnogotv-simple-episodes__status"></div>');
+
+        var scroll = new Lampa.Scroll({
+            mask: true,
+            over: true
+        });
+
+        function setSeasonLabel() {
+            seasonButton.text('Сезон ' + season);
+        }
+
+        function makeEpisode(ep) {
+            var number = parseInt(ep.episode_number || 0, 10);
+            var title = ep.name || ('Серия ' + number);
+
+            var item = $(
+                '<div class="mnogotv-simple-episodes__item selector">' +
+                    '<div class="mnogotv-simple-episodes__thumb">' +
+                        '<img>' +
+                        '<div class="mnogotv-simple-episodes__num"></div>' +
+                    '</div>' +
+                    '<div class="mnogotv-simple-episodes__body">' +
+                        '<div class="mnogotv-simple-episodes__title"></div>' +
+                        '<div class="mnogotv-simple-episodes__meta"></div>' +
+                    '</div>' +
+                '</div>'
+            );
+
+            item.find('.mnogotv-simple-episodes__num')
+                .text(('0' + number).slice(-2));
+
+            item.find('.mnogotv-simple-episodes__title')
+                .text(title);
+
+            var meta = [];
+
+            if (ep.vote_average) {
+                meta.push('★ ' + parseFloat(ep.vote_average).toFixed(1));
+            }
+
+            if (ep.air_date) {
+                meta.push(episodeDate(ep.air_date));
+            }
+
+            if (ep.runtime) {
+                meta.push(episodeRuntime(ep.runtime));
+            }
+
+            item.find('.mnogotv-simple-episodes__meta')
+                .text(meta.join('  •  '));
+
+            var image = episodeImage(ep);
+
+            if (image) {
+                item.find('img').attr('src', image);
+            }
+            else {
+                item.find('img').hide();
+            }
+
+            item.on('hover:focus', function (e) {
+                last = e.target;
+                try {
+                    scroll.update($(e.target), true);
+                } catch (err) {}
+            });
+
+            item.on('hover:enter click', function () {
+                resolveAndPlay(
+                    movie,
+                    imdb,
+                    allPlayers,
+                    player,
+                    season,
+                    number,
+                    ep
+                );
+            });
+
+            return item;
+        }
+
+        function renderEpisodes() {
+            scroll.clear();
+            last = seasonButton[0];
+
+            status.text('Загрузка серий…');
+
+            getEpisodes(movie, season, function (episodes) {
+                scroll.clear();
+
+                status.text(
+                    episodes.length +
+                    (episodes.length === 1 ? ' серия' : ' серий')
+                );
+
+                episodes.forEach(function (ep) {
+                    scroll.append(makeEpisode(ep));
+                });
+
+                try {
+                    Lampa.Controller.toggle('mnogotv_simple_episodes_v210');
+                } catch (e) {}
+            }, function (e) {
+                scroll.clear();
+                status.text('Ошибка: ' + errorText(e));
+            });
+        }
+
+        function chooseSeason() {
+            getSeasons(movie, function (seasons) {
+                var items = seasons.map(function (n) {
+                    return {
+                        title: 'Сезон ' + n,
+                        season: n,
+                        selected: Number(n) === Number(season)
+                    };
+                });
+
+                var previous = 'mnogotv_simple_episodes_v210';
+
+                Lampa.Select.show({
+                    title: 'MnogoTV — сезон',
+                    items: items,
+
+                    onSelect: function (selected) {
+                        season = selected.season;
+                        setSeasonLabel();
+
+                        try {
+                            if (Lampa.Select && typeof Lampa.Select.close === 'function') {
+                                Lampa.Select.close();
+                            }
+                        } catch (e) {}
+
+                        setTimeout(function () {
+                            renderEpisodes();
+                            try {
+                                Lampa.Controller.toggle(previous);
+                            } catch (e2) {}
+                        }, 40);
+                    },
+
+                    onBack: function () {
+                        try {
+                            Lampa.Controller.toggle(previous);
+                        } catch (e) {}
+                    }
+                });
+            }, function (e) {
+                notify('MnogoTV: ' + errorText(e));
+            });
+        }
+
+        seasonButton.on('hover:focus', function (e) {
+            last = e.target;
+        });
+
+        seasonButton.on('hover:enter click', chooseSeason);
+
+        this.create = function () {
+            return this.render();
+        };
+
+        this.start = function () {
+            if (Lampa.Activity.active().activity !== this.activity) return;
+
+            if (!initialized) {
+                initialized = true;
+
+                addEpisodesCss();
+                setSeasonLabel();
+
+                header.append(seasonButton);
+                header.append(status);
+
+                root.append(header);
+
+                scroll.render().addClass('mnogotv-simple-episodes__scroll');
+                root.append(scroll.render());
+
+                try {
+                    var bg = movie && Lampa.Utils && Lampa.Utils.cardImgBackgroundBlur
+                        ? Lampa.Utils.cardImgBackgroundBlur(movie)
+                        : '';
+
+                    if (bg) Lampa.Background.immediately(bg);
+                } catch (e) {}
+
+                renderEpisodes();
+            }
+
+            Lampa.Controller.add('mnogotv_simple_episodes_v210', {
+                toggle: function () {
+                    Lampa.Controller.collectionSet(root);
+                    Lampa.Controller.collectionFocus(
+                        last || seasonButton[0],
+                        root
+                    );
+                },
+
+                up: function () {
+                    if (Navigator.canmove('up')) Navigator.move('up');
+                    else Lampa.Controller.toggle('head');
+                },
+
+                down: function () {
+                    Navigator.move('down');
+                },
+
+                left: function () {
+                    Navigator.move('left');
+                },
+
+                right: function () {
+                    Navigator.move('right');
+                },
+
+                back: function () {
+                    Lampa.Activity.backward();
+                }
+            });
+
+            Lampa.Controller.toggle('mnogotv_simple_episodes_v210');
+        };
+
+        this.render = function () {
+            return root;
+        };
+
+        this.pause = function () {};
+
+        this.stop = function () {};
+
+        this.destroy = function () {
+            try {
+                scroll.destroy();
+            } catch (e) {}
+
+            root.remove();
+        };
+    }
+
+    function registerEpisodesComponent() {
+        try {
+            if (!Lampa.Component || typeof Lampa.Component.add !== 'function') {
+                return false;
+            }
+
+            try {
+                Lampa.Component.add(
+                    EPISODES_COMPONENT,
+                    MnogoEpisodesComponent
+                );
+            } catch (e) {
+                // Уже зарегистрирован в текущей сессии.
+            }
+
+            return true;
+        } catch (e2) {
+            return false;
+        }
+    }
+
+    function openEpisodesActivity(movie, imdb, allPlayers, player, season) {
+        if (!registerEpisodesComponent()) {
+            notify('MnogoTV: компонент списка серий недоступен');
+            return;
+        }
+
+        /*
+         * Здесь Select уже больше не нужен. Закрываем его ОДИН раз перед
+         * переходом в отдельную Activity — это не та гонка, что была в 2.0.2.
+         */
+        try {
+            if (Lampa.Select && typeof Lampa.Select.close === 'function') {
+                Lampa.Select.close();
+            }
+        } catch (e) {}
+
+        setTimeout(function () {
+            Lampa.Activity.push({
+                title: titleOf(movie),
+                component: EPISODES_COMPONENT,
+                movie: movie,
+                imdb: imdb,
+                allPlayers: allPlayers,
+                player: player,
+                season: season,
+                page: 1,
+                noinfo: true
+            });
+        }, 60);
+    }
+
     function addButton(e) {
         if (!e || e.type !== 'complite') return;
 
@@ -1289,6 +1748,7 @@
         }
 
         registerManifest();
+        registerEpisodesComponent();
 
         Lampa.Listener.follow('full', function (e) {
             if (e && e.type === 'complite') addButton(e);
