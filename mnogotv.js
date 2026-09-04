@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.18.0';
+    var VERSION = '3.19.0';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -423,16 +423,16 @@
                      * Turbo iframe открывается, но не управляется пультом
                      * и самостоятельно выбирает сезон/эпизод.
                      *
-                     * Collaps требует отдельного proxy/native пути:
-                     * iframe также не подходит, а direct HLS на этой
-                     * приставке ловит manifestLoadError.
+                     * Collaps теперь идёт через media relay:
+                     * Worker подставляет playback headers и переписывает
+                     * вложенные HLS playlist/key/segment URL.
                      */
                     s.experimental =
-                        type === 'turbo' ||
-                        type === 'collaps';
+                        type === 'turbo';
 
                     s.supported =
                         type === 'alloha' ||
+                        type === 'collaps' ||
                         type === 'veoveo' ||
                         type === 'veo' ||
                         type.indexOf('veoveo') >= 0;
@@ -1996,42 +1996,74 @@
                         }
 
                         /*
-                         * Критическое отличие от старых наших версий:
-                         * для ВСТРОЕННОГО Lampa-плеера НЕ передаём
-                         * Origin/Referer/User-Agent и НЕ оборачиваем
-                         * stream в Cloudflare media relay.
+                         * Collaps direct HLS на части Android TV / Lampa
+                         * падает с manifestLoadError: CDN ждёт корректные
+                         * Origin/Referer/User-Agent, а вложенные playlist,
+                         * key и segment URL тоже должны идти с ними.
                          *
-                         * Именно так работает online_mod при
-                         * collaps_lampa_player=true.
+                         * Поэтому сначала проверяем media relay. Если Worker
+                         * вернул валидный #EXTM3U, встроенный и внешний плеер
+                         * получают уже relay URL. Если relay недоступен,
+                         * оставляем direct fallback с headers.
                          */
-                        ok({
-                            provider: 'Collaps',
-                            directUrl: stream,
-                            directHeaders: {},
-                            relayUrl: '',
-                            relayReady: false,
-                            externalDirect: false,
-                            subtitles:
-                                normalizeSubs(
-                                    item.cc ||
-                                    item.subtitles ||
-                                    []
-                                ),
-                            tracks:
-                                normalizeTracks(
-                                    item.audio ||
-                                    {}
-                                ),
-                            quality:
-                                '360p–720p',
-                            resolvedBy:
-                                response.label +
-                                (
-                                    kp
-                                        ? (' • KP ' + kp)
-                                        : ''
-                                )
-                        });
+                        preparePlayableStream(
+                            stream,
+                            response,
+                            function (playable) {
+                                var viaRelay =
+                                    playable &&
+                                    playable.relayReady &&
+                                    playable.relayUrl;
+
+                                ok({
+                                    provider: 'Collaps',
+                                    directUrl:
+                                        viaRelay
+                                            ? playable.relayUrl
+                                            : stream,
+                                    directHeaders:
+                                        viaRelay
+                                            ? {}
+                                            : (
+                                                playable.directHeaders ||
+                                                response.headers ||
+                                                collapsHeadersFor(response.url)
+                                            ),
+                                    relayUrl:
+                                        viaRelay
+                                            ? playable.relayUrl
+                                            : '',
+                                    relayReady:
+                                        Boolean(viaRelay),
+                                    externalDirect: false,
+                                    subtitles:
+                                        normalizeSubs(
+                                            item.cc ||
+                                            item.subtitles ||
+                                            []
+                                        ),
+                                    tracks:
+                                        normalizeTracks(
+                                            item.audio ||
+                                            {}
+                                        ),
+                                    quality:
+                                        '360p–720p',
+                                    resolvedBy:
+                                        response.label +
+                                        (
+                                            kp
+                                                ? (' • KP ' + kp)
+                                                : ''
+                                        ) +
+                                        (
+                                            viaRelay
+                                                ? ' • relay'
+                                                : ' • direct fallback'
+                                        )
+                                });
+                            }
+                        );
                     },
                     fail
                 );
@@ -3358,7 +3390,7 @@
                     type === 'collaps'
                 ) {
                     suffix =
-                        ' • экспериментальный, HLS несовместим';
+                        ' • HLS через relay';
                 }
                 else if (!s.supported) {
                     suffix =
