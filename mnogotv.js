@@ -1,9 +1,9 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.5.0';
-    var PLUGIN_ID = 'mnogotv_v350';
-    var COMPONENT = 'mnogotv_v350_component';
+    var VERSION = '3.6.0';
+    var PLUGIN_ID = 'mnogotv_v360';
+    var COMPONENT = 'mnogotv_v360_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
 
     if (window[PLUGIN_ID]) return;
@@ -267,18 +267,441 @@
             if (!Array.isArray(sources)) sources = [];
 
             var hasCollaps = false;
+
             sources.forEach(function (s) {
                 var type = String(s && s.type || '').toLowerCase();
-                s.supported = type === 'collaps';
+
+                s.supported =
+                    type === 'collaps' ||
+                    type === 'veoveo' ||
+                    type === 'veo' ||
+                    type.indexOf('veoveo') >= 0;
+
+                s.preferred =
+                    type === 'veoveo' ||
+                    type === 'veo' ||
+                    type.indexOf('veoveo') >= 0;
+
                 if (type === 'collaps') hasCollaps = true;
             });
 
             if (!hasCollaps) {
-                sources.unshift({ type: 'Collaps', name: 'Collaps', supported: true, fallback: true, iframeUrl: '' });
+                sources.push({
+                    type: 'Collaps',
+                    name: 'Collaps',
+                    supported: true,
+                    fallback: true,
+                    iframeUrl: ''
+                });
             }
 
             ok(sources);
         }, fail);
+    }
+
+    var VEO_UA =
+        'Mozilla/5.0 (Linux; Android 10; SmartTV) ' +
+        'AppleWebKit/537.36 Chrome/120 Safari/537.36';
+
+    function nativeJson(url, headers, ok, fail) {
+        var network = null;
+
+        try {
+            network = new Lampa.Reguest();
+        } catch (e) {
+            try { network = new Lampa.Request(); } catch (e2) {}
+        }
+
+        if (!network || typeof network.native !== 'function') {
+            fail(new Error('Lampa.Reguest.native недоступен'));
+            return;
+        }
+
+        try {
+            network.clear();
+            network.timeout(12000);
+
+            network.native(
+                url,
+                function (data) {
+                    try {
+                        if (typeof data === 'string') data = JSON.parse(data);
+                        ok(data);
+                    } catch (e) {
+                        fail(new Error('VeoVeo: invalid JSON'));
+                    }
+                },
+                function (a, c) {
+                    var status =
+                        a && a.status !== undefined
+                            ? a.status
+                            : '';
+
+                    fail(new Error(
+                        status
+                            ? ('HTTP ' + status)
+                            : errText(a || c || 'network error')
+                    ));
+                },
+                false,
+                {
+                    dataType: 'json',
+                    headers: headers || {}
+                }
+            );
+        } catch (e3) {
+            fail(e3);
+        }
+    }
+
+    function veoHeaders(url) {
+        var origin = '';
+
+        try {
+            origin = new URL(String(url || '')).origin;
+        } catch (e) {}
+
+        var headers = {
+            'User-Agent': VEO_UA
+        };
+
+        if (origin) {
+            headers.Origin = origin;
+            headers.Referer = origin + '/';
+        }
+
+        return headers;
+    }
+
+    function veoMovieIdFromHtml(html, iframeUrl) {
+        html = String(html || '');
+
+        var m =
+            html.match(/window\.MOVIE_ID\s*=\s*["']?(\d+)/i) ||
+            html.match(/\bMOVIE_ID\s*[:=]\s*["']?(\d+)/i);
+
+        if (m && m[1]) return m[1];
+
+        try {
+            var u = new URL(String(iframeUrl || ''));
+
+            return (
+                u.searchParams.get('movieid') ||
+                u.searchParams.get('content-id') ||
+                u.searchParams.get('content_id') ||
+                ''
+            );
+        } catch (e) {}
+
+        return '';
+    }
+
+    function chooseVeoCatalogItem(catalog, season, episode) {
+        if (!Array.isArray(catalog)) return null;
+
+        if (season === null || episode === null) {
+            for (var i = 0; i < catalog.length; i++) {
+                var item = catalog[i];
+                var s =
+                    item &&
+                    item.season &&
+                    parseInt(item.season.order, 10);
+
+                if (!s) return item;
+            }
+
+            return catalog[0] || null;
+        }
+
+        for (var j = 0; j < catalog.length; j++) {
+            var ep = catalog[j];
+
+            var epSeason =
+                ep &&
+                ep.season &&
+                parseInt(ep.season.order, 10);
+
+            var epNumber =
+                parseInt(
+                    ep && (
+                        ep.order ||
+                        ep.episode ||
+                        ep.episodeNumber
+                    ),
+                    10
+                );
+
+            if (
+                Number(epSeason) === Number(season) &&
+                Number(epNumber) === Number(episode)
+            ) {
+                return ep;
+            }
+        }
+
+        return null;
+    }
+
+    function chooseVeoVariant(item) {
+        if (!item) return null;
+
+        var variants =
+            item.episodeVariants ||
+            item.variants ||
+            [];
+
+        if (!Array.isArray(variants)) variants = [];
+
+        if (!variants.length && item.filepath) {
+            return {
+                filepath: item.filepath,
+                title: item.title || ''
+            };
+        }
+
+        var preferred = null;
+
+        variants.forEach(function (v) {
+            if (!v || !v.filepath) return;
+
+            if (!preferred) preferred = v;
+
+            if (
+                String(v.filepath).toLowerCase()
+                    .indexOf('.m3u8') >= 0
+            ) {
+                preferred = v;
+            }
+        });
+
+        return preferred;
+    }
+
+    function veoResolveJsonFile(file, headers, ok, fail) {
+        nativeJson(
+            file,
+            headers,
+            function (data) {
+                var sources =
+                    data &&
+                    data.sources;
+
+                if (
+                    !Array.isArray(sources) ||
+                    !sources.length
+                ) {
+                    fail(new Error(
+                        'VeoVeo: sources в JSON не найдены'
+                    ));
+                    return;
+                }
+
+                var link =
+                    sources[0] &&
+                    (
+                        sources[0].link ||
+                        sources[0].file ||
+                        sources[0].url
+                    );
+
+                if (!link) {
+                    fail(new Error(
+                        'VeoVeo: ссылка в JSON не найдена'
+                    ));
+                    return;
+                }
+
+                ok(normalizeDirectUrl(link));
+            },
+            fail
+        );
+    }
+
+    function probePlainHls(url, ok) {
+        nativeText(
+            url,
+            {},
+            function (manifest) {
+                ok(
+                    String(manifest || '')
+                        .trim()
+                        .indexOf('#EXTM3U') === 0
+                );
+            },
+            function () {
+                ok(false);
+            }
+        );
+    }
+
+    function resolveVeoVeo(
+        source,
+        season,
+        episode,
+        ok,
+        fail
+    ) {
+        var iframe =
+            normalizeDirectUrl(
+                source && source.iframeUrl
+            );
+
+        if (!iframe) {
+            fail(new Error(
+                'VeoVeo: iframeUrl не получен'
+            ));
+            return;
+        }
+
+        var headers = veoHeaders(iframe);
+
+        nativeText(
+            iframe,
+            headers,
+            function (html) {
+                var movieId =
+                    veoMovieIdFromHtml(
+                        html,
+                        iframe
+                    );
+
+                if (!movieId) {
+                    fail(new Error(
+                        'VeoVeo: MOVIE_ID не найден'
+                    ));
+                    return;
+                }
+
+                var origin = '';
+
+                try {
+                    origin =
+                        new URL(iframe).origin;
+                } catch (e) {}
+
+                if (!origin) {
+                    fail(new Error(
+                        'VeoVeo: host не определён'
+                    ));
+                    return;
+                }
+
+                var catalogUrl =
+                    origin +
+                    '/balancer-api/proxy/' +
+                    'playlists/catalog-api/' +
+                    'episodes?content-id=' +
+                    encodeURIComponent(movieId);
+
+                nativeJson(
+                    catalogUrl,
+                    veoHeaders(catalogUrl),
+                    function (catalog) {
+                        var item =
+                            chooseVeoCatalogItem(
+                                catalog,
+                                season,
+                                episode
+                            );
+
+                        if (!item) {
+                            fail(new Error(
+                                'VeoVeo: серия не найдена'
+                            ));
+                            return;
+                        }
+
+                        var variant =
+                            chooseVeoVariant(item);
+
+                        if (
+                            !variant ||
+                            !variant.filepath
+                        ) {
+                            fail(new Error(
+                                'VeoVeo: filepath не найден'
+                            ));
+                            return;
+                        }
+
+                        var file =
+                            normalizeDirectUrl(
+                                variant.filepath
+                            );
+
+                        function finish(stream) {
+                            stream =
+                                normalizeDirectUrl(
+                                    stream
+                                );
+
+                            if (!stream) {
+                                fail(new Error(
+                                    'VeoVeo: поток пустой'
+                                ));
+                                return;
+                            }
+
+                            /*
+                             * Проверяем, нужен ли потоку
+                             * специальный заголовок.
+                             * Если m3u8 читается без headers,
+                             * его можно безопаснее отдавать
+                             * внешнему Android-плееру.
+                             */
+                            probePlainHls(
+                                stream,
+                                function (plainOk) {
+                                    ok({
+                                        provider: 'VeoVeo',
+                                        directUrl: stream,
+                                        directHeaders:
+                                            plainOk
+                                                ? {}
+                                                : veoHeaders(stream),
+                                        relayUrl: '',
+                                        relayReady: false,
+                                        externalDirect:
+                                            plainOk,
+                                        subtitles: [],
+                                        tracks: [],
+                                        resolvedBy:
+                                            'VeoVeo catalog'
+                                    });
+                                }
+                            );
+                        }
+
+                        if (
+                            file.toLowerCase()
+                                .indexOf('.json') >= 0
+                        ) {
+                            veoResolveJsonFile(
+                                file,
+                                veoHeaders(file),
+                                finish,
+                                fail
+                            );
+                        }
+                        else {
+                            finish(file);
+                        }
+                    },
+                    function (e) {
+                        fail(new Error(
+                            'VeoVeo catalog: ' +
+                            errText(e)
+                        ));
+                    }
+                );
+            },
+            function (e) {
+                fail(new Error(
+                    'VeoVeo iframe: ' +
+                    errText(e)
+                ));
+            }
+        );
     }
 
     var COLLAPS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36';
@@ -607,12 +1030,49 @@
     }
 
     function resolveSource(source, imdb, season, episode, ok, fail) {
-        var type = String(source && source.type || '').toLowerCase();
+        var type =
+            String(
+                source && source.type || ''
+            ).toLowerCase();
+
         if (type === 'collaps') {
-            resolveCollaps(source, imdb, season, episode, ok, fail);
+            resolveCollaps(
+                source,
+                imdb,
+                season,
+                episode,
+                ok,
+                fail
+            );
             return;
         }
-        fail(new Error((source && (source.name || source.type) || 'Источник') + ': адаптер ещё не реализован'));
+
+        if (
+            type === 'veoveo' ||
+            type === 'veo' ||
+            type.indexOf('veoveo') >= 0
+        ) {
+            resolveVeoVeo(
+                source,
+                season,
+                episode,
+                ok,
+                fail
+            );
+            return;
+        }
+
+        fail(new Error(
+            (
+                source &&
+                (
+                    source.name ||
+                    source.type
+                ) ||
+                'Источник'
+            ) +
+            ': адаптер ещё не реализован'
+        ));
     }
 
     function playResolved(movie, season, episode, epMeta, source, resolved, runas) {
@@ -625,15 +1085,28 @@
 
         var actualRunas = runas || '';
         var useExternal = actualRunas === 'android';
+        var externalUrl = '';
 
-        if (useExternal && !resolved.relayReady) {
-            notify('MnogoTV: relay для внешнего плеера недоступен, запускаю Lampa');
-            actualRunas = 'lampa';
-            useExternal = false;
+        if (useExternal) {
+            if (resolved.relayReady) {
+                externalUrl = resolved.relayUrl;
+            }
+            else if (resolved.externalDirect) {
+                externalUrl = resolved.directUrl;
+            }
+            else {
+                notify(
+                    'MnogoTV: поток требует headers, запускаю Lampa'
+                );
+                actualRunas = 'lampa';
+                useExternal = false;
+            }
         }
 
         var first = {
-            url: useExternal ? resolved.relayUrl : resolved.directUrl,
+            url: useExternal
+                ? externalUrl
+                : resolved.directUrl,
             title: title,
             subtitles: resolved.subtitles || [],
             translate: { tracks: resolved.tracks || [] },
@@ -659,41 +1132,41 @@
 
 
     function addCss() {
-        if (document.getElementById('mnogotv-v350-style')) return;
+        if (document.getElementById('mnogotv-v360-style')) return;
         var css = `
-        .mnogotv-v350{width:100%;box-sizing:border-box;padding:.6em 1.4em 2em}
-        .mnogotv-v350__toolbar{display:flex;gap:.9em;align-items:center;flex-wrap:wrap;margin:.2em 0 1em}
-        .mnogotv-v350__pill{min-width:12em;padding:.75em 1em;border-radius:.7em;background:rgba(0,0,0,.18);box-sizing:border-box}
-        .mnogotv-v350__pill-title{display:block;font-size:.84em;font-weight:600;margin-bottom:.12em}
-        .mnogotv-v350__pill-value{display:block;font-size:1em;opacity:.95;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        .mnogotv-v350__pill.focus,.mnogotv-v350__episode.focus{box-shadow:0 0 0 .18em #fff;background:rgba(255,255,255,.08)}
-        .mnogotv-v350__headline{display:flex;align-items:center;gap:.55em;padding:.1em .15em .85em;opacity:.95;font-size:1.05em}
-        .mnogotv-v350__headline .icon-play{width:1.3em;height:1.3em;border-radius:50%;border:.12em solid #fff;display:inline-flex;align-items:center;justify-content:center;font-size:.72em;line-height:1}
-        .mnogotv-v350__status{opacity:.82;margin:.1em 0 .7em;min-height:1.3em}
-        .mnogotv-v350__episode{display:flex;align-items:center;gap:1.15em;width:100%;box-sizing:border-box;padding:.75em .2em .82em;border-top:.13em solid rgba(255,255,255,.72);position:relative}
-        .mnogotv-v350__episode:last-child{border-bottom:.13em solid rgba(255,255,255,.72)}
-        .mnogotv-v350__thumb{position:relative;width:11.6em;height:6.5em;flex:0 0 11.6em;border-radius:.38em;overflow:hidden;background:rgba(255,255,255,.08)}
-        .mnogotv-v350__thumb img{width:100%;height:100%;object-fit:cover;display:block}
-        .mnogotv-v350__num{position:absolute;left:.42em;bottom:.25em;font-size:1.85em;font-weight:700;line-height:1;color:#fff;text-shadow:0 .08em .18em #000}
-        .mnogotv-v350__body{flex:1;min-width:0;padding-right:.2em}
-        .mnogotv-v350__title{font-size:1.55em;line-height:1.15;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        .mnogotv-v350__line{height:.14em;width:100%;background:rgba(255,255,255,.9);margin:.38em 0 .48em;border-radius:1em;opacity:.92}
-        .mnogotv-v350__meta{opacity:.95;font-size:1.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        .mnogotv-v350__empty{padding:1.7em 0;opacity:.8}
+        .mnogotv-v360{width:100%;box-sizing:border-box;padding:.6em 1.4em 2em}
+        .mnogotv-v360__toolbar{display:flex;gap:.9em;align-items:center;flex-wrap:wrap;margin:.2em 0 1em}
+        .mnogotv-v360__pill{min-width:12em;padding:.75em 1em;border-radius:.7em;background:rgba(0,0,0,.18);box-sizing:border-box}
+        .mnogotv-v360__pill-title{display:block;font-size:.84em;font-weight:600;margin-bottom:.12em}
+        .mnogotv-v360__pill-value{display:block;font-size:1em;opacity:.95;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .mnogotv-v360__pill.focus,.mnogotv-v360__episode.focus{box-shadow:0 0 0 .18em #fff;background:rgba(255,255,255,.08)}
+        .mnogotv-v360__headline{display:flex;align-items:center;gap:.55em;padding:.1em .15em .85em;opacity:.95;font-size:1.05em}
+        .mnogotv-v360__headline .icon-play{width:1.3em;height:1.3em;border-radius:50%;border:.12em solid #fff;display:inline-flex;align-items:center;justify-content:center;font-size:.72em;line-height:1}
+        .mnogotv-v360__status{opacity:.82;margin:.1em 0 .7em;min-height:1.3em}
+        .mnogotv-v360__episode{display:flex;align-items:center;gap:1.15em;width:100%;box-sizing:border-box;padding:.75em .2em .82em;border-top:.13em solid rgba(255,255,255,.72);position:relative}
+        .mnogotv-v360__episode:last-child{border-bottom:.13em solid rgba(255,255,255,.72)}
+        .mnogotv-v360__thumb{position:relative;width:11.6em;height:6.5em;flex:0 0 11.6em;border-radius:.38em;overflow:hidden;background:rgba(255,255,255,.08)}
+        .mnogotv-v360__thumb img{width:100%;height:100%;object-fit:cover;display:block}
+        .mnogotv-v360__num{position:absolute;left:.42em;bottom:.25em;font-size:1.85em;font-weight:700;line-height:1;color:#fff;text-shadow:0 .08em .18em #000}
+        .mnogotv-v360__body{flex:1;min-width:0;padding-right:.2em}
+        .mnogotv-v360__title{font-size:1.55em;line-height:1.15;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .mnogotv-v360__line{height:.14em;width:100%;background:rgba(255,255,255,.9);margin:.38em 0 .48em;border-radius:1em;opacity:.92}
+        .mnogotv-v360__meta{opacity:.95;font-size:1.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .mnogotv-v360__empty{padding:1.7em 0;opacity:.8}
         @media(max-width:900px){
-            .mnogotv-v350{padding:.5em .9em 1.6em}
-            .mnogotv-v350__pill{min-width:9.3em;padding:.55em .75em;border-radius:.5em}
-            .mnogotv-v350__pill-title{font-size:.76em}
-            .mnogotv-v350__pill-value{font-size:.92em}
-            .mnogotv-v350__headline{font-size:.9em;padding-bottom:.55em}
-            .mnogotv-v350__episode{gap:.75em;padding:.55em 0 .62em}
-            .mnogotv-v350__thumb{width:8.8em;height:4.95em;flex-basis:8.8em}
-            .mnogotv-v350__num{font-size:1.48em}
-            .mnogotv-v350__title{font-size:1.12em}
-            .mnogotv-v350__meta{font-size:.82em}
+            .mnogotv-v360{padding:.5em .9em 1.6em}
+            .mnogotv-v360__pill{min-width:9.3em;padding:.55em .75em;border-radius:.5em}
+            .mnogotv-v360__pill-title{font-size:.76em}
+            .mnogotv-v360__pill-value{font-size:.92em}
+            .mnogotv-v360__headline{font-size:.9em;padding-bottom:.55em}
+            .mnogotv-v360__episode{gap:.75em;padding:.55em 0 .62em}
+            .mnogotv-v360__thumb{width:8.8em;height:4.95em;flex-basis:8.8em}
+            .mnogotv-v360__num{font-size:1.48em}
+            .mnogotv-v360__title{font-size:1.12em}
+            .mnogotv-v360__meta{font-size:.82em}
         }`;
         var style = document.createElement('style');
-        style.id = 'mnogotv-v350-style';
+        style.id = 'mnogotv-v360-style';
         style.textContent = css;
         document.head.appendChild(style);
     }
@@ -710,12 +1183,12 @@
         var last = null;
         var currentFocus = null;
 
-        var root = $('<div class="mnogotv-v350"></div>');
-        var toolbar = $('<div class="mnogotv-v350__toolbar"></div>');
-        var headline = $('<div class="mnogotv-v350__headline"><span class="icon-play">▶</span><span class="mnogotv-v350__headline-text"></span></div>');
-        var status = $('<div class="mnogotv-v350__status"></div>');
-        var sourceButton = $('<div class="mnogotv-v350__pill selector"><span class="mnogotv-v350__pill-title">Источник</span><span class="mnogotv-v350__pill-value">Загрузка…</span></div>');
-        var seasonButton = $('<div class="mnogotv-v350__pill selector"><span class="mnogotv-v350__pill-title">Фильтр</span><span class="mnogotv-v350__pill-value">Сезон 1</span></div>');
+        var root = $('<div class="mnogotv-v360"></div>');
+        var toolbar = $('<div class="mnogotv-v360__toolbar"></div>');
+        var headline = $('<div class="mnogotv-v360__headline"><span class="icon-play">▶</span><span class="mnogotv-v360__headline-text"></span></div>');
+        var status = $('<div class="mnogotv-v360__status"></div>');
+        var sourceButton = $('<div class="mnogotv-v360__pill selector"><span class="mnogotv-v360__pill-title">Источник</span><span class="mnogotv-v360__pill-value">Загрузка…</span></div>');
+        var seasonButton = $('<div class="mnogotv-v360__pill selector"><span class="mnogotv-v360__pill-title">Фильтр</span><span class="mnogotv-v360__pill-value">Сезон 1</span></div>');
         var scroll = new Lampa.Scroll({ mask: true, over: true });
 
         function updateHeadline(ep) {
@@ -724,24 +1197,50 @@
             if (isSeries(movie)) parts.push('Сезон ' + season);
             if (ep && ep.episode_number) parts.push('Серия ' + ep.episode_number);
             if (ep && ep.name) parts.push(ep.name);
-            headline.find('.mnogotv-v350__headline-text').text(parts.join('  •  '));
+            headline.find('.mnogotv-v360__headline-text').text(parts.join('  •  '));
         }
 
         function setSourceLabel() {
-            sourceButton.find('.mnogotv-v350__pill-value').text(source ? (source.name || source.type || 'Источник') : 'Нет');
+            sourceButton.find('.mnogotv-v360__pill-value').text(source ? (source.name || source.type || 'Источник') : 'Нет');
             updateHeadline(currentFocus || episodes[0] || null);
         }
 
         function setSeasonLabel() {
-            seasonButton.find('.mnogotv-v350__pill-value').text('Сезон: ' + season + ' сезон');
+            seasonButton.find('.mnogotv-v360__pill-value').text('Сезон: ' + season + ' сезон');
             updateHeadline(currentFocus || episodes[0] || null);
         }
 
         function chooseSource() {
             var items = [];
             sources.forEach(function (s) {
+                var type =
+                    String(
+                        s && s.type || ''
+                    ).toLowerCase();
+
+                var suffix = '';
+
+                if (!s.supported) {
+                    suffix =
+                        ' • пока без адаптера';
+                }
+                else if (type === 'collaps') {
+                    suffix =
+                        ' • проблемный на Android';
+                }
+                else if (
+                    type === 'veoveo' ||
+                    type === 'veo' ||
+                    type.indexOf('veoveo') >= 0
+                ) {
+                    suffix =
+                        ' • рекомендуется';
+                }
+
                 items.push({
-                    title: (s.name || s.type || 'Источник') + (s.supported ? '' : ' • пока без адаптера'),
+                    title:
+                        (s.name || s.type || 'Источник') +
+                        suffix,
                     source: s,
                     selected: source === s
                 });
@@ -751,18 +1250,18 @@
             Lampa.Select.show({
                 title: 'MnogoTV — источник',
                 items: items,
-                onBack: function () { Lampa.Controller.toggle('mnogotv_v350'); },
+                onBack: function () { Lampa.Controller.toggle('mnogotv_v360'); },
                 onSelect: function (item) {
-                    if (item.goBack) { Lampa.Controller.toggle('mnogotv_v350'); return; }
+                    if (item.goBack) { Lampa.Controller.toggle('mnogotv_v360'); return; }
                     if (!item.source.supported) {
                         notify('MnogoTV: ' + (item.source.name || item.source.type) + ' пока без отдельного адаптера');
-                        Lampa.Controller.toggle('mnogotv_v350');
+                        Lampa.Controller.toggle('mnogotv_v360');
                         return;
                     }
                     source = item.source;
                     status.text('');
                     setSourceLabel();
-                    Lampa.Controller.toggle('mnogotv_v350');
+                    Lampa.Controller.toggle('mnogotv_v360');
                     renderEpisodes();
                 }
             });
@@ -774,12 +1273,12 @@
             Lampa.Select.show({
                 title: 'MnogoTV — сезон',
                 items: items,
-                onBack: function () { Lampa.Controller.toggle('mnogotv_v350'); },
+                onBack: function () { Lampa.Controller.toggle('mnogotv_v360'); },
                 onSelect: function (item) {
-                    if (item.goBack) { Lampa.Controller.toggle('mnogotv_v350'); return; }
+                    if (item.goBack) { Lampa.Controller.toggle('mnogotv_v360'); return; }
                     season = item.season;
                     setSeasonLabel();
-                    Lampa.Controller.toggle('mnogotv_v350');
+                    Lampa.Controller.toggle('mnogotv_v360');
                     renderEpisodes();
                 }
             });
@@ -797,9 +1296,9 @@
                     { title: 'Android / внешний плеер', runas: 'android' },
                     { title: 'Lampa', runas: 'lampa' }
                 ],
-                onBack: function () { Lampa.Controller.toggle('mnogotv_v350'); },
+                onBack: function () { Lampa.Controller.toggle('mnogotv_v360'); },
                 onSelect: function (item) {
-                    Lampa.Controller.toggle('mnogotv_v350');
+                    Lampa.Controller.toggle('mnogotv_v360');
                     playEpisode(ep, item.runas || '');
                 }
             });
@@ -814,23 +1313,41 @@
 
                 if (!actualRunas) {
                     try {
-                        if (Lampa.Platform && Lampa.Platform.is &&
+                        if (
+                            Lampa.Platform &&
+                            Lampa.Platform.is &&
                             Lampa.Platform.is('android') &&
-                            resolved.relayReady) {
+                            (
+                                resolved.relayReady ||
+                                resolved.externalDirect
+                            )
+                        ) {
                             actualRunas = 'android';
                         }
-                        else if (Lampa.Platform && Lampa.Platform.is &&
-                                 Lampa.Platform.is('android')) {
+                        else if (
+                            Lampa.Platform &&
+                            Lampa.Platform.is &&
+                            Lampa.Platform.is('android')
+                        ) {
                             actualRunas = 'lampa';
                         }
                     } catch (e) {}
                 }
 
                 status.text(
-                    'Collaps • ' +
+                    (resolved.provider || 'Источник') +
+                    ' • ' +
                     (resolved.resolvedBy || 'resolver') +
                     ' • ' +
-                    (resolved.relayReady ? 'relay.m3u8' : 'direct')
+                    (
+                        resolved.relayReady
+                            ? 'relay.m3u8'
+                            : (
+                                resolved.externalDirect
+                                    ? 'direct'
+                                    : 'headers'
+                            )
+                    )
                 );
 
                 playResolved(
@@ -851,14 +1368,14 @@
         function makeEpisode(ep) {
             var num = parseInt(ep.episode_number || 0, 10);
             var title = ep.name || ('Серия ' + num);
-            var item = $('<div class="mnogotv-v350__episode selector"><div class="mnogotv-v350__thumb"><img><div class="mnogotv-v350__num"></div></div><div class="mnogotv-v350__body"><div class="mnogotv-v350__title"></div><div class="mnogotv-v350__line"></div><div class="mnogotv-v350__meta"></div></div></div>');
-            item.find('.mnogotv-v350__num').text(('0' + num).slice(-2));
-            item.find('.mnogotv-v350__title').text(title);
+            var item = $('<div class="mnogotv-v360__episode selector"><div class="mnogotv-v360__thumb"><img><div class="mnogotv-v360__num"></div></div><div class="mnogotv-v360__body"><div class="mnogotv-v360__title"></div><div class="mnogotv-v360__line"></div><div class="mnogotv-v360__meta"></div></div></div>');
+            item.find('.mnogotv-v360__num').text(('0' + num).slice(-2));
+            item.find('.mnogotv-v360__title').text(title);
             var meta = [];
             meta.push('★ ' + (ep.vote_average ? parseFloat(ep.vote_average).toFixed(1) : 'Неизвестно'));
             meta.push(episodeDate(ep.air_date));
             meta.push('Неизвестно');
-            item.find('.mnogotv-v350__meta').text(meta.join('  •  '));
+            item.find('.mnogotv-v360__meta').text(meta.join('  •  '));
             var image = episodeImage(ep);
             if (image) item.find('img').attr('src', image); else item.find('img').hide();
 
@@ -876,8 +1393,8 @@
 
         function renderMovie() {
             scroll.clear();
-            var item = $('<div class="mnogotv-v350__episode selector"><div class="mnogotv-v350__body"><div class="mnogotv-v350__title">Смотреть фильм</div><div class="mnogotv-v350__line"></div><div class="mnogotv-v350__meta"></div></div></div>');
-            item.find('.mnogotv-v350__meta').text(source ? (source.name || source.type || '') : 'MnogoTV');
+            var item = $('<div class="mnogotv-v360__episode selector"><div class="mnogotv-v360__body"><div class="mnogotv-v360__title">Смотреть фильм</div><div class="mnogotv-v360__line"></div><div class="mnogotv-v360__meta"></div></div></div>');
+            item.find('.mnogotv-v360__meta').text(source ? (source.name || source.type || '') : 'MnogoTV');
             item.on('hover:focus', function (e) { last = e.target; currentFocus = null; updateHeadline(null); });
             item.on('hover:enter click', function () { playEpisode({}, ''); });
             item.on('hover:long', function () { playerMenu({}); });
@@ -896,14 +1413,14 @@
                 scroll.clear();
                 status.text('');
                 if (!episodes.length) {
-                    scroll.append($('<div class="mnogotv-v350__empty">Серии не найдены</div>'));
+                    scroll.append($('<div class="mnogotv-v360__empty">Серии не найдены</div>'));
                     updateHeadline(null);
                     return;
                 }
                 currentFocus = episodes[0];
                 updateHeadline(currentFocus);
                 episodes.forEach(function (ep) { scroll.append(makeEpisode(ep)); });
-                try { Lampa.Controller.toggle('mnogotv_v350'); } catch (e) {}
+                try { Lampa.Controller.toggle('mnogotv_v360'); } catch (e) {}
             }, function (e) {
                 status.text('Ошибка: ' + errText(e));
             });
@@ -916,7 +1433,37 @@
                 getSources(imdb, function (list) {
                     sources = list;
                     source = null;
-                    for (var i = 0; i < sources.length; i++) if (sources[i] && sources[i].supported) { source = sources[i]; break; }
+
+                    for (
+                        var i = 0;
+                        i < sources.length;
+                        i++
+                    ) {
+                        if (
+                            sources[i] &&
+                            sources[i].supported &&
+                            sources[i].preferred
+                        ) {
+                            source = sources[i];
+                            break;
+                        }
+                    }
+
+                    if (!source) {
+                        for (
+                            var j = 0;
+                            j < sources.length;
+                            j++
+                        ) {
+                            if (
+                                sources[j] &&
+                                sources[j].supported
+                            ) {
+                                source = sources[j];
+                                break;
+                            }
+                        }
+                    }
                     setSourceLabel();
                     if (!source) { status.text('Нет поддерживаемых источников'); return; }
                     if (isSeries(movie)) {
@@ -961,7 +1508,7 @@
                 } catch (e) {}
                 initData();
             }
-            Lampa.Controller.add('mnogotv_v350', {
+            Lampa.Controller.add('mnogotv_v360', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(root);
                     Lampa.Controller.collectionFocus(last || sourceButton[0], root);
@@ -972,7 +1519,7 @@
                 right: function () { Navigator.move('right'); },
                 back: function () { Lampa.Activity.backward(); }
             });
-            Lampa.Controller.toggle('mnogotv_v350');
+            Lampa.Controller.toggle('mnogotv_v360');
         };
         this.render = function () { return root; };
         this.pause = function () {};
@@ -1001,9 +1548,9 @@
         try {
             var root = e.object && e.object.activity && e.object.activity.render ? e.object.activity.render() : null;
             if (!root || !root.length) return;
-            if (root.find('.mnogotv-v350-button').length) return;
+            if (root.find('.mnogotv-v360-button').length) return;
             var movie = (e.data && e.data.movie) || e.movie || e.object.card || {};
-            var button = $('<div class="full-start__button selector view--online mnogotv-v350-button" data-subtitle="MnogoTV"><svg class="button__icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M10 9l5 3-5 3V9z" fill="currentColor"/></svg><span>MnogoTV</span></div>');
+            var button = $('<div class="full-start__button selector view--online mnogotv-v360-button" data-subtitle="MnogoTV"><svg class="button__icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M10 9l5 3-5 3V9z" fill="currentColor"/></svg><span>MnogoTV</span></div>');
             button.on('hover:enter click', function () { openComponent(movie); });
             var torrent = root.find('.view--torrent').first();
             var online = root.find('.view--online').last();
@@ -1018,7 +1565,7 @@
         if (!window.Lampa || !Lampa.Listener || !Lampa.Player) { setTimeout(start, 500); return; }
         registerComponent();
         Lampa.Listener.follow('full', function (e) { if (e && e.type === 'complite') addButton(e); });
-        notify('MnogoTV v' + VERSION + ' • external HLS');
+        notify('MnogoTV v' + VERSION + ' • VeoVeo');
         log('started', { resolver: CONFIG.resolver });
     }
 
