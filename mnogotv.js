@@ -1,9 +1,9 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.16.0';
-    var PLUGIN_ID = 'mnogotv_v316';
-    var COMPONENT = 'mnogotv_v316_component';
+    var VERSION = '3.17.0';
+    var PLUGIN_ID = 'mnogotv_v317';
+    var COMPONENT = 'mnogotv_v317_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
 
     if (window[PLUGIN_ID]) return;
@@ -267,8 +267,7 @@
 
         return (
             type === 'alloha' ||
-            type === 'turbo' ||
-            type === 'collaps'
+            type === 'turbo'
         );
     }
 
@@ -381,6 +380,16 @@
             sources.forEach(function (s) {
                 var type = String(s && s.type || '').toLowerCase();
 
+                s.lookupBackend =
+                    response &&
+                    response.backend ||
+                    '';
+
+                s.kinopoiskId =
+                    response &&
+                    response.kp ||
+                    '';
+
                 s.supported =
                     type === 'collaps' ||
                     type === 'alloha' ||
@@ -391,8 +400,7 @@
 
                 s.webPlayer =
                     type === 'alloha' ||
-                    type === 'turbo' ||
-                    type === 'collaps';
+                    type === 'turbo';
 
                 s.preferred =
                     type === 'veoveo' ||
@@ -1379,6 +1387,105 @@
     var COLLAPS_HOST = 'https://api.ortified.ws';
     var COLLAPS_REF = COLLAPS_HOST + '/';
 
+    function silentText(url, headers, ok, fail) {
+        var network = null;
+
+        try {
+            network = new Lampa.Reguest();
+        } catch (e) {
+            try {
+                network = new Lampa.Request();
+            } catch (e2) {}
+        }
+
+        if (
+            !network ||
+            typeof network.silent !== 'function'
+        ) {
+            fail(
+                new Error(
+                    'Lampa.Reguest.silent недоступен'
+                )
+            );
+            return;
+        }
+
+        try {
+            network.clear();
+            network.timeout(12000);
+
+            network.silent(
+                url,
+                function (str) {
+                    ok(
+                        String(
+                            str ||
+                            ''
+                        )
+                    );
+                },
+                function (a, c) {
+                    var status =
+                        a &&
+                        a.status !== undefined
+                            ? a.status
+                            : '';
+
+                    var message =
+                        status
+                            ? ('HTTP ' + status)
+                            : errText(
+                                a ||
+                                c ||
+                                'network error'
+                            );
+
+                    fail(
+                        new Error(
+                            message
+                        )
+                    );
+                },
+                false,
+                {
+                    dataType: 'text',
+                    headers: headers || {}
+                }
+            );
+        } catch (e3) {
+            fail(e3);
+        }
+    }
+
+    function collapsEmbedText(attempt, ok, fail) {
+        /*
+         * Актуальный online_mod в режиме встроенного Lampa
+         * использует network.silent и пустые playback headers.
+         *
+         * Если конкретная сборка Lampa не даёт silent для этого
+         * домена, оставляем native fallback только для получения
+         * makePlayer-конфига.
+         */
+        silentText(
+            attempt.url,
+            {},
+            ok,
+            function (silentError) {
+                nativeText(
+                    attempt.url,
+                    attempt.headers || {},
+                    ok,
+                    function (nativeError) {
+                        fail(
+                            nativeError ||
+                            silentError
+                        );
+                    }
+                );
+            }
+        );
+    }
+
     function nativeText(url, headers, ok, fail) {
         var network = null;
         try { network = new Lampa.Reguest(); } catch (e) {
@@ -1547,10 +1654,12 @@
             );
         }
 
-        if (source && source.iframeUrl) {
-            add(source.iframeUrl, 'MnogoTV iframe');
-        }
-
+        /*
+         * Kinobox iframe здесь НЕ используем:
+         * он живёт своей внутренней выбранной серией/сезоном,
+         * что и дало пользователю 9 сезон / 1 серия при выборе
+         * другой серии в MnogoTV.
+         */
         var index = 0;
         var errors = [];
 
@@ -1566,9 +1675,8 @@
 
             var attempt = urls[index++];
 
-            nativeText(
-                attempt.url,
-                attempt.headers,
+            collapsEmbedText(
+                attempt,
                 function (html) {
                     var cfg = parseCollapsHtml(html);
 
@@ -1658,47 +1766,138 @@
     }
 
 
-    function resolveCollaps(source, imdb, season, episode, ok, fail) {
-        getKpId(imdb, function (kp) {
-            tryCollapsUrls(source, imdb, kp, function (response) {
-                var cfg = response.config;
-                var item = pickCollapsItem(cfg, season, episode);
+    function resolveCollaps(
+        source,
+        imdb,
+        season,
+        episode,
+        ok,
+        fail
+    ) {
+        getKpId(
+            imdb,
+            function (kp) {
+                tryCollapsUrls(
+                    source,
+                    imdb,
+                    kp,
+                    function (response) {
+                        var cfg =
+                            response.config;
 
-                if (!item) {
-                    fail(new Error(season !== null ? 'Collaps: серия не найдена' : 'Collaps: поток не найден'));
-                    return;
-                }
+                        var item =
+                            pickCollapsItem(
+                                cfg,
+                                season,
+                                episode
+                            );
 
-                var stream = item.hls || (item.source && item.source.hls) || '';
-                if (!stream && season === null && cfg.source) {
-                    stream = cfg.source.hls || '';
-                    item = cfg.source;
-                }
+                        if (!item) {
+                            fail(
+                                new Error(
+                                    season !== null
+                                        ? (
+                                            'Collaps: серия S' +
+                                            season +
+                                            'E' +
+                                            episode +
+                                            ' не найдена'
+                                        )
+                                        : 'Collaps: поток не найден'
+                                )
+                            );
+                            return;
+                        }
 
-                stream = normalizeDirectUrl(stream);
-                if (!stream) {
-                    fail(new Error('Collaps: HLS не найден'));
-                    return;
-                }
+                        var stream =
+                            item.hls ||
+                            (
+                                item.source &&
+                                item.source.hls
+                            ) ||
+                            '';
 
-                // Точно как online_mod: добавляется буквально &vp.
-                if (stream.indexOf('&vp') === -1) stream += '&vp';
+                        if (
+                            !stream &&
+                            season === null &&
+                            cfg.source
+                        ) {
+                            stream =
+                                cfg.source.hls ||
+                                '';
 
-                preparePlayableStream(stream, response, function (prepared) {
-                    ok({
-                        provider: 'Collaps',
-                        directUrl: prepared.directUrl,
-                        directHeaders: prepared.directHeaders || {},
-                        relayUrl: prepared.relayUrl || '',
-                        relayReady: prepared.relayReady === true,
-                        subtitles: normalizeSubs(item.cc || item.subtitles || []),
-                        tracks: normalizeTracks(item.audio || {}),
-                        resolvedBy: response.label
-                    });
-                });
-            }, fail);
-        });
+                            item =
+                                cfg.source;
+                        }
+
+                        stream =
+                            normalizeDirectUrl(
+                                stream
+                            );
+
+                        if (!stream) {
+                            fail(
+                                new Error(
+                                    'Collaps: HLS не найден'
+                                )
+                            );
+                            return;
+                        }
+
+                        /*
+                         * Точно как online_mod: к HLS добавляется
+                         * буквальный "&vp".
+                         */
+                        if (
+                            stream.indexOf('&vp') === -1
+                        ) {
+                            stream += '&vp';
+                        }
+
+                        /*
+                         * Критическое отличие от старых наших версий:
+                         * для ВСТРОЕННОГО Lampa-плеера НЕ передаём
+                         * Origin/Referer/User-Agent и НЕ оборачиваем
+                         * stream в Cloudflare media relay.
+                         *
+                         * Именно так работает online_mod при
+                         * collaps_lampa_player=true.
+                         */
+                        ok({
+                            provider: 'Collaps',
+                            directUrl: stream,
+                            directHeaders: {},
+                            relayUrl: '',
+                            relayReady: false,
+                            externalDirect: false,
+                            subtitles:
+                                normalizeSubs(
+                                    item.cc ||
+                                    item.subtitles ||
+                                    []
+                                ),
+                            tracks:
+                                normalizeTracks(
+                                    item.audio ||
+                                    {}
+                                ),
+                            quality:
+                                '360p–720p',
+                            resolvedBy:
+                                response.label +
+                                (
+                                    kp
+                                        ? (' • KP ' + kp)
+                                        : ''
+                                )
+                        });
+                    },
+                    fail
+                );
+            }
+        );
     }
+
 
     function resolveSource(source, imdb, season, episode, qualityLabel, ok, fail) {
         var type =
@@ -1829,9 +2028,9 @@
 
 
     function addCss() {
-        if (document.getElementById('mnogotv-v316-style')) return;
+        if (document.getElementById('mnogotv-v317-style')) return;
         var css = `
-        .mnogotv-v316{
+        .mnogotv-v317{
             width:100%;
             height:100%;
             box-sizing:border-box;
@@ -1840,7 +2039,7 @@
             font-size:1.08em;
         }
 
-        .mnogotv-v316__layout{
+        .mnogotv-v317__layout{
             display:grid;
             grid-template-columns:18.8em minmax(0,1fr);
             grid-template-areas:"info content";
@@ -1853,7 +2052,7 @@
             box-sizing:border-box;
         }
 
-        .mnogotv-v316__info{
+        .mnogotv-v317__info{
             grid-area:info;
             min-width:0;
             box-sizing:border-box;
@@ -1864,7 +2063,7 @@
         }
 
 
-        .mnogotv-v316__info-inner{
+        .mnogotv-v317__info-inner{
             min-width:0;
             min-height:0;
             height:100%;
@@ -1873,7 +2072,7 @@
             overflow:hidden;
         }
 
-        .mnogotv-v316__content{
+        .mnogotv-v317__content{
             grid-area:content;
             min-width:0;
             min-height:0;
@@ -1884,14 +2083,14 @@
             max-width:62em;
         }
 
-        .mnogotv-v316__info-top{
+        .mnogotv-v317__info-top{
             display:flex;
             gap:.9em;
             align-items:flex-start;
             margin-bottom:.68em;
         }
 
-        .mnogotv-v316__poster{
+        .mnogotv-v317__poster{
             width:7.15em;
             height:10.72em;
             flex:0 0 7.15em;
@@ -1900,14 +2099,14 @@
             background:rgba(255,255,255,.08);
         }
 
-        .mnogotv-v316__poster img{
+        .mnogotv-v317__poster img{
             display:block;
             width:100%;
             height:100%;
             object-fit:cover;
         }
 
-        .mnogotv-v316__info-mini{
+        .mnogotv-v317__info-mini{
             min-width:0;
             padding-top:.12em;
             font-size:.98em;
@@ -1915,14 +2114,14 @@
             opacity:.98;
         }
 
-        .mnogotv-v316__info-rate{
+        .mnogotv-v317__info-rate{
             font-size:1.6em;
             line-height:1;
             font-weight:760;
             margin:.5em 0 .55em;
         }
 
-        .mnogotv-v316__info-age{
+        .mnogotv-v317__info-age{
             display:inline-block;
             padding:.12em .38em;
             border:.1em solid rgba(255,255,255,.88);
@@ -1931,21 +2130,21 @@
             font-weight:700;
         }
 
-        .mnogotv-v316__info-title{
+        .mnogotv-v317__info-title{
             font-size:1.82em;
             line-height:1.08;
             font-weight:760;
             margin:.3em 0 .34em;
         }
 
-        .mnogotv-v316__info-genres{
+        .mnogotv-v317__info-genres{
             font-size:.94em;
             line-height:1.4;
             opacity:.96;
             margin-bottom:.8em;
         }
 
-        .mnogotv-v316__info-overview{
+        .mnogotv-v317__info-overview{
             display:-webkit-box;
             -webkit-box-orient:vertical;
             -webkit-line-clamp:17;
@@ -1956,13 +2155,13 @@
             padding-right:.2em;
         }
 
-        .mnogotv-v316__info-overview--empty{
+        .mnogotv-v317__info-overview--empty{
             opacity:.62;
             font-style:italic;
         }
 
 
-        .mnogotv-v316__provider-layer{
+        .mnogotv-v317__provider-layer{
             position:fixed;
             inset:0;
             z-index:999999;
@@ -1971,7 +2170,7 @@
             flex-direction:column;
         }
 
-        .mnogotv-v316__provider-frame{
+        .mnogotv-v317__provider-frame{
             width:100%;
             height:100%;
             flex:1 1 auto;
@@ -1979,7 +2178,7 @@
             background:#000;
         }
 
-        .mnogotv-v316__provider-hint{
+        .mnogotv-v317__provider-hint{
             position:absolute;
             left:1.1em;
             top:.75em;
@@ -1992,12 +2191,12 @@
             pointer-events:none;
         }
 
-        .mnogotv-v316__top{
+        .mnogotv-v317__top{
             flex:0 0 auto;
             padding:.08em .12em .32em;
         }
 
-        .mnogotv-v316__toolbar{
+        .mnogotv-v317__toolbar{
             display:flex;
             gap:.58em;
             align-items:center;
@@ -2005,8 +2204,8 @@
             margin:.04em 0 .48em;
         }
 
-        .mnogotv-v316__pill,
-        .mnogotv-v316__title-chip{
+        .mnogotv-v317__pill,
+        .mnogotv-v317__title-chip{
             min-width:7.8em;
             max-width:11.5em;
             padding:.48em .68em;
@@ -2015,11 +2214,11 @@
             box-sizing:border-box;
         }
 
-        .mnogotv-v316__title-chip{
+        .mnogotv-v317__title-chip{
             display:none;
         }
 
-        .mnogotv-v316__pill-title{
+        .mnogotv-v317__pill-title{
             display:block;
             font-size:.76em;
             font-weight:700;
@@ -2027,7 +2226,7 @@
             margin-bottom:.03em;
         }
 
-        .mnogotv-v316__pill-value{
+        .mnogotv-v317__pill-value{
             display:block;
             font-size:.94em;
             white-space:nowrap;
@@ -2035,37 +2234,37 @@
             text-overflow:ellipsis;
         }
 
-        .mnogotv-v316__pill.focus{
+        .mnogotv-v317__pill.focus{
             box-shadow:0 0 0 .13em #fff;
             background:rgba(255,255,255,.13);
         }
 
         /* В референсе отдельной служебной полосы над сериями нет. */
-        .mnogotv-v316__headline{
+        .mnogotv-v317__headline{
             display:none;
         }
 
-        .mnogotv-v316__status{
+        .mnogotv-v317__status{
             opacity:.92;
             margin:.14em 0 .08em .08em;
             font-size:.84em;
         }
 
-        .mnogotv-v316__status:empty{ display:none; }
+        .mnogotv-v317__status:empty{ display:none; }
 
-        .mnogotv-v316__scroll{
+        .mnogotv-v317__scroll{
             flex:1 1 auto;
             min-height:0;
             height:100%;
             overflow:hidden;
         }
 
-        .mnogotv-v316__list{
+        .mnogotv-v317__list{
             padding:.08em .08em .6em 0;
             box-sizing:border-box;
         }
 
-        .mnogotv-v316__episode{
+        .mnogotv-v317__episode{
             display:flex;
             align-items:center;
             gap:.95em;
@@ -2080,13 +2279,13 @@
             background:rgba(0,0,0,.035);
         }
 
-        .mnogotv-v316__episode.focus{
+        .mnogotv-v317__episode.focus{
             border-color:#fff;
             background:rgba(255,255,255,.095);
             box-shadow:0 0 .05em rgba(255,255,255,.65);
         }
 
-        .mnogotv-v316__thumb{
+        .mnogotv-v317__thumb{
             position:relative;
             width:11.25em;
             height:6.32em;
@@ -2096,14 +2295,14 @@
             background:rgba(255,255,255,.08);
         }
 
-        .mnogotv-v316__thumb img{
+        .mnogotv-v317__thumb img{
             width:100%;
             height:100%;
             object-fit:cover;
             display:block;
         }
 
-        .mnogotv-v316__num{
+        .mnogotv-v317__num{
             position:absolute;
             left:.38em;
             bottom:.23em;
@@ -2114,20 +2313,20 @@
             text-shadow:0 .07em .15em #000,0 0 .22em #000;
         }
 
-        .mnogotv-v316__body{
+        .mnogotv-v317__body{
             flex:1;
             min-width:0;
             padding-right:.12em;
         }
 
-        .mnogotv-v316__title-row{
+        .mnogotv-v317__title-row{
             display:flex;
             align-items:center;
             gap:.8em;
             min-width:0;
         }
 
-        .mnogotv-v316__title{
+        .mnogotv-v317__title{
             flex:1 1 auto;
             min-width:0;
             font-size:1.48em;
@@ -2138,7 +2337,7 @@
             text-overflow:ellipsis;
         }
 
-        .mnogotv-v316__duration{
+        .mnogotv-v317__duration{
             flex:0 0 auto;
             font-size:.83em;
             opacity:.98;
@@ -2146,7 +2345,7 @@
             padding-left:.35em;
         }
 
-        .mnogotv-v316__line{
+        .mnogotv-v317__line{
             height:.075em;
             width:100%;
             background:rgba(255,255,255,.86);
@@ -2154,7 +2353,7 @@
             border-radius:1em;
         }
 
-        .mnogotv-v316__meta{
+        .mnogotv-v317__meta{
             opacity:.98;
             font-size:.94em;
             white-space:nowrap;
@@ -2162,88 +2361,88 @@
             text-overflow:ellipsis;
         }
 
-        .mnogotv-v316__quality{
+        .mnogotv-v317__quality{
             font-weight:720;
             opacity:1;
         }
 
-        .mnogotv-v316__empty{
+        .mnogotv-v317__empty{
             padding:1.6em 0;
             opacity:.82;
             font-size:1.05em;
         }
 
         @media(max-width:1200px){
-            .mnogotv-v316__layout{
+            .mnogotv-v317__layout{
                 grid-template-columns:17em minmax(0,1fr);
                 gap:1em;
                 padding-right:2.7em;
             }
-            .mnogotv-v316__content{ max-width:none; }
-            .mnogotv-v316__poster{
+            .mnogotv-v317__content{ max-width:none; }
+            .mnogotv-v317__poster{
                 width:6.5em;
                 height:9.75em;
                 flex-basis:6.5em;
             }
-            .mnogotv-v316__info-title{ font-size:1.62em; }
-            .mnogotv-v316__info-overview{ font-size:.9em; }
-            .mnogotv-v316__thumb{
+            .mnogotv-v317__info-title{ font-size:1.62em; }
+            .mnogotv-v317__info-overview{ font-size:.9em; }
+            .mnogotv-v317__thumb{
                 width:10em;
                 height:5.63em;
                 flex-basis:10em;
             }
-            .mnogotv-v316__title{ font-size:1.32em; }
-            .mnogotv-v316__meta{ font-size:.86em; }
+            .mnogotv-v317__title{ font-size:1.32em; }
+            .mnogotv-v317__meta{ font-size:.86em; }
         }
 
         @media(max-width:900px){
-            .mnogotv-v316{
+            .mnogotv-v317{
                 padding:.2em .42em .45em;
                 font-size:1em;
             }
-            .mnogotv-v316__layout{
+            .mnogotv-v317__layout{
                 grid-template-columns:14.6em minmax(0,1fr);
                 gap:.72em;
                 padding-right:.8em;
             }
-            .mnogotv-v316__poster{
+            .mnogotv-v317__poster{
                 width:5.4em;
                 height:8.1em;
                 flex-basis:5.4em;
             }
-            .mnogotv-v316__info-mini{ font-size:.82em; }
-            .mnogotv-v316__info-title{ font-size:1.38em; }
-            .mnogotv-v316__info-genres{ font-size:.78em; }
-            .mnogotv-v316__info-overview{
+            .mnogotv-v317__info-mini{ font-size:.82em; }
+            .mnogotv-v317__info-title{ font-size:1.38em; }
+            .mnogotv-v317__info-genres{ font-size:.78em; }
+            .mnogotv-v317__info-overview{
                 font-size:.76em;
                 -webkit-line-clamp:15;
             }
-            .mnogotv-v316__toolbar{ gap:.36em; }
-            .mnogotv-v316__pill{
+            .mnogotv-v317__toolbar{ gap:.36em; }
+            .mnogotv-v317__pill{
                 min-width:6.3em;
                 max-width:8.3em;
                 padding:.35em .45em;
             }
-            .mnogotv-v316__pill-title{ font-size:.62em; }
-            .mnogotv-v316__pill-value{ font-size:.75em; }
-            .mnogotv-v316__episode{
+            .mnogotv-v317__pill-title{ font-size:.62em; }
+            .mnogotv-v317__pill-value{ font-size:.75em; }
+            .mnogotv-v317__episode{
                 min-height:5.4em;
                 gap:.6em;
                 padding:.31em .46em .34em .28em;
             }
-            .mnogotv-v316__thumb{
+            .mnogotv-v317__thumb{
                 width:8.25em;
                 height:4.64em;
                 flex-basis:8.25em;
             }
-            .mnogotv-v316__num{ font-size:1.24em; }
-            .mnogotv-v316__title{ font-size:1.08em; }
-            .mnogotv-v316__duration{ font-size:.65em; }
-            .mnogotv-v316__meta{ font-size:.7em; }
+            .mnogotv-v317__num{ font-size:1.24em; }
+            .mnogotv-v317__title{ font-size:1.08em; }
+            .mnogotv-v317__duration{ font-size:.65em; }
+            .mnogotv-v317__meta{ font-size:.7em; }
         }
 `;
         var style = document.createElement('style');
-        style.id = 'mnogotv-v316-style';
+        style.id = 'mnogotv-v317-style';
         style.textContent = css;
         document.head.appendChild(style);
     }
@@ -2272,19 +2471,19 @@
             }
         } catch (ePlayer) {}
 
-        var root = $('<div class="mnogotv-v316"></div>');
-        var layout = $('<div class="mnogotv-v316__layout"></div>');
-        var infoPanel = $('<aside class="mnogotv-v316__info"></aside>');
-        var contentPanel = $('<section class="mnogotv-v316__content"></section>');
-        var topPanel = $('<div class="mnogotv-v316__top"></div>');
-        var toolbar = $('<div class="mnogotv-v316__toolbar"></div>');
-        var headline = $('<div class="mnogotv-v316__headline"><span class="icon-play">▶</span><span class="mnogotv-v316__headline-text"></span></div>');
-        var status = $('<div class="mnogotv-v316__status"></div>');
-        var sourceButton = $('<div class="mnogotv-v316__pill selector"><span class="mnogotv-v316__pill-title">Источник</span><span class="mnogotv-v316__pill-value">Загрузка…</span></div>');
-        var seasonButton = $('<div class="mnogotv-v316__pill selector"><span class="mnogotv-v316__pill-title">Фильтр</span><span class="mnogotv-v316__pill-value">Сезон 1</span></div>');
-        var titleChip = $('<div class="mnogotv-v316__title-chip"><span class="mnogotv-v316__title-chip-icon">⌕</span><span class="mnogotv-v316__title-chip-text"></span></div>');
-        var voiceButton = $('<div class="mnogotv-v316__pill selector"><span class="mnogotv-v316__pill-title">Озвучка</span><span class="mnogotv-v316__pill-value">Авто</span></div>');
-        var playerButton = $('<div class="mnogotv-v316__pill selector"><span class="mnogotv-v316__pill-title">Плеер</span><span class="mnogotv-v316__pill-value">Lampa</span></div>');
+        var root = $('<div class="mnogotv-v317"></div>');
+        var layout = $('<div class="mnogotv-v317__layout"></div>');
+        var infoPanel = $('<aside class="mnogotv-v317__info"></aside>');
+        var contentPanel = $('<section class="mnogotv-v317__content"></section>');
+        var topPanel = $('<div class="mnogotv-v317__top"></div>');
+        var toolbar = $('<div class="mnogotv-v317__toolbar"></div>');
+        var headline = $('<div class="mnogotv-v317__headline"><span class="icon-play">▶</span><span class="mnogotv-v317__headline-text"></span></div>');
+        var status = $('<div class="mnogotv-v317__status"></div>');
+        var sourceButton = $('<div class="mnogotv-v317__pill selector"><span class="mnogotv-v317__pill-title">Источник</span><span class="mnogotv-v317__pill-value">Загрузка…</span></div>');
+        var seasonButton = $('<div class="mnogotv-v317__pill selector"><span class="mnogotv-v317__pill-title">Фильтр</span><span class="mnogotv-v317__pill-value">Сезон 1</span></div>');
+        var titleChip = $('<div class="mnogotv-v317__title-chip"><span class="mnogotv-v317__title-chip-icon">⌕</span><span class="mnogotv-v317__title-chip-text"></span></div>');
+        var voiceButton = $('<div class="mnogotv-v317__pill selector"><span class="mnogotv-v317__pill-title">Озвучка</span><span class="mnogotv-v317__pill-value">Авто</span></div>');
+        var playerButton = $('<div class="mnogotv-v317__pill selector"><span class="mnogotv-v317__pill-title">Плеер</span><span class="mnogotv-v317__pill-value">Lampa</span></div>');
         var scroll = new Lampa.Scroll({ mask: true, over: true });
         var resizeHandler = null;
         var providerLayer = null;
@@ -2503,24 +2702,24 @@
              * Один root-wrapper закрывает этот замечательный JS-капкан.
              */
             var html = $(
-                '<div class="mnogotv-v316__info-inner">' +
-                    '<div class="mnogotv-v316__info-top">' +
-                        '<div class="mnogotv-v316__poster"><img></div>' +
-                        '<div class="mnogotv-v316__info-mini">' +
-                            '<div class="mnogotv-v316__info-year"></div>' +
-                            '<div class="mnogotv-v316__info-rate"></div>' +
-                            '<div class="mnogotv-v316__info-age"></div>' +
+                '<div class="mnogotv-v317__info-inner">' +
+                    '<div class="mnogotv-v317__info-top">' +
+                        '<div class="mnogotv-v317__poster"><img></div>' +
+                        '<div class="mnogotv-v317__info-mini">' +
+                            '<div class="mnogotv-v317__info-year"></div>' +
+                            '<div class="mnogotv-v317__info-rate"></div>' +
+                            '<div class="mnogotv-v317__info-age"></div>' +
                         '</div>' +
                     '</div>' +
-                    '<div class="mnogotv-v316__info-title"></div>' +
-                    '<div class="mnogotv-v316__info-genres"></div>' +
-                    '<div class="mnogotv-v316__info-overview"></div>' +
+                    '<div class="mnogotv-v317__info-title"></div>' +
+                    '<div class="mnogotv-v317__info-genres"></div>' +
+                    '<div class="mnogotv-v317__info-overview"></div>' +
                 '</div>'
             );
 
             if (poster) {
                 html.find(
-                    '.mnogotv-v316__poster img'
+                    '.mnogotv-v317__poster img'
                 ).attr(
                     'src',
                     poster
@@ -2528,12 +2727,12 @@
             }
             else {
                 html.find(
-                    '.mnogotv-v316__poster'
+                    '.mnogotv-v317__poster'
                 ).hide();
             }
 
             html.find(
-                '.mnogotv-v316__info-year'
+                '.mnogotv-v317__info-year'
             ).text(
                 [year, country]
                     .filter(Boolean)
@@ -2541,7 +2740,7 @@
             );
 
             html.find(
-                '.mnogotv-v316__info-rate'
+                '.mnogotv-v317__info-rate'
             ).text(
                 '★ ' +
                 (
@@ -2562,7 +2761,7 @@
 
             var ageNode =
                 html.find(
-                    '.mnogotv-v316__info-age'
+                    '.mnogotv-v317__info-age'
                 );
 
             if (ageText) {
@@ -2573,7 +2772,7 @@
             }
 
             html.find(
-                '.mnogotv-v316__info-title'
+                '.mnogotv-v317__info-title'
             ).text(
                 titleOf(movie)
             );
@@ -2582,7 +2781,7 @@
                 genreText();
 
             html.find(
-                '.mnogotv-v316__info-genres'
+                '.mnogotv-v317__info-genres'
             ).text(
                 genres
             );
@@ -2600,20 +2799,20 @@
 
             var overviewNode =
                 html.find(
-                    '.mnogotv-v316__info-overview'
+                    '.mnogotv-v317__info-overview'
                 );
 
             if (overview) {
                 overviewNode
                     .removeClass(
-                        'mnogotv-v316__info-overview--empty'
+                        'mnogotv-v317__info-overview--empty'
                     )
                     .text(overview);
             }
             else {
                 overviewNode
                     .addClass(
-                        'mnogotv-v316__info-overview--empty'
+                        'mnogotv-v317__info-overview--empty'
                     )
                     .text(
                         'Описание отсутствует'
@@ -2626,7 +2825,7 @@
 
             titleChip
                 .find(
-                    '.mnogotv-v316__title-chip-text'
+                    '.mnogotv-v317__title-chip-text'
                 )
                 .text(
                     titleOf(movie)
@@ -2656,7 +2855,7 @@
             if (isSeries(movie)) parts.push('Сезон ' + season);
             if (ep && ep.episode_number) parts.push('Серия ' + ep.episode_number);
             if (ep && ep.name) parts.push(ep.name);
-            headline.find('.mnogotv-v316__headline-text').text(parts.join('  •  '));
+            headline.find('.mnogotv-v317__headline-text').text(parts.join('  •  '));
         }
 
         function setSourceLabel() {
@@ -2684,15 +2883,20 @@
                 source &&
                 (
                     type === 'alloha' ||
-                    type === 'turbo' ||
-                    type === 'collaps'
+                    type === 'turbo'
                 )
             ) {
                 value += ' • web';
             }
+            else if (
+                source &&
+                type === 'collaps'
+            ) {
+                value += ' • Lampa';
+            }
 
             sourceButton
-                .find('.mnogotv-v316__pill-value')
+                .find('.mnogotv-v317__pill-value')
                 .text(value);
 
             updateHeadline(
@@ -2703,13 +2907,13 @@
         }
 
         function setSeasonLabel() {
-            seasonButton.find('.mnogotv-v316__pill-value').text('Сезон ' + season);
+            seasonButton.find('.mnogotv-v317__pill-value').text('Сезон ' + season);
             updateHeadline(currentFocus || episodes[0] || null);
         }
 
 
         function setVoiceLabel() {
-            voiceButton.find('.mnogotv-v316__pill-value').text(
+            voiceButton.find('.mnogotv-v317__pill-value').text(
                 voiceChoice && voiceChoice.label ? voiceChoice.label : 'Авто'
             );
         }
@@ -2720,7 +2924,7 @@
                 android: 'Android',
                 auto: 'Авто'
             };
-            playerButton.find('.mnogotv-v316__pill-value').text(names[playerMode] || 'Lampa');
+            playerButton.find('.mnogotv-v317__pill-value').text(names[playerMode] || 'Lampa');
         }
 
         function resetVoice() {
@@ -2985,8 +3189,8 @@
                         if (Number(sNum) !== Number(season) || !eNum) return;
 
                         var q = veoQualitySummary(catalogItem);
-                        var row = scroll.render().find('.mnogotv-v316__episode[data-episode="' + eNum + '"]');
-                        if (row.length) row.find('.mnogotv-v316__quality').text(q);
+                        var row = scroll.render().find('.mnogotv-v317__episode[data-episode="' + eNum + '"]');
+                        if (row.length) row.find('.mnogotv-v317__quality').text(q);
                     });
                 },
                 function () {}
@@ -3009,11 +3213,16 @@
                 }
                 else if (
                     type === 'alloha' ||
-                    type === 'turbo' ||
-                    type === 'collaps'
+                    type === 'turbo'
                 ) {
                     suffix =
                         ' • web player';
+                }
+                else if (
+                    type === 'collaps'
+                ) {
+                    suffix =
+                        ' • Lampa player';
                 }
                 else if (
                     type === 'veoveo' ||
@@ -3216,7 +3425,7 @@
                 sourceType(source);
 
             /*
-             * Turbo/Collaps:
+             * Turbo:
              * iframeUrl из Kinobox уже готовый opaque URL.
              * Ничего к нему не дописываем.
              *
@@ -3227,8 +3436,7 @@
              * manifestLoadError, поэтому используем родной iframe.
              */
             if (
-                type === 'turbo' ||
-                type === 'collaps'
+                type === 'turbo'
             ) {
                 return base;
             }
@@ -3295,8 +3503,8 @@
             closeProviderPlayer();
 
             providerLayer = $(
-                '<div class="mnogotv-v316__provider-layer">' +
-                    '<div class="mnogotv-v316__provider-hint">' +
+                '<div class="mnogotv-v317__provider-layer">' +
+                    '<div class="mnogotv-v317__provider-hint">' +
                         (
                             source &&
                             (
@@ -3307,16 +3515,17 @@
                         ) +
                         ' • Back — назад' +
                     '</div>' +
-                    '<iframe class="mnogotv-v316__provider-frame" ' +
+                    '<iframe class="mnogotv-v317__provider-frame" ' +
                         'allow="autoplay; fullscreen; picture-in-picture" ' +
                         'allowfullscreen ' +
+                        'referrerpolicy="origin" ' +
                         'frameborder="0" tabindex="0"></iframe>' +
                 '</div>'
             );
 
             providerFrame =
                 providerLayer.find(
-                    '.mnogotv-v316__provider-frame'
+                    '.mnogotv-v317__provider-frame'
                 );
 
             providerFrame.attr(
@@ -3354,6 +3563,17 @@
         }
 
         function playerMenu(ep) {
+            if (
+                source &&
+                sourceType(source) === 'collaps'
+            ) {
+                playEpisode(
+                    ep,
+                    'lampa'
+                );
+                return;
+            }
+
             if (
                 source &&
                 isWebProviderSource(source)
@@ -3401,6 +3621,10 @@
             }
 
             var epNum = isSeries(movie) ? parseInt(ep.episode_number || 0, 10) : null;
+
+            var forceCollapsLampa =
+                sourceType(source) === 'collaps';
+
             status.text('Получаем поток ' + (source.name || source.type || '') + '…');
             resolveSource(
                 source,
@@ -3412,7 +3636,10 @@
                 var actualRunas = runas;
 
                 if (!actualRunas) {
-                    if (playerMode === 'lampa') {
+                    if (forceCollapsLampa) {
+                        actualRunas = 'lampa';
+                    }
+                    else if (playerMode === 'lampa') {
                         actualRunas = 'lampa';
                     }
                     else if (playerMode === 'android') {
@@ -3478,13 +3705,13 @@
         function makeEpisode(ep) {
             var num = parseInt(ep.episode_number || 0, 10);
             var title = ep.name || ('Серия ' + num);
-            var item = $('<div class="mnogotv-v316__episode selector" data-episode="' + num + '"><div class="mnogotv-v316__thumb"><img><div class="mnogotv-v316__num"></div></div><div class="mnogotv-v316__body"><div class="mnogotv-v316__title-row"><div class="mnogotv-v316__title"></div><div class="mnogotv-v316__duration"></div></div><div class="mnogotv-v316__line"></div><div class="mnogotv-v316__meta"><span class="mnogotv-v316__rating"></span><span>  •  </span><span class="mnogotv-v316__date"></span><span>  •  </span><span class="mnogotv-v316__quality">HLS</span></div></div></div>');
+            var item = $('<div class="mnogotv-v317__episode selector" data-episode="' + num + '"><div class="mnogotv-v317__thumb"><img><div class="mnogotv-v317__num"></div></div><div class="mnogotv-v317__body"><div class="mnogotv-v317__title-row"><div class="mnogotv-v317__title"></div><div class="mnogotv-v317__duration"></div></div><div class="mnogotv-v317__line"></div><div class="mnogotv-v317__meta"><span class="mnogotv-v317__rating"></span><span>  •  </span><span class="mnogotv-v317__date"></span><span>  •  </span><span class="mnogotv-v317__quality">HLS</span></div></div></div>');
 
-            item.find('.mnogotv-v316__num').text(('0' + num).slice(-2));
-            item.find('.mnogotv-v316__title').text(title);
-            item.find('.mnogotv-v316__duration').text(episodeRuntime(ep, movie));
-            item.find('.mnogotv-v316__rating').text('★ ' + (ep.vote_average ? parseFloat(ep.vote_average).toFixed(1) : '—'));
-            item.find('.mnogotv-v316__date').text(episodeDate(ep.air_date));
+            item.find('.mnogotv-v317__num').text(('0' + num).slice(-2));
+            item.find('.mnogotv-v317__title').text(title);
+            item.find('.mnogotv-v317__duration').text(episodeRuntime(ep, movie));
+            item.find('.mnogotv-v317__rating').text('★ ' + (ep.vote_average ? parseFloat(ep.vote_average).toFixed(1) : '—'));
+            item.find('.mnogotv-v317__date').text(episodeDate(ep.air_date));
 
             var image = episodeImage(ep);
             if (image) item.find('img').attr('src', image);
@@ -3503,13 +3730,13 @@
         }
 
         function makeMovieItem() {
-            var item = $('<div class="mnogotv-v316__episode selector mnogotv-v316__movie"><div class="mnogotv-v316__thumb"><img><div class="mnogotv-v316__num">▶</div></div><div class="mnogotv-v316__body"><div class="mnogotv-v316__title">Смотреть фильм</div><div class="mnogotv-v316__line"></div><div class="mnogotv-v316__meta"></div></div></div>');
+            var item = $('<div class="mnogotv-v317__episode selector mnogotv-v317__movie"><div class="mnogotv-v317__thumb"><img><div class="mnogotv-v317__num">▶</div></div><div class="mnogotv-v317__body"><div class="mnogotv-v317__title">Смотреть фильм</div><div class="mnogotv-v317__line"></div><div class="mnogotv-v317__meta"></div></div></div>');
             var meta = [];
             var year = (movie && (movie.release_date || movie.first_air_date) || '').slice(0, 4);
             meta.push(source ? (source.name || source.type || 'MnogoTV') : 'MnogoTV');
             if (movie && movie.vote_average) meta.push('★ ' + parseFloat(movie.vote_average).toFixed(1));
             if (year) meta.push(year);
-            item.find('.mnogotv-v316__meta').text(meta.join('  •  '));
+            item.find('.mnogotv-v317__meta').text(meta.join('  •  '));
             var image = movieImage(movie);
             if (image) item.find('img').attr('src', image); else item.find('img').hide();
 
@@ -3550,7 +3777,7 @@
                 scroll.clear();
                 status.text('');
                 if (!episodes.length) {
-                    scroll.append($('<div class="mnogotv-v316__empty">Серии не найдены</div>'));
+                    scroll.append($('<div class="mnogotv-v317__empty">Серии не найдены</div>'));
                     updateHeadline(null);
                     return;
                 }
@@ -3679,8 +3906,8 @@
                 topPanel.append(headline);
                 topPanel.append(status);
 
-                scroll.render().addClass('mnogotv-v316__scroll');
-                try { scroll.body().addClass('mnogotv-v316__list'); } catch (e0) {}
+                scroll.render().addClass('mnogotv-v317__scroll');
+                try { scroll.body().addClass('mnogotv-v317__list'); } catch (e0) {}
 
                 contentPanel.append(topPanel);
                 contentPanel.append(scroll.render());
@@ -3775,7 +4002,7 @@
         try {
             var root = e.object && e.object.activity && e.object.activity.render ? e.object.activity.render() : null;
             if (!root || !root.length) return;
-            if (root.find('.mnogotv-v316-button').length) return;
+            if (root.find('.mnogotv-v317-button').length) return;
             var movie = (e.data && e.data.movie) || e.movie || e.object.card || {};
 
             try {
@@ -3800,7 +4027,7 @@
                 }
             } catch (eOverview) {}
 
-            var button = $('<div class="full-start__button selector view--online mnogotv-v316-button" data-subtitle="MnogoTV"><svg class="button__icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M10 9l5 3-5 3V9z" fill="currentColor"/></svg><span>MnogoTV</span></div>');
+            var button = $('<div class="full-start__button selector view--online mnogotv-v317-button" data-subtitle="MnogoTV"><svg class="button__icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M10 9l5 3-5 3V9z" fill="currentColor"/></svg><span>MnogoTV</span></div>');
             button.on('hover:enter click', function () { openComponent(movie); });
             var torrent = root.find('.view--torrent').first();
             var online = root.find('.view--online').last();
@@ -3815,7 +4042,7 @@
         if (!window.Lampa || !Lampa.Listener || !Lampa.Player) { setTimeout(start, 500); return; }
         registerComponent();
         Lampa.Listener.follow('full', function (e) { if (e && e.type === 'complite') addButton(e); });
-        notify('MnogoTV v' + VERSION + ' • source fixes');
+        notify('MnogoTV v' + VERSION + ' • KP sources');
         log('started', { resolver: CONFIG.resolver });
     }
 
