@@ -1,9 +1,9 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.1.1';
-    var PLUGIN_ID = 'mnogotv_v311';
-    var COMPONENT = 'mnogotv_v311_component';
+    var VERSION = '3.3.0';
+    var PLUGIN_ID = 'mnogotv_v330';
+    var COMPONENT = 'mnogotv_v330_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
 
     if (window[PLUGIN_ID]) return;
@@ -281,23 +281,75 @@
         }, fail);
     }
 
-    function parseCollapsConfig(raw) {
-        raw = String(raw || '');
-        if (!raw) return null;
-        try { return (new Function('"use strict"; return (' + raw + ');'))(); } catch (e) {
-            try { return (0, eval)('(' + raw + ')'); } catch (e2) { return null; }
+    var COLLAPS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36';
+    var COLLAPS_HOST = 'https://api.ortified.ws';
+    var COLLAPS_REF = COLLAPS_HOST + '/';
+
+    function nativeText(url, headers, ok, fail) {
+        var network = null;
+        try { network = new Lampa.Reguest(); } catch (e) {
+            try { network = new Lampa.Request(); } catch (e2) {}
+        }
+
+        if (!network || typeof network.native !== 'function') {
+            fail(new Error('Lampa.Reguest.native недоступен'));
+            return;
+        }
+
+        try {
+            network.clear();
+            network.timeout(12000);
+            network.native(url, function (str) {
+                ok(String(str || ''));
+            }, function (a, c) {
+                var status = a && a.status !== undefined ? a.status : '';
+                var message = status ? ('HTTP ' + status) : errText(a || c || 'network error');
+                fail(new Error(message));
+            }, false, {
+                dataType: 'text',
+                headers: headers || {}
+            });
+        } catch (e3) {
+            fail(e3);
         }
     }
 
-    function normalizeSubs(list, ref) {
+    function collapsHeaders() {
+        return {
+            'User-Agent': COLLAPS_UA,
+            'Origin': COLLAPS_HOST,
+            'Referer': COLLAPS_REF
+        };
+    }
+
+    function parseCollapsHtml(html) {
+        html = String(html || '').replace(/\n/g, '');
+        var find = html.match(/makePlayer\(({.*?})\);/);
+        var json = null;
+
+        try {
+            json = find && (0, eval)('"use strict"; (' + find[1] + ');');
+        } catch (e) {}
+
+        return json;
+    }
+
+    function normalizeDirectUrl(url) {
+        url = String(url || '').trim();
+        if (url.indexOf('//') === 0) url = 'https:' + url;
+        return url;
+    }
+
+    function normalizeSubs(list) {
         if (!Array.isArray(list)) return [];
         return list.map(function (s) {
             if (!s) return null;
             var url = typeof s === 'string' ? s : (s.url || s.file || s.src || '');
+            url = normalizeDirectUrl(url);
             if (!url) return null;
             return {
                 label: (s && (s.name || s.label || s.lang)) || 'Субтитры',
-                url: resolverUrl('/media', { url: url, ref: ref })
+                url: url
             };
         }).filter(Boolean);
     }
@@ -339,53 +391,112 @@
         return config.source || null;
     }
 
-    function getCollapsConfig(source, imdb, ok, fail) {
-        var key = String((source && source.iframeUrl) || imdb || '');
-        if (cache.collaps[key]) { ok(cache.collaps[key]); return; }
+    function getKpId(imdb, ok) {
+        requestJson(resolverUrl('/ids', { imdb: imdb }), function (data) {
+            ok(data && data.kp ? String(data.kp) : '');
+        }, function () {
+            ok('');
+        });
+    }
 
-        // Всегда передаём IMDb вместе с iframe.
-        // Если iframe конкретного Collaps отвечает 4xx/5xx,
-        // Worker сможет автоматически перейти к fallback по IMDb.
-        var params = { imdb: imdb };
-        if (source && source.iframeUrl) params.iframe = source.iframeUrl;
+    function tryCollapsUrls(source, imdb, kp, ok, fail) {
+        var urls = [];
+        var seen = {};
 
-        requestJson(resolverUrl('/collaps/config', params), function (response) {
-            if (!response || !response.config) {
-                fail(new Error((response && response.error) || 'Collaps config не получен'));
+        function add(url, label, headers) {
+            url = normalizeDirectUrl(url);
+            if (!url || seen[url]) return;
+            seen[url] = true;
+            urls.push({ url: url, label: label, headers: headers || collapsHeaders() });
+        }
+
+        if (source && source.iframeUrl) {
+            var iframe = normalizeDirectUrl(source.iframeUrl);
+            var iframeHeaders = collapsHeaders();
+            try {
+                var origin = new URL(iframe).origin;
+                iframeHeaders = {
+                    'User-Agent': COLLAPS_UA,
+                    'Origin': origin,
+                    'Referer': origin + '/'
+                };
+            } catch (e) {}
+            add(iframe, 'MnogoTV iframe', iframeHeaders);
+        }
+
+        if (kp) {
+            add('https://api.ortified.ws/embed/kp/' + encodeURIComponent(kp), 'ortified kp');
+            add('https://api.kinogram.best/embed/kp/' + encodeURIComponent(kp), 'kinogram kp');
+        }
+
+        if (imdb) {
+            add('https://api.ortified.ws/embed/imdb/' + encodeURIComponent(imdb), 'ortified imdb');
+            add('https://api.kinogram.best/embed/imdb/' + encodeURIComponent(imdb), 'kinogram imdb');
+        }
+
+        var index = 0;
+        var errors = [];
+
+        function next() {
+            if (index >= urls.length) {
+                fail(new Error(errors.length ? errors.join(' | ') : 'Collaps недоступен'));
                 return;
             }
-            cache.collaps[key] = response;
-            ok(response);
-        }, fail);
+
+            var attempt = urls[index++];
+            nativeText(attempt.url, attempt.headers, function (html) {
+                var cfg = parseCollapsHtml(html);
+                if (cfg) {
+                    ok({ config: cfg, url: attempt.url, label: attempt.label });
+                } else {
+                    errors.push(attempt.label + ': makePlayer не найден');
+                    next();
+                }
+            }, function (e) {
+                errors.push(attempt.label + ': ' + errText(e));
+                next();
+            });
+        }
+
+        next();
     }
 
     function resolveCollaps(source, imdb, season, episode, ok, fail) {
-        getCollapsConfig(source, imdb, function (response) {
-            var cfg = parseCollapsConfig(response.config);
-            if (!cfg) { fail(new Error('Collaps makePlayer не разобран')); return; }
+        getKpId(imdb, function (kp) {
+            tryCollapsUrls(source, imdb, kp, function (response) {
+                var cfg = response.config;
+                var item = pickCollapsItem(cfg, season, episode);
 
-            var item = pickCollapsItem(cfg, season, episode);
-            if (!item) {
-                fail(new Error(season !== null ? 'Collaps: серия не найдена' : 'Collaps: поток не найден'));
-                return;
-            }
+                if (!item) {
+                    fail(new Error(season !== null ? 'Collaps: серия не найдена' : 'Collaps: поток не найден'));
+                    return;
+                }
 
-            var stream = item.hls || (item.source && item.source.hls) || '';
-            if (!stream && season === null && cfg.source) {
-                stream = cfg.source.hls || '';
-                item = cfg.source;
-            }
-            if (!stream) { fail(new Error('Collaps: HLS не найден')); return; }
-            if (stream.indexOf('&vp') === -1) stream += '&vp';
+                var stream = item.hls || (item.source && item.source.hls) || '';
+                if (!stream && season === null && cfg.source) {
+                    stream = cfg.source.hls || '';
+                    item = cfg.source;
+                }
 
-            ok({
-                provider: 'Collaps',
-                url: resolverUrl('/media', { url: stream, ref: response.ref }),
-                subtitles: normalizeSubs(item.cc || item.subtitles || [], response.ref),
-                tracks: normalizeTracks(item.audio || {}),
-                ref: response.ref
-            });
-        }, fail);
+                stream = normalizeDirectUrl(stream);
+                if (!stream) {
+                    fail(new Error('Collaps: HLS не найден'));
+                    return;
+                }
+
+                // Точно как online_mod: добавляется буквально &vp.
+                if (stream.indexOf('&vp') === -1) stream += '&vp';
+
+                ok({
+                    provider: 'Collaps',
+                    url: stream,
+                    subtitles: normalizeSubs(item.cc || item.subtitles || []),
+                    tracks: normalizeTracks(item.audio || {}),
+                    headers: collapsHeaders(),
+                    resolvedBy: response.label
+                });
+            }, fail);
+        });
     }
 
     function resolveSource(source, imdb, season, episode, ok, fail) {
@@ -410,6 +521,7 @@
             subtitles: resolved.subtitles || [],
             translate: { tracks: resolved.tracks || [] },
             timeline: timeline(movie, season, episode),
+            headers: resolved.headers || {},
             isonline: true
         };
 
@@ -423,41 +535,41 @@
     }
 
     function addCss() {
-        if (document.getElementById('mnogotv-v311-style')) return;
+        if (document.getElementById('mnogotv-v330-style')) return;
         var css = `
-        .mnogotv-v311{width:100%;box-sizing:border-box;padding:.6em 1.4em 2em}
-        .mnogotv-v311__toolbar{display:flex;gap:.9em;align-items:center;flex-wrap:wrap;margin:.2em 0 1em}
-        .mnogotv-v311__pill{min-width:12em;padding:.75em 1em;border-radius:.7em;background:rgba(0,0,0,.18);box-sizing:border-box}
-        .mnogotv-v311__pill-title{display:block;font-size:.84em;font-weight:600;margin-bottom:.12em}
-        .mnogotv-v311__pill-value{display:block;font-size:1em;opacity:.95;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        .mnogotv-v311__pill.focus,.mnogotv-v311__episode.focus{box-shadow:0 0 0 .18em #fff;background:rgba(255,255,255,.08)}
-        .mnogotv-v311__headline{display:flex;align-items:center;gap:.55em;padding:.1em .15em .85em;opacity:.95;font-size:1.05em}
-        .mnogotv-v311__headline .icon-play{width:1.3em;height:1.3em;border-radius:50%;border:.12em solid #fff;display:inline-flex;align-items:center;justify-content:center;font-size:.72em;line-height:1}
-        .mnogotv-v311__status{opacity:.82;margin:.1em 0 .7em;min-height:1.3em}
-        .mnogotv-v311__episode{display:flex;align-items:center;gap:1.15em;width:100%;box-sizing:border-box;padding:.75em .2em .82em;border-top:.13em solid rgba(255,255,255,.72);position:relative}
-        .mnogotv-v311__episode:last-child{border-bottom:.13em solid rgba(255,255,255,.72)}
-        .mnogotv-v311__thumb{position:relative;width:11.6em;height:6.5em;flex:0 0 11.6em;border-radius:.38em;overflow:hidden;background:rgba(255,255,255,.08)}
-        .mnogotv-v311__thumb img{width:100%;height:100%;object-fit:cover;display:block}
-        .mnogotv-v311__num{position:absolute;left:.42em;bottom:.25em;font-size:1.85em;font-weight:700;line-height:1;color:#fff;text-shadow:0 .08em .18em #000}
-        .mnogotv-v311__body{flex:1;min-width:0;padding-right:.2em}
-        .mnogotv-v311__title{font-size:1.55em;line-height:1.15;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        .mnogotv-v311__line{height:.14em;width:100%;background:rgba(255,255,255,.9);margin:.38em 0 .48em;border-radius:1em;opacity:.92}
-        .mnogotv-v311__meta{opacity:.95;font-size:1.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        .mnogotv-v311__empty{padding:1.7em 0;opacity:.8}
+        .mnogotv-v330{width:100%;box-sizing:border-box;padding:.6em 1.4em 2em}
+        .mnogotv-v330__toolbar{display:flex;gap:.9em;align-items:center;flex-wrap:wrap;margin:.2em 0 1em}
+        .mnogotv-v330__pill{min-width:12em;padding:.75em 1em;border-radius:.7em;background:rgba(0,0,0,.18);box-sizing:border-box}
+        .mnogotv-v330__pill-title{display:block;font-size:.84em;font-weight:600;margin-bottom:.12em}
+        .mnogotv-v330__pill-value{display:block;font-size:1em;opacity:.95;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .mnogotv-v330__pill.focus,.mnogotv-v330__episode.focus{box-shadow:0 0 0 .18em #fff;background:rgba(255,255,255,.08)}
+        .mnogotv-v330__headline{display:flex;align-items:center;gap:.55em;padding:.1em .15em .85em;opacity:.95;font-size:1.05em}
+        .mnogotv-v330__headline .icon-play{width:1.3em;height:1.3em;border-radius:50%;border:.12em solid #fff;display:inline-flex;align-items:center;justify-content:center;font-size:.72em;line-height:1}
+        .mnogotv-v330__status{opacity:.82;margin:.1em 0 .7em;min-height:1.3em}
+        .mnogotv-v330__episode{display:flex;align-items:center;gap:1.15em;width:100%;box-sizing:border-box;padding:.75em .2em .82em;border-top:.13em solid rgba(255,255,255,.72);position:relative}
+        .mnogotv-v330__episode:last-child{border-bottom:.13em solid rgba(255,255,255,.72)}
+        .mnogotv-v330__thumb{position:relative;width:11.6em;height:6.5em;flex:0 0 11.6em;border-radius:.38em;overflow:hidden;background:rgba(255,255,255,.08)}
+        .mnogotv-v330__thumb img{width:100%;height:100%;object-fit:cover;display:block}
+        .mnogotv-v330__num{position:absolute;left:.42em;bottom:.25em;font-size:1.85em;font-weight:700;line-height:1;color:#fff;text-shadow:0 .08em .18em #000}
+        .mnogotv-v330__body{flex:1;min-width:0;padding-right:.2em}
+        .mnogotv-v330__title{font-size:1.55em;line-height:1.15;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .mnogotv-v330__line{height:.14em;width:100%;background:rgba(255,255,255,.9);margin:.38em 0 .48em;border-radius:1em;opacity:.92}
+        .mnogotv-v330__meta{opacity:.95;font-size:1.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .mnogotv-v330__empty{padding:1.7em 0;opacity:.8}
         @media(max-width:900px){
-            .mnogotv-v311{padding:.5em .9em 1.6em}
-            .mnogotv-v311__pill{min-width:9.3em;padding:.55em .75em;border-radius:.5em}
-            .mnogotv-v311__pill-title{font-size:.76em}
-            .mnogotv-v311__pill-value{font-size:.92em}
-            .mnogotv-v311__headline{font-size:.9em;padding-bottom:.55em}
-            .mnogotv-v311__episode{gap:.75em;padding:.55em 0 .62em}
-            .mnogotv-v311__thumb{width:8.8em;height:4.95em;flex-basis:8.8em}
-            .mnogotv-v311__num{font-size:1.48em}
-            .mnogotv-v311__title{font-size:1.12em}
-            .mnogotv-v311__meta{font-size:.82em}
+            .mnogotv-v330{padding:.5em .9em 1.6em}
+            .mnogotv-v330__pill{min-width:9.3em;padding:.55em .75em;border-radius:.5em}
+            .mnogotv-v330__pill-title{font-size:.76em}
+            .mnogotv-v330__pill-value{font-size:.92em}
+            .mnogotv-v330__headline{font-size:.9em;padding-bottom:.55em}
+            .mnogotv-v330__episode{gap:.75em;padding:.55em 0 .62em}
+            .mnogotv-v330__thumb{width:8.8em;height:4.95em;flex-basis:8.8em}
+            .mnogotv-v330__num{font-size:1.48em}
+            .mnogotv-v330__title{font-size:1.12em}
+            .mnogotv-v330__meta{font-size:.82em}
         }`;
         var style = document.createElement('style');
-        style.id = 'mnogotv-v311-style';
+        style.id = 'mnogotv-v330-style';
         style.textContent = css;
         document.head.appendChild(style);
     }
@@ -474,12 +586,12 @@
         var last = null;
         var currentFocus = null;
 
-        var root = $('<div class="mnogotv-v311"></div>');
-        var toolbar = $('<div class="mnogotv-v311__toolbar"></div>');
-        var headline = $('<div class="mnogotv-v311__headline"><span class="icon-play">▶</span><span class="mnogotv-v311__headline-text"></span></div>');
-        var status = $('<div class="mnogotv-v311__status"></div>');
-        var sourceButton = $('<div class="mnogotv-v311__pill selector"><span class="mnogotv-v311__pill-title">Источник</span><span class="mnogotv-v311__pill-value">Загрузка…</span></div>');
-        var seasonButton = $('<div class="mnogotv-v311__pill selector"><span class="mnogotv-v311__pill-title">Фильтр</span><span class="mnogotv-v311__pill-value">Сезон 1</span></div>');
+        var root = $('<div class="mnogotv-v330"></div>');
+        var toolbar = $('<div class="mnogotv-v330__toolbar"></div>');
+        var headline = $('<div class="mnogotv-v330__headline"><span class="icon-play">▶</span><span class="mnogotv-v330__headline-text"></span></div>');
+        var status = $('<div class="mnogotv-v330__status"></div>');
+        var sourceButton = $('<div class="mnogotv-v330__pill selector"><span class="mnogotv-v330__pill-title">Источник</span><span class="mnogotv-v330__pill-value">Загрузка…</span></div>');
+        var seasonButton = $('<div class="mnogotv-v330__pill selector"><span class="mnogotv-v330__pill-title">Фильтр</span><span class="mnogotv-v330__pill-value">Сезон 1</span></div>');
         var scroll = new Lampa.Scroll({ mask: true, over: true });
 
         function updateHeadline(ep) {
@@ -488,16 +600,16 @@
             if (isSeries(movie)) parts.push('Сезон ' + season);
             if (ep && ep.episode_number) parts.push('Серия ' + ep.episode_number);
             if (ep && ep.name) parts.push(ep.name);
-            headline.find('.mnogotv-v311__headline-text').text(parts.join('  •  '));
+            headline.find('.mnogotv-v330__headline-text').text(parts.join('  •  '));
         }
 
         function setSourceLabel() {
-            sourceButton.find('.mnogotv-v311__pill-value').text(source ? (source.name || source.type || 'Источник') : 'Нет');
+            sourceButton.find('.mnogotv-v330__pill-value').text(source ? (source.name || source.type || 'Источник') : 'Нет');
             updateHeadline(currentFocus || episodes[0] || null);
         }
 
         function setSeasonLabel() {
-            seasonButton.find('.mnogotv-v311__pill-value').text('Сезон: ' + season + ' сезон');
+            seasonButton.find('.mnogotv-v330__pill-value').text('Сезон: ' + season + ' сезон');
             updateHeadline(currentFocus || episodes[0] || null);
         }
 
@@ -515,18 +627,18 @@
             Lampa.Select.show({
                 title: 'MnogoTV — источник',
                 items: items,
-                onBack: function () { Lampa.Controller.toggle('mnogotv_v311'); },
+                onBack: function () { Lampa.Controller.toggle('mnogotv_v330'); },
                 onSelect: function (item) {
-                    if (item.goBack) { Lampa.Controller.toggle('mnogotv_v311'); return; }
+                    if (item.goBack) { Lampa.Controller.toggle('mnogotv_v330'); return; }
                     if (!item.source.supported) {
                         notify('MnogoTV: ' + (item.source.name || item.source.type) + ' пока без отдельного адаптера');
-                        Lampa.Controller.toggle('mnogotv_v311');
+                        Lampa.Controller.toggle('mnogotv_v330');
                         return;
                     }
                     source = item.source;
                     status.text('');
                     setSourceLabel();
-                    Lampa.Controller.toggle('mnogotv_v311');
+                    Lampa.Controller.toggle('mnogotv_v330');
                     renderEpisodes();
                 }
             });
@@ -538,12 +650,12 @@
             Lampa.Select.show({
                 title: 'MnogoTV — сезон',
                 items: items,
-                onBack: function () { Lampa.Controller.toggle('mnogotv_v311'); },
+                onBack: function () { Lampa.Controller.toggle('mnogotv_v330'); },
                 onSelect: function (item) {
-                    if (item.goBack) { Lampa.Controller.toggle('mnogotv_v311'); return; }
+                    if (item.goBack) { Lampa.Controller.toggle('mnogotv_v330'); return; }
                     season = item.season;
                     setSeasonLabel();
-                    Lampa.Controller.toggle('mnogotv_v311');
+                    Lampa.Controller.toggle('mnogotv_v330');
                     renderEpisodes();
                 }
             });
@@ -561,9 +673,9 @@
                     { title: 'Android / внешний плеер', runas: 'android' },
                     { title: 'Lampa', runas: 'lampa' }
                 ],
-                onBack: function () { Lampa.Controller.toggle('mnogotv_v311'); },
+                onBack: function () { Lampa.Controller.toggle('mnogotv_v330'); },
                 onSelect: function (item) {
-                    Lampa.Controller.toggle('mnogotv_v311');
+                    Lampa.Controller.toggle('mnogotv_v330');
                     playEpisode(ep, item.runas || '');
                 }
             });
@@ -585,14 +697,14 @@
         function makeEpisode(ep) {
             var num = parseInt(ep.episode_number || 0, 10);
             var title = ep.name || ('Серия ' + num);
-            var item = $('<div class="mnogotv-v311__episode selector"><div class="mnogotv-v311__thumb"><img><div class="mnogotv-v311__num"></div></div><div class="mnogotv-v311__body"><div class="mnogotv-v311__title"></div><div class="mnogotv-v311__line"></div><div class="mnogotv-v311__meta"></div></div></div>');
-            item.find('.mnogotv-v311__num').text(('0' + num).slice(-2));
-            item.find('.mnogotv-v311__title').text(title);
+            var item = $('<div class="mnogotv-v330__episode selector"><div class="mnogotv-v330__thumb"><img><div class="mnogotv-v330__num"></div></div><div class="mnogotv-v330__body"><div class="mnogotv-v330__title"></div><div class="mnogotv-v330__line"></div><div class="mnogotv-v330__meta"></div></div></div>');
+            item.find('.mnogotv-v330__num').text(('0' + num).slice(-2));
+            item.find('.mnogotv-v330__title').text(title);
             var meta = [];
             meta.push('★ ' + (ep.vote_average ? parseFloat(ep.vote_average).toFixed(1) : 'Неизвестно'));
             meta.push(episodeDate(ep.air_date));
             meta.push('Неизвестно');
-            item.find('.mnogotv-v311__meta').text(meta.join('  •  '));
+            item.find('.mnogotv-v330__meta').text(meta.join('  •  '));
             var image = episodeImage(ep);
             if (image) item.find('img').attr('src', image); else item.find('img').hide();
 
@@ -610,8 +722,8 @@
 
         function renderMovie() {
             scroll.clear();
-            var item = $('<div class="mnogotv-v311__episode selector"><div class="mnogotv-v311__body"><div class="mnogotv-v311__title">Смотреть фильм</div><div class="mnogotv-v311__line"></div><div class="mnogotv-v311__meta"></div></div></div>');
-            item.find('.mnogotv-v311__meta').text(source ? (source.name || source.type || '') : 'MnogoTV');
+            var item = $('<div class="mnogotv-v330__episode selector"><div class="mnogotv-v330__body"><div class="mnogotv-v330__title">Смотреть фильм</div><div class="mnogotv-v330__line"></div><div class="mnogotv-v330__meta"></div></div></div>');
+            item.find('.mnogotv-v330__meta').text(source ? (source.name || source.type || '') : 'MnogoTV');
             item.on('hover:focus', function (e) { last = e.target; currentFocus = null; updateHeadline(null); });
             item.on('hover:enter click', function () { playEpisode({}, ''); });
             item.on('hover:long', function () { playerMenu({}); });
@@ -630,14 +742,14 @@
                 scroll.clear();
                 status.text('');
                 if (!episodes.length) {
-                    scroll.append($('<div class="mnogotv-v311__empty">Серии не найдены</div>'));
+                    scroll.append($('<div class="mnogotv-v330__empty">Серии не найдены</div>'));
                     updateHeadline(null);
                     return;
                 }
                 currentFocus = episodes[0];
                 updateHeadline(currentFocus);
                 episodes.forEach(function (ep) { scroll.append(makeEpisode(ep)); });
-                try { Lampa.Controller.toggle('mnogotv_v311'); } catch (e) {}
+                try { Lampa.Controller.toggle('mnogotv_v330'); } catch (e) {}
             }, function (e) {
                 status.text('Ошибка: ' + errText(e));
             });
@@ -695,7 +807,7 @@
                 } catch (e) {}
                 initData();
             }
-            Lampa.Controller.add('mnogotv_v311', {
+            Lampa.Controller.add('mnogotv_v330', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(root);
                     Lampa.Controller.collectionFocus(last || sourceButton[0], root);
@@ -706,7 +818,7 @@
                 right: function () { Navigator.move('right'); },
                 back: function () { Lampa.Activity.backward(); }
             });
-            Lampa.Controller.toggle('mnogotv_v311');
+            Lampa.Controller.toggle('mnogotv_v330');
         };
         this.render = function () { return root; };
         this.pause = function () {};
@@ -735,9 +847,9 @@
         try {
             var root = e.object && e.object.activity && e.object.activity.render ? e.object.activity.render() : null;
             if (!root || !root.length) return;
-            if (root.find('.mnogotv-v311-button').length) return;
+            if (root.find('.mnogotv-v330-button').length) return;
             var movie = (e.data && e.data.movie) || e.movie || e.object.card || {};
-            var button = $('<div class="full-start__button selector view--online mnogotv-v311-button" data-subtitle="MnogoTV"><svg class="button__icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M10 9l5 3-5 3V9z" fill="currentColor"/></svg><span>MnogoTV</span></div>');
+            var button = $('<div class="full-start__button selector view--online mnogotv-v330-button" data-subtitle="MnogoTV"><svg class="button__icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M10 9l5 3-5 3V9z" fill="currentColor"/></svg><span>MnogoTV</span></div>');
             button.on('hover:enter click', function () { openComponent(movie); });
             var torrent = root.find('.view--torrent').first();
             var online = root.find('.view--online').last();
