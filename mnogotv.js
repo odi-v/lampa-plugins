@@ -9,7 +9,14 @@
     if (window[PLUGIN_ID]) return;
     window[PLUGIN_ID] = true;
 
-    var cache = { collaps: {}, veoCatalog: {}, hlsMeta: {} };
+    var cache = {
+        collaps: {},
+        veoCatalog: {},
+        veoMovieId: {},
+        hlsMeta: {},
+        ids: {},
+        sources: {}
+    };
 
     function log() {
         try { console.log.apply(console, ['[MnogoTV ' + VERSION + ']'].concat([].slice.call(arguments))); } catch (e) {}
@@ -267,8 +274,7 @@
 
         return (
             type === 'alloha' ||
-            type === 'turbo' ||
-            type === 'collaps'
+            type === 'turbo'
         );
     }
 
@@ -372,59 +378,104 @@
     }
 
     function getSources(imdb, ok, fail) {
-        requestJson(resolverUrl('/sources', { imdb: imdb }), function (response) {
-            var sources = response && response.sources || [];
-            if (!Array.isArray(sources)) sources = [];
+        imdb = String(imdb || '');
 
-            var hasCollaps = false;
+        if (
+            imdb &&
+            cache.sources[imdb]
+        ) {
+            ok(
+                cache.sources[imdb]
+            );
+            return;
+        }
 
-            sources.forEach(function (s) {
-                var type = String(s && s.type || '').toLowerCase();
-
-                s.lookupBackend =
+        requestJson(
+            resolverUrl(
+                '/sources',
+                {
+                    imdb: imdb
+                }
+            ),
+            function (response) {
+                var sources =
                     response &&
-                    response.backend ||
-                    '';
+                    response.sources ||
+                    [];
 
-                s.kinopoiskId =
-                    response &&
-                    response.kp ||
-                    '';
+                if (!Array.isArray(sources)) {
+                    sources = [];
+                }
 
-                s.supported =
-                    type === 'collaps' ||
-                    type === 'alloha' ||
-                    type === 'turbo' ||
-                    type === 'veoveo' ||
-                    type === 'veo' ||
-                    type.indexOf('veoveo') >= 0;
+                sources.forEach(function (s) {
+                    var type =
+                        String(
+                            s &&
+                            s.type ||
+                            ''
+                        ).toLowerCase();
 
-                s.webPlayer =
-                    type === 'alloha' ||
-                    type === 'turbo' ||
-                    type === 'collaps';
+                    /*
+                     * Стабильные на этой приставке:
+                     * - VeoVeo: direct HLS
+                     * - Alloha: web-player
+                     *
+                     * Turbo iframe открывается, но не управляется пультом
+                     * и самостоятельно выбирает сезон/эпизод.
+                     *
+                     * Collaps требует отдельного proxy/native пути:
+                     * iframe также не подходит, а direct HLS на этой
+                     * приставке ловит manifestLoadError.
+                     */
+                    s.experimental =
+                        type === 'turbo' ||
+                        type === 'collaps';
 
-                s.preferred =
-                    type === 'veoveo' ||
-                    type === 'veo' ||
-                    type.indexOf('veoveo') >= 0;
+                    s.supported =
+                        type === 'alloha' ||
+                        type === 'veoveo' ||
+                        type === 'veo' ||
+                        type.indexOf('veoveo') >= 0;
 
-                if (type === 'collaps') hasCollaps = true;
-            });
+                    s.webPlayer =
+                        type === 'alloha';
 
-            if (!hasCollaps) {
-                sources.push({
-                    type: 'Collaps',
-                    name: 'Collaps',
-                    supported: true,
-                    fallback: true,
-                    iframeUrl: ''
+                    s.preferred =
+                        type === 'veoveo' ||
+                        type === 'veo' ||
+                        type.indexOf('veoveo') >= 0;
+
+                    s.lookupBackend =
+                        response &&
+                        response.backend ||
+                        '';
+
+                    s.kinopoiskId =
+                        response &&
+                        response.kp ||
+                        '';
+
+                    if (
+                        s.kinopoiskId
+                    ) {
+                        cache.ids[imdb] =
+                            String(
+                                s.kinopoiskId
+                            );
+                    }
                 });
-            }
 
-            ok(sources);
-        }, fail);
+                if (imdb) {
+                    cache.sources[imdb] =
+                        sources;
+                }
+
+                ok(sources);
+            },
+            fail
+        );
     }
+
 
     var VEO_UA =
         'Mozilla/5.0 (Linux; Android 10; SmartTV) ' +
@@ -988,22 +1039,59 @@
             );
 
         if (!iframe) {
-            fail(new Error(
-                'VeoVeo: iframeUrl не получен'
-            ));
+            fail(
+                new Error(
+                    'VeoVeo: iframeUrl не получен'
+                )
+            );
             return;
         }
 
-        var ctx = veoContext(iframe);
+        var ctx =
+            veoContext(iframe);
 
         if (!ctx.origin) {
-            fail(new Error(
-                'VeoVeo: host не определён'
-            ));
+            fail(
+                new Error(
+                    'VeoVeo: host не определён'
+                )
+            );
+            return;
+        }
+
+        var cacheKey =
+            String(imdb || '') +
+            '|' +
+            ctx.origin +
+            '|' +
+            String(ctx.token || '');
+
+        if (
+            cache.veoMovieId[cacheKey]
+        ) {
+            ok(
+                cache.veoMovieId[cacheKey]
+            );
             return;
         }
 
         var attempts = [];
+
+        function done(result) {
+            cache.veoMovieId[cacheKey] =
+                result;
+
+            if (
+                result &&
+                result.kp &&
+                imdb
+            ) {
+                cache.ids[String(imdb)] =
+                    String(result.kp);
+            }
+
+            ok(result);
+        }
 
         function tryOriginal() {
             nativeText(
@@ -1017,7 +1105,7 @@
                         );
 
                     if (id) {
-                        ok({
+                        done({
                             movieId: id,
                             origin: ctx.origin,
                             token: ctx.token,
@@ -1029,10 +1117,12 @@
                             'original: MOVIE_ID не найден'
                         );
 
-                        fail(new Error(
-                            'VeoVeo: ' +
-                            attempts.join(' | ')
-                        ));
+                        fail(
+                            new Error(
+                                'VeoVeo: ' +
+                                attempts.join(' | ')
+                            )
+                        );
                     }
                 },
                 function (e) {
@@ -1041,10 +1131,12 @@
                         errText(e)
                     );
 
-                    fail(new Error(
-                        'VeoVeo: ' +
-                        attempts.join(' | ')
-                    ));
+                    fail(
+                        new Error(
+                            'VeoVeo: ' +
+                            attempts.join(' | ')
+                        )
+                    );
                 }
             );
         }
@@ -1066,7 +1158,7 @@
             fetchVeoMovieId(
                 url,
                 function (id) {
-                    ok({
+                    done({
                         movieId: id,
                         origin: ctx.origin,
                         token: ctx.token,
@@ -1084,66 +1176,78 @@
             );
         }
 
-        /*
-         * Реальный Lampac сначала ищет VeoVeo по Kinopoisk ID,
-         * затем по IMDb.
-         */
-        requestJson(
-            resolverUrl('/ids', {
-                imdb: imdb
-            }),
-            function (ids) {
-                var kp =
-                    ids &&
-                    ids.kp;
-
-                if (!kp) {
-                    attempts.push(
-                        'kp: ID не найден'
-                    );
-                    tryImdb();
-                    return;
-                }
-
-                var url =
-                    veoMovieIdEndpoint(
-                        ctx.origin,
-                        'kp',
-                        kp,
-                        ctx.token
-                    );
-
-                fetchVeoMovieId(
-                    url,
-                    function (id) {
-                        ok({
-                            movieId: id,
-                            origin: ctx.origin,
-                            token: ctx.token,
-                            kp: kp,
-                            method: 'kp'
-                        });
-                    },
-                    function (e) {
-                        attempts.push(
-                            'kp: ' +
-                            errText(e)
-                        );
-
-                        tryImdb();
-                    }
+        function tryKp(kp) {
+            kp =
+                String(
+                    kp ||
+                    ''
                 );
-            },
-            function (e) {
+
+            if (!kp) {
                 attempts.push(
-                    'ids: ' +
-                    errText(e)
+                    'kp: ID не найден'
                 );
 
                 tryImdb();
+                return;
             }
+
+            var url =
+                veoMovieIdEndpoint(
+                    ctx.origin,
+                    'kp',
+                    kp,
+                    ctx.token
+                );
+
+            fetchVeoMovieId(
+                url,
+                function (id) {
+                    done({
+                        movieId: id,
+                        origin: ctx.origin,
+                        token: ctx.token,
+                        kp: kp,
+                        method: 'kp'
+                    });
+                },
+                function (e) {
+                    attempts.push(
+                        'kp: ' +
+                        errText(e)
+                    );
+
+                    tryImdb();
+                }
+            );
+        }
+
+        /*
+         * v3.17 уже получил KP внутри /sources.
+         * Не спрашиваем /ids повторно при каждом первом запуске VeoVeo.
+         */
+        var knownKp =
+            String(
+                source &&
+                source.kinopoiskId ||
+                (
+                    imdb &&
+                    cache.ids[String(imdb)]
+                ) ||
+                ''
+            );
+
+        if (knownKp) {
+            tryKp(knownKp);
+            return;
+        }
+
+        getKpId(
+            imdb,
+            tryKp
         );
     }
+
 
     function veoCatalogKey(source, imdb) {
         return String(imdb || '') + '|' + String(source && source.iframeUrl || '');
@@ -1605,11 +1709,46 @@
     }
 
     function getKpId(imdb, ok) {
-        requestJson(resolverUrl('/ids', { imdb: imdb }), function (data) {
-            ok(data && data.kp ? String(data.kp) : '');
-        }, function () {
-            ok('');
-        });
+        imdb = String(imdb || '');
+
+        if (
+            imdb &&
+            cache.ids[imdb]
+        ) {
+            ok(
+                cache.ids[imdb]
+            );
+            return;
+        }
+
+        requestJson(
+            resolverUrl(
+                '/ids',
+                {
+                    imdb: imdb
+                }
+            ),
+            function (data) {
+                var kp =
+                    data &&
+                    data.kp
+                        ? String(data.kp)
+                        : '';
+
+                if (
+                    imdb &&
+                    kp
+                ) {
+                    cache.ids[imdb] =
+                        kp;
+                }
+
+                ok(kp);
+            },
+            function () {
+                ok('');
+            }
+        );
     }
 
     function tryCollapsUrls(source, imdb, kp, ok, fail) {
@@ -2490,9 +2629,6 @@
         var resizeHandler = null;
         var providerLayer = null;
         var providerFrame = null;
-        var providerRawInput = false;
-        var providerKeyHandler = null;
-        var providerMessageHandler = null;
 
         function genreText() {
             var names = [];
@@ -2888,16 +3024,16 @@
                 source &&
                 (
                     type === 'alloha' ||
-                    type === 'turbo' ||
-                    type === 'collaps'
+                    type === 'turbo'
                 )
             ) {
-                if (type === 'turbo' && isSeries(movie)) {
-                    value += ' • web/manual';
-                }
-                else {
-                    value += ' • web';
-                }
+                value += ' • web';
+            }
+            else if (
+                source &&
+                type === 'collaps'
+            ) {
+                value += ' • Lampa';
             }
 
             sourceButton
@@ -3212,7 +3348,19 @@
 
                 var suffix = '';
 
-                if (!s.supported) {
+                if (
+                    type === 'turbo'
+                ) {
+                    suffix =
+                        ' • экспериментальный, пульт не работает';
+                }
+                else if (
+                    type === 'collaps'
+                ) {
+                    suffix =
+                        ' • экспериментальный, HLS несовместим';
+                }
+                else if (!s.supported) {
                     suffix =
                         ' • пока без адаптера';
                 }
@@ -3220,21 +3368,7 @@
                     type === 'alloha'
                 ) {
                     suffix =
-                        ' • web player';
-                }
-                else if (
-                    type === 'turbo'
-                ) {
-                    suffix =
-                        isSeries(movie)
-                            ? ' • web / ручной выбор серии'
-                            : ' • web player';
-                }
-                else if (
-                    type === 'collaps'
-                ) {
-                    suffix =
-                        ' • web / точная серия';
+                        ' • работает';
                 }
                 else if (
                     type === 'veoveo' ||
@@ -3262,8 +3396,36 @@
                 onSelect: function (item) {
                     if (item.goBack) { Lampa.Controller.toggle('content'); return; }
                     if (!item.source.supported) {
-                        notify('MnogoTV: ' + (item.source.name || item.source.type) + ' пока без отдельного адаптера');
-                        Lampa.Controller.toggle('content');
+                        var disabledType =
+                            sourceType(
+                                item.source
+                            );
+
+                        var reason =
+                            disabledType === 'turbo'
+                                ? 'Turbo открывается, но его iframe не управляется пультом и не принимает выбранную серию.'
+                                : (
+                                    disabledType === 'collaps'
+                                        ? 'Collaps на этой приставке даёт manifestLoadError. Нужен отдельный proxy/native адаптер.'
+                                        : (
+                                            (
+                                                item.source.name ||
+                                                item.source.type ||
+                                                'Источник'
+                                            ) +
+                                            ' пока без отдельного адаптера'
+                                        )
+                                );
+
+                        notify(
+                            'MnogoTV: ' +
+                            reason
+                        );
+
+                        Lampa.Controller.toggle(
+                            'content'
+                        );
+
                         return;
                     }
                     source = item.source;
@@ -3405,84 +3567,19 @@
             });
         }
 
-        function providerBackCode(e) {
-            var code =
-                e &&
-                (
-                    e.keyCode ||
-                    e.which
-                ) ||
-                0;
-
-            var key =
-                String(
-                    e &&
-                    e.key ||
-                    ''
-                );
-
-            return (
-                code === 8 ||
-                code === 27 ||
-                code === 461 ||
-                code === 10009 ||
-                code === 88 ||
-                key === 'Escape' ||
-                key === 'Backspace' ||
-                key === 'BrowserBack' ||
-                key === 'GoBack'
-            );
-        }
-
         function closeProviderPlayer() {
-            if (!providerLayer) return;
-
             try {
-                if (providerKeyHandler) {
-                    window.removeEventListener(
-                        'keydown',
-                        providerKeyHandler,
-                        true
-                    );
+                if (providerLayer) {
+                    providerLayer.remove();
                 }
             } catch (e) {}
-
-            try {
-                if (providerMessageHandler) {
-                    window.removeEventListener(
-                        'message',
-                        providerMessageHandler,
-                        false
-                    );
-                }
-            } catch (e2) {}
-
-            providerKeyHandler = null;
-            providerMessageHandler = null;
-
-            try {
-                providerLayer.remove();
-            } catch (e3) {}
 
             providerLayer = null;
             providerFrame = null;
 
-            if (providerRawInput) {
-                providerRawInput = false;
-
-                try {
-                    if (
-                        Lampa.Keypad &&
-                        typeof Lampa.Keypad.enable === 'function'
-                    ) {
-                        Lampa.Keypad.enable();
-                    }
-                } catch (e4) {}
-            }
-
             try {
                 Lampa.Controller.toggle('content');
-            } catch (e5) {}
+            } catch (e2) {}
         }
 
         function providerPlayerUrl(ep) {
@@ -3501,51 +3598,52 @@
             var type =
                 sourceType(source);
 
-            var epNum =
-                isSeries(movie)
-                    ? parseInt(
-                        ep &&
-                        ep.episode_number ||
-                        0,
-                        10
-                    )
-                    : 0;
-
-            if (type === 'turbo') {
+            /*
+             * Turbo:
+             * iframeUrl из Kinobox уже готовый opaque URL.
+             * Ничего к нему не дописываем.
+             *
+             * У Turbo параметры season/episode Kinobox не документирует,
+             * и именно наша дописка превращала URL в 404.
+             *
+             * Collaps direct HLS на этой приставке стабильно ловил
+             * manifestLoadError, поэтому используем родной iframe.
+             */
+            if (
+                type === 'turbo'
+            ) {
                 return base;
             }
 
-            if (type === 'collaps') {
-                var collapsParams = {
-                    time: 0
-                };
-
-                if (isSeries(movie)) {
-                    collapsParams.season =
-                        season;
-
-                    if (epNum > 0) {
-                        collapsParams.episode =
-                            epNum;
-                    }
-                }
-
-                return appendUrlParams(
-                    base,
-                    collapsParams
-                );
-            }
-
             if (type === 'alloha') {
+                var epNum =
+                    isSeries(movie)
+                        ? parseInt(
+                            ep &&
+                            ep.episode_number ||
+                            0,
+                            10
+                        )
+                        : 0;
+
                 var params = {
                     autoplay: 1
                 };
 
+                /*
+                 * Официальные iframe params Alloha:
+                 * episode, translation, autoplay.
+                 * Параметр season отсутствует — больше его не передаём.
+                 */
                 if (epNum > 0) {
                     params.episode =
                         epNum;
                 }
 
+                /*
+                 * Если выбран translation iframe, он уже относится
+                 * к этой озвучке. Для base iframe можно передать ID.
+                 */
                 if (
                     voiceChoice &&
                     voiceChoice.translationId &&
@@ -3564,115 +3662,6 @@
             return base;
         }
 
-        function turboPost(command, value) {
-            if (
-                !providerFrame ||
-                !providerFrame.length ||
-                !providerFrame[0].contentWindow
-            ) {
-                return;
-            }
-
-            var message = {
-                api: command
-            };
-
-            if (
-                value !== undefined &&
-                value !== null
-            ) {
-                message.set =
-                    value;
-            }
-
-            try {
-                providerFrame[0]
-                    .contentWindow
-                    .postMessage(
-                        message,
-                        '*'
-                    );
-            } catch (e) {}
-        }
-
-        function enableRawProviderInput(type) {
-            /*
-             * Lampa.Keypad перехватывает стрелки раньше iframe.
-             * Для web-плеера отдаём клавиатуру самому iframe.
-             */
-            try {
-                if (
-                    Lampa.Keypad &&
-                    typeof Lampa.Keypad.disable === 'function'
-                ) {
-                    Lampa.Keypad.disable();
-                    providerRawInput = true;
-                }
-            } catch (e) {}
-
-            /*
-             * Если hardware Back всё же приходит в top window,
-             * закроем overlay вручную.
-             */
-            providerKeyHandler = function (e) {
-                if (
-                    providerLayer &&
-                    providerBackCode(e)
-                ) {
-                    try {
-                        e.preventDefault();
-                        e.stopPropagation();
-                    } catch (err) {}
-
-                    closeProviderPlayer();
-                }
-            };
-
-            window.addEventListener(
-                'keydown',
-                providerKeyHandler,
-                true
-            );
-
-            /*
-             * Turbo = PlayerJS. Если postMessage API включён у
-             * конкретного iframe, сообщения помогут хотя бы
-             * управлять play/pause и подтвердят, что канал жив.
-             * Основной ввод всё равно идёт напрямую в iframe.
-             */
-            if (type === 'turbo') {
-                providerMessageHandler =
-                    function (event) {
-                        try {
-                            if (
-                                !providerFrame ||
-                                !providerFrame.length ||
-                                event.source !==
-                                    providerFrame[0].contentWindow
-                            ) {
-                                return;
-                            }
-
-                            log(
-                                'Turbo message',
-                                event.data
-                            );
-                        } catch (e) {}
-                    };
-
-                window.addEventListener(
-                    'message',
-                    providerMessageHandler,
-                    false
-                );
-            }
-
-            setTimeout(function () {
-                try {
-                    providerFrame[0].focus();
-                } catch (e) {}
-            }, 120);
-        }
 
         function openProviderPlayer(ep) {
             var url =
@@ -3685,38 +3674,7 @@
                 return;
             }
 
-            var type =
-                sourceType(source);
-
             closeProviderPlayer();
-
-            var extraHint = '';
-
-            if (
-                type === 'turbo' &&
-                isSeries(movie)
-            ) {
-                extraHint =
-                    ' • сезон/серия выбираются внутри Turbo';
-            }
-            else if (
-                type === 'collaps' &&
-                isSeries(movie)
-            ) {
-                extraHint =
-                    ' • S' +
-                    season +
-                    'E' +
-                    (
-                        parseInt(
-                            ep &&
-                            ep.episode_number ||
-                            0,
-                            10
-                        ) ||
-                        1
-                    );
-            }
 
             providerLayer = $(
                 '<div class="mnogotv-v318__provider-layer">' +
@@ -3729,7 +3687,6 @@
                             ) ||
                             'Источник'
                         ) +
-                        extraHint +
                         ' • Back — назад' +
                     '</div>' +
                     '<iframe class="mnogotv-v318__provider-frame" ' +
@@ -3754,15 +3711,14 @@
                 providerLayer
             );
 
-            /*
-             * Контроллер нужен только как страховка на тех устройствах,
-             * где Keypad.disable() не отключает hardware Back.
-             * Стрелки/OK здесь намеренно не обрабатываем.
-             */
             Lampa.Controller.add(
                 'mnogotv_provider_web',
                 {
                     toggle: function () {},
+                    up: function () {},
+                    down: function () {},
+                    left: function () {},
+                    right: function () {},
                     back: closeProviderPlayer,
                     menu: closeProviderPlayer,
                     escape: closeProviderPlayer
@@ -3773,42 +3729,25 @@
                 'mnogotv_provider_web'
             );
 
-            providerFrame.on(
-                'load',
-                function () {
-                    enableRawProviderInput(
-                        type
-                    );
-
-                    /*
-                     * Turbo использует PlayerJS. Команда play безопасна:
-                     * если postMessage API выключен, она просто игнорируется.
-                     */
-                    if (type === 'turbo') {
-                        setTimeout(function () {
-                            turboPost('play');
-                        }, 350);
-                    }
-                }
-            );
-
-            /*
-             * Fallback на случай, если load в старом WebView не сработал.
-             */
             setTimeout(function () {
-                if (
-                    providerLayer &&
-                    !providerRawInput
-                ) {
-                    enableRawProviderInput(
-                        type
-                    );
-                }
-            }, 900);
+                try {
+                    providerFrame[0].focus();
+                } catch (e) {}
+            }, 150);
         }
 
-
         function playerMenu(ep) {
+            if (
+                source &&
+                sourceType(source) === 'collaps'
+            ) {
+                playEpisode(
+                    ep,
+                    'lampa'
+                );
+                return;
+            }
+
             if (
                 source &&
                 isWebProviderSource(source)
@@ -3857,6 +3796,9 @@
 
             var epNum = isSeries(movie) ? parseInt(ep.episode_number || 0, 10) : null;
 
+            var forceCollapsLampa =
+                sourceType(source) === 'collaps';
+
             status.text('Получаем поток ' + (source.name || source.type || '') + '…');
             resolveSource(
                 source,
@@ -3868,7 +3810,10 @@
                 var actualRunas = runas;
 
                 if (!actualRunas) {
-                    if (playerMode === 'lampa') {
+                    if (forceCollapsLampa) {
+                        actualRunas = 'lampa';
+                    }
+                    else if (playerMode === 'lampa') {
                         actualRunas = 'lampa';
                     }
                     else if (playerMode === 'android') {
@@ -4202,26 +4147,11 @@
             } catch (e) {}
 
             try {
-                if (providerLayer) {
-                    closeProviderPlayer();
-                }
+                if (providerLayer) providerLayer.remove();
             } catch (eProvider) {}
 
             providerLayer = null;
             providerFrame = null;
-
-            if (providerRawInput) {
-                providerRawInput = false;
-
-                try {
-                    if (
-                        Lampa.Keypad &&
-                        typeof Lampa.Keypad.enable === 'function'
-                    ) {
-                        Lampa.Keypad.enable();
-                    }
-                } catch (eKeypad) {}
-            }
 
             try { scroll.destroy(); } catch (e2) {}
             root.remove();
@@ -4286,7 +4216,7 @@
         if (!window.Lampa || !Lampa.Listener || !Lampa.Player) { setTimeout(start, 500); return; }
         registerComponent();
         Lampa.Listener.follow('full', function (e) { if (e && e.type === 'complite') addButton(e); });
-        notify('MnogoTV v' + VERSION + ' • web remote');
+        notify('MnogoTV v' + VERSION + ' • stable sources');
         log('started', { resolver: CONFIG.resolver });
     }
 
