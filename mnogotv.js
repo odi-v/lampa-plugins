@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.19.2';
+    var VERSION = '3.19.4';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -2035,7 +2035,7 @@
                         }
 
                         /*
-                         * Android v3.19.2: точечно повторяем поведение
+                         * Android v3.19.3: точечно повторяем поведение
                          * текущего штатного Collaps-провайдера Lampa:
                          *   - прямой HLS из makePlayer
                          *   - НЕ добавляем &vp
@@ -2062,7 +2062,7 @@
                                 directHeaders: {},
                                 relayUrl: '',
                                 relayReady: false,
-                                externalDirect: false,
+                                externalDirect: true,
                                 subtitles:
                                     normalizeSubs(
                                         item.cc ||
@@ -2300,7 +2300,7 @@
         log('play', {
             source: source && source.type,
             runas: actualRunas || 'default',
-            transport: useExternal ? 'relay' : 'direct',
+            transport: useExternal ? (resolved.relayReady ? 'relay' : 'external-direct') : 'direct',
             url: first.url
         });
 
@@ -3878,15 +3878,30 @@
         }
 
         function playerMenu(ep) {
+            /*
+             * v3.19.3 diagnostic: на Android Collaps должен реально
+             * показывать меню выбора плеера. Раньше этот special-case
+             * безусловно отправлял long-OK обратно в Lampa, поэтому
+             * тест внешнего Android-плеера фактически не выполнялся.
+             * На не-Android сохраняем прежнее поведение Collaps -> Lampa.
+             */
             if (
                 source &&
                 sourceType(source) === 'collaps'
             ) {
-                playEpisode(
-                    ep,
-                    'lampa'
-                );
-                return;
+                var isAndroidForCollaps = false;
+                try {
+                    isAndroidForCollaps = Boolean(
+                        Lampa.Platform &&
+                        Lampa.Platform.is &&
+                        Lampa.Platform.is('android')
+                    );
+                } catch (eCollapsPlatform) {}
+
+                if (!isAndroidForCollaps) {
+                    playEpisode(ep, 'lampa');
+                    return;
+                }
             }
 
             if (
@@ -3937,8 +3952,24 @@
 
             var epNum = isSeries(movie) ? parseInt(ep.episode_number || 0, 10) : null;
 
-            var forceCollapsLampa =
-                sourceType(source) === 'collaps';
+            /*
+             * v3.19.4: Collaps больше не принуждается к Lampa на Android.
+             * Это важно: выбор "Android / внешний" в верхнем меню должен
+             * реально дойти до Lampa.Player.runas('android').
+             * На LG/webOS сохраняем прежнее поведение: Collaps -> Lampa.
+             */
+            var forceCollapsLampa = false;
+            if (sourceType(source) === 'collaps') {
+                var isAndroidCollapsPlay = false;
+                try {
+                    isAndroidCollapsPlay = Boolean(
+                        Lampa.Platform &&
+                        Lampa.Platform.is &&
+                        Lampa.Platform.is('android')
+                    );
+                } catch (eCollapsPlayPlatform) {}
+                forceCollapsLampa = !isAndroidCollapsPlay;
+            }
 
             status.text('Получаем поток ' + (source.name || source.type || '') + '…');
             resolveSource(
