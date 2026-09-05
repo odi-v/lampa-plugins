@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.19.8';
+    var VERSION = '3.19.9';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -1650,9 +1650,13 @@
                 try { audioUrl = new URL(audioUrl, masterUrl).toString(); } catch (eAudio) {}
             }
 
+            var aname = mediaLine.match(/NAME="([^"]+)"/i);
+            var alang = mediaLine.match(/LANGUAGE="([^"]+)"/i);
             audioGroups[gid[1]] = {
                 url: audioUrl,
-                raw: mediaLine
+                raw: mediaLine,
+                name: aname && aname[1] ? aname[1] : 'Audio',
+                language: alang && alang[1] ? alang[1] : ''
             };
         }
 
@@ -1661,12 +1665,17 @@
             if (line.indexOf('#EXT-X-STREAM-INF:') !== 0) continue;
 
             var bandwidth = 0;
+            var width = 0;
             var height = 0;
             var bw = line.match(/BANDWIDTH=(\d+)/i);
-            var rs = line.match(/RESOLUTION=\d+x(\d+)/i);
+            var rs = line.match(/RESOLUTION=(\d+)x(\d+)/i);
+            var cd = line.match(/CODECS="([^"]+)"/i);
             var ag = line.match(/AUDIO="([^"]+)"/i);
             if (bw) bandwidth = parseInt(bw[1], 10) || 0;
-            if (rs) height = parseInt(rs[1], 10) || 0;
+            if (rs) {
+                width = parseInt(rs[1], 10) || 0;
+                height = parseInt(rs[2], 10) || 0;
+            }
 
             var uri = '';
             for (var j = i + 1; j < lines.length; j++) {
@@ -1686,10 +1695,19 @@
             variants.push({
                 url: absolute,
                 bandwidth: bandwidth,
+                width: width,
                 height: height,
+                codecs: cd && cd[1] ? cd[1] : '',
+                streamInf: line,
                 audioGroup: audioGroup,
                 audioUrl: audioGroup && audioGroups[audioGroup]
                     ? audioGroups[audioGroup].url
+                    : '',
+                audioName: audioGroup && audioGroups[audioGroup]
+                    ? audioGroups[audioGroup].name
+                    : 'Audio',
+                audioLanguage: audioGroup && audioGroups[audioGroup]
+                    ? audioGroups[audioGroup].language
                     : '',
                 muxed: !audioGroup,
                 score: bandwidth || (height * 100000)
@@ -1709,6 +1727,22 @@
         return chosen;
     }
 
+    function collapsSyntheticMasterUrl(variant) {
+        if (!variant || !variant.url || !variant.audioUrl) return '';
+
+        return resolverUrl('/synthetic/master.m3u8', {
+            video: variant.url,
+            audio: variant.audioUrl,
+            group: variant.audioGroup || 'audio0',
+            name: variant.audioName || 'Audio',
+            lang: variant.audioLanguage || '',
+            bandwidth: variant.bandwidth || 800000,
+            width: variant.width || 0,
+            height: variant.height || 0,
+            codecs: variant.codecs || ''
+        });
+    }
+
     function resolveCollapsAndroidVariant(stream, response, ok) {
         var headers =
             response && response.headers
@@ -1723,10 +1757,16 @@
                     ? 'muxed'
                     : ('separate-audio' + (variant.audioGroup ? ('[' + variant.audioGroup + ']') : ''));
 
+                var synthetic =
+                    !variant.muxed && variant.audioUrl
+                        ? collapsSyntheticMasterUrl(variant)
+                        : '';
+
                 ok({
-                    url: variant.url,
+                    url: synthetic || variant.url,
                     label:
-                        'android native-master→' + mode +
+                        'android ' +
+                        (synthetic ? 'synthetic-av' : ('native-master→' + mode)) +
                         (variant.height ? (' ' + variant.height + 'p') : '') +
                         ' • variants ' + variant.totalVariants +
                         ' • audio-groups ' + variant.audioGroupsCount
