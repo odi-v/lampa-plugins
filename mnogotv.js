@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.20.5';
+    var VERSION = '3.20.6';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -1758,7 +1758,7 @@
         return 0;
     }
 
-    function collapsSyntheticMasterUrl(variant, voiceChoice, ref, audioOverrides) {
+    function collapsSyntheticMasterUrl(variant, voiceChoice, ref, audioOverrides, videoOverride) {
         if (!variant || !variant.url || !variant.audioRenditions || !variant.audioRenditions.length) return '';
 
         var preferred = collapsPreferredAudio(variant.audioRenditions, voiceChoice);
@@ -1785,7 +1785,7 @@
         if (!audios.length) return '';
 
         return resolverUrl('/synthetic/master.m3u8', {
-            video: variant.url,
+            video: videoOverride || variant.url,
             audios: JSON.stringify(audios),
             group: variant.audioGroup || 'audio0',
             bandwidth: variant.bandwidth || 800000,
@@ -1955,6 +1955,55 @@
 
             nextAudio();
         }, fail);
+    }
+
+
+    function collapsBuildVideoBlob(variant, headers, ok, fail) {
+        if (!variant || !variant.url) {
+            fail(new Error('video blob: variant не найден'));
+            return;
+        }
+
+        function done(text) {
+            var rewritten =
+                collapsAbsoluteMediaPlaylist(
+                    text,
+                    variant.url
+                );
+
+            if (rewritten.indexOf('#EXTM3U') !== 0) {
+                fail(new Error('video blob: playlist не M3U8'));
+                return;
+            }
+
+            var blob =
+                collapsBlobUrl(
+                    rewritten
+                );
+
+            if (!blob) {
+                fail(new Error('video blob: createObjectURL failed'));
+                return;
+            }
+
+            ok(blob);
+        }
+
+        nativeText(
+            variant.url,
+            headers || {},
+            done,
+            function (first) {
+                nativeText(
+                    variant.url,
+                    {},
+                    done,
+                    function (second) {
+                        fail(second || first);
+                    }
+                );
+            }
+        );
     }
 
 
@@ -2138,7 +2187,7 @@
                             ' • groups ' + variant.audioGroupsCount +
                             ' • ' + collapsMediaDiag(diag) +
                             (audioDiag ? (' • ' + audioDiag) : '') +
-                            ' • builtin-audio-blob'
+                            ' • builtin-child-blobs'
                     });
                 }
 
@@ -2147,35 +2196,43 @@
                     return;
                 }
 
-                collapsBuildAudioBlobRenditions(
+                collapsBuildVideoBlob(
                     variant,
                     headers || {},
-                    null,
-                    function (audioBlobs) {
-                        var synthetic =
-                            collapsSyntheticMasterUrl(
-                                variant,
-                                null,
-                                ref,
-                                audioBlobs
-                            );
+                    function (videoBlob) {
+                        collapsBuildAudioBlobRenditions(
+                            variant,
+                            headers || {},
+                            null,
+                            function (audioBlobs) {
+                                var synthetic =
+                                    collapsSyntheticMasterUrl(
+                                        variant,
+                                        null,
+                                        ref,
+                                        audioBlobs,
+                                        videoBlob
+                                    );
 
-                        emit(
-                            synthetic,
-                            'Ablob' + audioBlobs.length
+                                emit(
+                                    synthetic,
+                                    'Vblob • Ablob' + audioBlobs.length
+                                );
+                            },
+                            function (e) {
+                                emit(
+                                    '',
+                                    'Vblob • Ablob-fallback[' +
+                                        errText(e).replace(/\s+/g, '') +
+                                    ']'
+                                );
+                            }
                         );
                     },
                     function (e) {
-                        var fallback =
-                            collapsSyntheticMasterUrl(
-                                variant,
-                                null,
-                                ref
-                            );
-
                         emit(
-                            fallback,
-                            'Ablob-fallback[' +
+                            '',
+                            'Vblob-fallback[' +
                                 errText(e).replace(/\s+/g, '') +
                             ']'
                         );
