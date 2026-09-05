@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.20.7';
+    var VERSION = '3.20.8';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -2170,11 +2170,10 @@
         Object.keys(headers || {}).forEach(function (k) {
             probeHeaders[k] = headers[k];
         });
-        probeHeaders.Range = 'bytes=0-0';
 
         try {
             network.clear();
-            network.timeout(10000);
+            network.timeout(15000);
             network.native(
                 url,
                 function () { ok('ok'); },
@@ -2207,16 +2206,23 @@
             return;
         }
 
-        var direct = '?';
+        var withHeaders = '?';
+        var noHeaders = '?';
         var proxy = '?';
-        var pending = 2;
+        var pending = 3;
+
+        function clean(e) {
+            return errText(e).replace(/\s+/g, '');
+        }
 
         function finishOne() {
             pending--;
             if (pending > 0) return;
 
             done(
-                'S[d' + direct + ' p' + proxy + ']'
+                'S[h' + withHeaders +
+                ' n' + noHeaders +
+                ' p' + proxy + ']'
             );
         }
 
@@ -2224,11 +2230,24 @@
             segmentUrl,
             headers || {},
             function () {
-                direct = 'ok';
+                withHeaders = 'ok';
                 finishOne();
             },
             function (e) {
-                direct = errText(e).replace(/\s+/g, '');
+                withHeaders = clean(e);
+                finishOne();
+            }
+        );
+
+        collapsProbeBinary(
+            segmentUrl,
+            {},
+            function () {
+                noHeaders = 'ok';
+                finishOne();
+            },
+            function (e) {
+                noHeaders = clean(e);
                 finishOne();
             }
         );
@@ -2248,7 +2267,7 @@
                 finishOne();
             },
             function (e) {
-                proxy = errText(e).replace(/\s+/g, '');
+                proxy = clean(e);
                 finishOne();
             }
         );
