@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.20.1';
+    var VERSION = '3.20.2';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -2024,31 +2024,20 @@
                         ? collapsSyntheticMasterUrl(variant, null)
                         : '';
 
-                function emit(blobInfo, blobError) {
-                    ok({
-                        url: synthetic || variant.url,
-                        builtinUrl: blobInfo && blobInfo.url ? blobInfo.url : '',
-                        variant: synthetic ? variant : null,
-                        label:
-                            'android ' +
-                            (synthetic ? 'synthetic-av' : baseLabel) +
-                            (variant.height ? (' ' + variant.height + 'p') : '') +
-                            ' • variants ' + variant.totalVariants +
-                            ' • audio ' + (variant.audioRenditionsCount || 0) +
-                            ' • groups ' + variant.audioGroupsCount +
-                            ' • ' + collapsMediaDiag(diag) +
-                            (blobInfo && blobInfo.url
-                                ? (' • builtin-blob a' + blobInfo.audioCount)
-                                : (' • blob-fallback[' + errText(blobError || 'n/a') + ']'))
-                    });
-                }
-
-                collapsBuildBlobMaster(
-                    variant,
-                    headers || {},
-                    function (blobInfo) { emit(blobInfo, null); },
-                    function (blobError) { emit(null, blobError); }
-                );
+                ok({
+                    url: synthetic || variant.url,
+                    builtinUrl: '',
+                    variant: synthetic ? variant : null,
+                    label:
+                        'android ' +
+                        (synthetic ? 'synthetic-av' : baseLabel) +
+                        (variant.height ? (' ' + variant.height + 'p') : '') +
+                        ' • variants ' + variant.totalVariants +
+                        ' • audio ' + (variant.audioRenditionsCount || 0) +
+                        ' • groups ' + variant.audioGroupsCount +
+                        ' • ' + collapsMediaDiag(diag) +
+                        ' • builtin-http'
+                });
             }
 
             nativeText(
@@ -2793,7 +2782,7 @@
          */
         var first = collapsBuiltin
             ? {
-                url: resolved.collapsBuiltinUrl || resolved.directUrl,
+                url: resolved.directUrl,
                 title: title,
                 subtitles: resolved.subtitles || [],
                 timeline: timeline(movie, season, episode)
