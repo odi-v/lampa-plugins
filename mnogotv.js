@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.19.1';
+    var VERSION = '3.19.2';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -1768,10 +1768,31 @@
         }
 
         /*
-         * Повторяем порядок online_mod:
-         * 1) официальный Collaps по KP
-         * 2) fallback по IMDb
-         * 3) iframe от MnogoTV только как последний резерв
+         * Android: сначала повторяем ТЕКУЩИЙ штатный Collaps-провайдер
+         * Lampa, который использует api.delivembd.ws/embed/kp/<id>.
+         * На остальных платформах не меняем уже рабочий порядок.
+         */
+        var androidPlatform = false;
+        try {
+            androidPlatform = Boolean(
+                Lampa.Platform &&
+                Lampa.Platform.is &&
+                Lampa.Platform.is('android')
+            );
+        } catch (e) {}
+
+        if (androidPlatform && kp) {
+            add(
+                'https://api.delivembd.ws/embed/kp/' + encodeURIComponent(kp),
+                'delivembd kp'
+            );
+        }
+
+        /*
+         * Наши проверенные fallback:
+         * 1) ortified по KP
+         * 2) kinogram по KP
+         * 3) fallback по IMDb
          */
         if (kp) {
             add(
@@ -2014,8 +2035,61 @@
                         }
 
                         /*
-                         * Точно как online_mod: к HLS добавляется
-                         * буквальный "&vp".
+                         * Android v3.19.2: точечно повторяем поведение
+                         * текущего штатного Collaps-провайдера Lampa:
+                         *   - прямой HLS из makePlayer
+                         *   - НЕ добавляем &vp
+                         *   - НЕ добавляем playback headers
+                         *   - НЕ гоняем media через Cloudflare
+                         *
+                         * Диагностика v3.19.1 показала HTTP 424 именно на
+                         * Cloudflare -> media CDN, поэтому этот тест должен
+                         * отделить проблему CDN/relay от Android HLS-плеера.
+                         */
+                        var androidPlatform = false;
+                        try {
+                            androidPlatform = Boolean(
+                                Lampa.Platform &&
+                                Lampa.Platform.is &&
+                                Lampa.Platform.is('android')
+                            );
+                        } catch (eAndroid) {}
+
+                        if (androidPlatform) {
+                            ok({
+                                provider: 'Collaps',
+                                directUrl: stream,
+                                directHeaders: {},
+                                relayUrl: '',
+                                relayReady: false,
+                                externalDirect: false,
+                                subtitles:
+                                    normalizeSubs(
+                                        item.cc ||
+                                        item.subtitles ||
+                                        []
+                                    ),
+                                tracks:
+                                    normalizeTracks(
+                                        item.audio ||
+                                        {}
+                                    ),
+                                quality: '360p–720p',
+                                resolvedBy:
+                                    response.label +
+                                    (
+                                        kp
+                                            ? (' • KP ' + kp)
+                                            : ''
+                                    ) +
+                                    ' • android upstream-direct'
+                            });
+                            return;
+                        }
+
+                        /*
+                         * Не-Android оставляем как было, чтобы не сломать
+                         * подтверждённо рабочий Collaps на LG webOS.
                          */
                         if (
                             stream.indexOf('&vp') === -1
