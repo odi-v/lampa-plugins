@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.20.3';
+    var VERSION = '3.20.4';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -2020,25 +2020,93 @@
             }
 
             function finish(diag) {
+                var ref = (response && response.ref) || (headers && headers.Referer) || '';
                 var synthetic =
                     !variant.muxed && variant.audioRenditions && variant.audioRenditions.length
-                        ? collapsSyntheticMasterUrl(variant, null, (response && response.ref) || (headers && headers.Referer) || '')
+                        ? collapsSyntheticMasterUrl(variant, null, ref)
                         : '';
 
-                ok({
-                    url: synthetic || variant.url,
-                    builtinUrl: '',
-                    variant: synthetic ? variant : null,
-                    label:
-                        'android ' +
-                        (synthetic ? 'synthetic-av' : baseLabel) +
-                        (variant.height ? (' ' + variant.height + 'p') : '') +
-                        ' • variants ' + variant.totalVariants +
-                        ' • audio ' + (variant.audioRenditionsCount || 0) +
-                        ' • groups ' + variant.audioGroupsCount +
-                        ' • ' + collapsMediaDiag(diag) +
-                        ' • builtin-playlist-proxy'
+                function emit(audioDiag) {
+                    ok({
+                        url: synthetic || variant.url,
+                        builtinUrl: '',
+                        variant: synthetic ? variant : null,
+                        label:
+                            'android ' +
+                            (synthetic ? 'synthetic-av' : baseLabel) +
+                            (variant.height ? (' ' + variant.height + 'p') : '') +
+                            ' • variants ' + variant.totalVariants +
+                            ' • audio ' + (variant.audioRenditionsCount || 0) +
+                            ' • groups ' + variant.audioGroupsCount +
+                            ' • ' + collapsMediaDiag(diag) +
+                            (audioDiag ? (' • ' + audioDiag) : '') +
+                            ' • builtin-playlist-proxy'
+                    });
+                }
+
+                var audios = Array.isArray(variant.audioRenditions) ? variant.audioRenditions : [];
+                var preferred = collapsPreferredAudio(audios, null);
+                var chosenAudio = preferred >= 0 ? audios[preferred] : audios[0];
+
+                if (!synthetic || !chosenAudio || !chosenAudio.url) {
+                    emit('A?');
+                    return;
+                }
+
+                var proxyAudio = resolverUrl('/playlist.m3u8', {
+                    url: chosenAudio.url,
+                    ref: ref
                 });
+
+                var directState = 'd?';
+                var directMeta = null;
+
+                function probeProxy() {
+                    nativeText(
+                        proxyAudio,
+                        {},
+                        function (txt) {
+                            var good = String(txt || '').trim().indexOf('#EXTM3U') === 0;
+                            var m = good ? inspectCollapsMediaPlaylist(txt, chosenAudio.url) : null;
+                            var tail = m ? (' A' + m.segments + 'h' + (m.hosts ? m.hosts.length : 0)) : '';
+                            emit('A[' + directState + ' p' + (good ? 'ok' : 'bad') + tail + ']');
+                        },
+                        function (e) {
+                            emit('A[' + directState + ' p' + errText(e).replace(/\s+/g, '') + ']');
+                        }
+                    );
+                }
+
+                nativeText(
+                    chosenAudio.url,
+                    {},
+                    function (txt) {
+                        var good = String(txt || '').trim().indexOf('#EXTM3U') === 0;
+                        directMeta = good ? inspectCollapsMediaPlaylist(txt, chosenAudio.url) : null;
+                        directState = good
+                            ? ('ok' + (directMeta ? directMeta.segments : ''))
+                            : 'bad';
+                        probeProxy();
+                    },
+                    function () {
+                        nativeText(
+                            chosenAudio.url,
+                            headers || {},
+                            function (txt) {
+                                var good = String(txt || '').trim().indexOf('#EXTM3U') === 0;
+                                directMeta = good ? inspectCollapsMediaPlaylist(txt, chosenAudio.url) : null;
+                                directState = good
+                                    ? ('okh' + (directMeta ? directMeta.segments : ''))
+                                    : 'badh';
+                                probeProxy();
+                            },
+                            function (e) {
+                                directState = 'e' + errText(e).replace(/\s+/g, '');
+                                probeProxy();
+                            }
+                        );
+                    }
+                );
             }
 
             nativeText(
