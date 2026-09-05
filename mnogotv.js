@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.20.6';
+    var VERSION = '3.20.7';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -2137,6 +2137,124 @@
         };
     }
 
+    function collapsFirstSegmentUrl(mediaText, playlistUrl) {
+        var lines = String(mediaText || '').replace(/\r/g, '').split('\n');
+
+        for (var i = 0; i < lines.length; i++) {
+            var line = String(lines[i] || '').trim();
+            if (!line || line.charAt(0) === '#') continue;
+
+            try {
+                return new URL(line, playlistUrl).toString();
+            } catch (e) {
+                return line;
+            }
+        }
+
+        return '';
+    }
+
+    function collapsProbeBinary(url, headers, ok, fail) {
+        var network = null;
+
+        try { network = new Lampa.Reguest(); } catch (e) {
+            try { network = new Lampa.Request(); } catch (e2) {}
+        }
+
+        if (!network || typeof network.native !== 'function') {
+            fail(new Error('native probe unavailable'));
+            return;
+        }
+
+        var probeHeaders = {};
+        Object.keys(headers || {}).forEach(function (k) {
+            probeHeaders[k] = headers[k];
+        });
+        probeHeaders.Range = 'bytes=0-0';
+
+        try {
+            network.clear();
+            network.timeout(10000);
+            network.native(
+                url,
+                function () { ok('ok'); },
+                function (a, c) {
+                    var status =
+                        a && a.status !== undefined
+                            ? a.status
+                            : '';
+
+                    fail(new Error(
+                        status
+                            ? ('HTTP ' + status)
+                            : errText(a || c || 'network error')
+                    ));
+                },
+                false,
+                {
+                    dataType: 'text',
+                    headers: probeHeaders
+                }
+            );
+        } catch (e3) {
+            fail(e3);
+        }
+    }
+
+    function collapsSegmentProbe(segmentUrl, headers, ref, done) {
+        if (!segmentUrl) {
+            done('S[none]');
+            return;
+        }
+
+        var direct = '?';
+        var proxy = '?';
+        var pending = 2;
+
+        function finishOne() {
+            pending--;
+            if (pending > 0) return;
+
+            done(
+                'S[d' + direct + ' p' + proxy + ']'
+            );
+        }
+
+        collapsProbeBinary(
+            segmentUrl,
+            headers || {},
+            function () {
+                direct = 'ok';
+                finishOne();
+            },
+            function (e) {
+                direct = errText(e).replace(/\s+/g, '');
+                finishOne();
+            }
+        );
+
+        var relay =
+            relayMediaUrl(
+                segmentUrl,
+                ref || (headers && headers.Referer) || COLLAPS_REF,
+                false
+            );
+
+        collapsProbeBinary(
+            relay,
+            {},
+            function () {
+                proxy = 'ok';
+                finishOne();
+            },
+            function (e) {
+                proxy = errText(e).replace(/\s+/g, '');
+                finishOne();
+            }
+        );
+    }
+
+
     function collapsMediaDiag(meta) {
         if (!meta) return 'V?';
         var host = meta.hosts && meta.hosts.length ? meta.hosts[0] : '?';
@@ -2162,7 +2280,7 @@
                 return;
             }
 
-            function finish(diag) {
+            function finish(diag, mediaText) {
                 var ref =
                     (response && response.ref) ||
                     (headers && headers.Referer) ||
@@ -2191,50 +2309,68 @@
                     });
                 }
 
-                if (!hasSeparateAudio) {
-                    emit('', 'A-muxed');
-                    return;
-                }
+                var firstSegment =
+                    collapsFirstSegmentUrl(
+                        mediaText || '',
+                        variant.url
+                    );
 
-                collapsBuildVideoBlob(
-                    variant,
+                collapsSegmentProbe(
+                    firstSegment,
                     headers || {},
-                    function (videoBlob) {
-                        collapsBuildAudioBlobRenditions(
+                    ref,
+                    function (segmentDiag) {
+                        if (!hasSeparateAudio) {
+                            emit('', 'A-muxed • ' + segmentDiag);
+                            return;
+                        }
+
+                        collapsBuildVideoBlob(
                             variant,
                             headers || {},
-                            null,
-                            function (audioBlobs) {
-                                var synthetic =
-                                    collapsSyntheticMasterUrl(
-                                        variant,
-                                        null,
-                                        ref,
-                                        audioBlobs,
-                                        videoBlob
-                                    );
+                            function (videoBlob) {
+                                collapsBuildAudioBlobRenditions(
+                                    variant,
+                                    headers || {},
+                                    null,
+                                    function (audioBlobs) {
+                                        var synthetic =
+                                            collapsSyntheticMasterUrl(
+                                                variant,
+                                                null,
+                                                ref,
+                                                audioBlobs,
+                                                videoBlob
+                                            );
 
-                                emit(
-                                    synthetic,
-                                    'Vblob • Ablob' + audioBlobs.length
+                                        emit(
+                                            synthetic,
+                                            'Vblob • Ablob' +
+                                                audioBlobs.length +
+                                                ' • ' +
+                                                segmentDiag
+                                        );
+                                    },
+                                    function (e) {
+                                        emit(
+                                            '',
+                                            'Vblob • Ablob-fallback[' +
+                                                errText(e).replace(/\s+/g, '') +
+                                            '] • ' +
+                                            segmentDiag
+                                        );
+                                    }
                                 );
                             },
                             function (e) {
                                 emit(
                                     '',
-                                    'Vblob • Ablob-fallback[' +
+                                    'Vblob-fallback[' +
                                         errText(e).replace(/\s+/g, '') +
-                                    ']'
+                                    '] • ' +
+                                    segmentDiag
                                 );
                             }
-                        );
-                    },
-                    function (e) {
-                        emit(
-                            '',
-                            'Vblob-fallback[' +
-                                errText(e).replace(/\s+/g, '') +
-                            ']'
                         );
                     }
                 );
@@ -2244,14 +2380,14 @@
                 variant.url,
                 {},
                 function (mediaText) {
-                    finish(inspectCollapsMediaPlaylist(mediaText, variant.url));
+                    finish(inspectCollapsMediaPlaylist(mediaText, variant.url), mediaText);
                 },
                 function () {
                     nativeText(
                         variant.url,
                         headers || {},
                         function (mediaText) {
-                            finish(inspectCollapsMediaPlaylist(mediaText, variant.url));
+                            finish(inspectCollapsMediaPlaylist(mediaText, variant.url), mediaText);
                         },
                         function () { finish(null); }
                     );
