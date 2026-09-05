@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.19.6';
+    var VERSION = '3.19.7';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -1621,6 +1621,101 @@
         }
     }
 
+
+    function pickCollapsVariant(masterText, masterUrl) {
+        var text = String(masterText || '').replace(/\r/g, '');
+        if (text.indexOf('#EXTM3U') !== 0) return null;
+
+        var lines = text.split('\n');
+        var variants = [];
+
+        for (var i = 0; i < lines.length; i++) {
+            var line = String(lines[i] || '').trim();
+            if (line.indexOf('#EXT-X-STREAM-INF:') !== 0) continue;
+
+            var bandwidth = 0;
+            var height = 0;
+            var bw = line.match(/BANDWIDTH=(\d+)/i);
+            var rs = line.match(/RESOLUTION=\d+x(\d+)/i);
+            if (bw) bandwidth = parseInt(bw[1], 10) || 0;
+            if (rs) height = parseInt(rs[1], 10) || 0;
+
+            var uri = '';
+            for (var j = i + 1; j < lines.length; j++) {
+                var next = String(lines[j] || '').trim();
+                if (!next) continue;
+                if (next.charAt(0) === '#') continue;
+                uri = next;
+                break;
+            }
+
+            if (!uri) continue;
+
+            var absolute = uri;
+            try { absolute = new URL(uri, masterUrl).toString(); } catch (e) {}
+
+            variants.push({
+                url: absolute,
+                bandwidth: bandwidth,
+                height: height,
+                score: bandwidth || (height * 100000)
+            });
+        }
+
+        if (!variants.length) return null;
+        variants.sort(function (a, b) { return b.score - a.score; });
+        return variants[0];
+    }
+
+    function resolveCollapsAndroidVariant(stream, response, ok) {
+        var headers =
+            response && response.headers
+                ? response.headers
+                : collapsHeadersFor(response && response.url || '');
+
+        function done(masterText) {
+            var variant = pickCollapsVariant(masterText, stream);
+
+            if (variant && variant.url) {
+                ok({
+                    url: variant.url,
+                    label:
+                        'android native-master→variant' +
+                        (variant.height ? (' ' + variant.height + 'p') : '')
+                });
+                return;
+            }
+
+            ok({
+                url: stream,
+                label: 'android native-media-direct'
+            });
+        }
+
+        nativeText(
+            stream,
+            headers || {},
+            done,
+            function (firstError) {
+                /* Некоторые CDN не любят Referer/Origin. Повторяем без них. */
+                nativeText(
+                    stream,
+                    {},
+                    done,
+                    function (secondError) {
+                        ok({
+                            url: stream,
+                            label:
+                                'android master-probe-fallback [' +
+                                errText(secondError || firstError) +
+                                ']'
+                        });
+                    }
+                );
+            }
+        );
+    }
+
     function collapsHeadersFor(url) {
         var origin = COLLAPS_HOST;
 
@@ -2057,46 +2152,47 @@
 
                         if (androidPlatform) {
                             /*
-                             * v3.19.6: LG webOS работает с Collaps по URL с
-                             * параметром vp, а на Android MX Player без vp
-                             * запускает поток, но после seek застревает на
-                             * служебной заставке lftapp.ink. Проверяем тот же
-                             * direct HLS с vp, но БЕЗ Cloudflare relay и без
-                             * playback headers. Это изолирует влияние vp на
-                             * структуру/поведение HLS при перемотке.
+                             * v3.19.7: MX умеет начать master HLS, но seek
+                             * уходит на lftapp.ink; VLC и встроенный Lampa
+                             * master не переваривают. Поэтому Android native
+                             * HTTP сначала читает master сам, выбирает самый
+                             * качественный variant и плееру отдаётся уже
+                             * обычный media-playlist URL. Без Cloudflare и vp.
                              */
-                            if (!/[?&]vp(?:[=&]|$)/i.test(stream)) {
-                                stream += stream.indexOf('?') >= 0 ? '&vp' : '?vp';
-                            }
-
-                            ok({
-                                provider: 'Collaps',
-                                directUrl: stream,
-                                directHeaders: {},
-                                relayUrl: '',
-                                relayReady: false,
-                                externalDirect: true,
-                                subtitles:
-                                    normalizeSubs(
-                                        item.cc ||
-                                        item.subtitles ||
-                                        []
-                                    ),
-                                tracks:
-                                    normalizeTracks(
-                                        item.audio ||
-                                        {}
-                                    ),
-                                quality: '360p–720p',
-                                resolvedBy:
-                                    response.label +
-                                    (
-                                        kp
-                                            ? (' • KP ' + kp)
-                                            : ''
-                                    ) +
-                                    ' • android direct+vp'
-                            });
+                            resolveCollapsAndroidVariant(
+                                stream,
+                                response,
+                                function (androidPlayable) {
+                                    ok({
+                                        provider: 'Collaps',
+                                        directUrl: androidPlayable.url,
+                                        directHeaders: {},
+                                        relayUrl: '',
+                                        relayReady: false,
+                                        externalDirect: true,
+                                        subtitles:
+                                            normalizeSubs(
+                                                item.cc ||
+                                                item.subtitles ||
+                                                []
+                                            ),
+                                        tracks:
+                                            normalizeTracks(
+                                                item.audio ||
+                                                {}
+                                            ),
+                                        quality: '360p–720p',
+                                        resolvedBy:
+                                            response.label +
+                                            (
+                                                kp
+                                                    ? (' • KP ' + kp)
+                                                    : ''
+                                            ) +
+                                            ' • ' + androidPlayable.label
+                                    });
+                                }
+                            );
                             return;
                         }
 
