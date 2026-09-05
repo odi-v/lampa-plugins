@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.19.0';
+    var VERSION = '3.19.1';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -1887,21 +1887,49 @@
 
         var relay = relayMediaUrl(rawStream, ref, true);
 
+        function shortRelayText(value) {
+            value = String(value || '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (value.length > 90) value = value.slice(0, 90) + '…';
+            return value;
+        }
+
         nativeText(relay, {}, function (manifest) {
             var ready = looksLikeManifest(manifest);
+            var relayError = '';
+
+            if (!ready) {
+                relayError = 'not-m3u8: ' + (shortRelayText(manifest) || 'empty response');
+            }
+
+            log('Collaps relay probe', {
+                ready: ready,
+                relay: relay,
+                response: ready ? '#EXTM3U' : shortRelayText(manifest)
+            });
 
             ok({
                 directUrl: rawStream,
                 directHeaders: directHeaders,
                 relayUrl: ready ? relay : '',
-                relayReady: ready
+                relayReady: ready,
+                relayError: relayError
             });
-        }, function () {
+        }, function (relayFailure) {
+            var relayError = errText(relayFailure);
+
+            log('Collaps relay probe failed', {
+                relay: relay,
+                error: relayError
+            });
+
             ok({
                 directUrl: rawStream,
                 directHeaders: directHeaders,
                 relayUrl: '',
-                relayReady: false
+                relayReady: false,
+                relayError: relayError
             });
         });
     }
@@ -2059,7 +2087,14 @@
                                         (
                                             viaRelay
                                                 ? ' • relay'
-                                                : ' • direct fallback'
+                                                : (
+                                                    ' • direct fallback' +
+                                                    (
+                                                        playable && playable.relayError
+                                                            ? (' [' + playable.relayError + ']')
+                                                            : ''
+                                                    )
+                                                )
                                         )
                                 });
                             }
