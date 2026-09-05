@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.19.5';
+    var VERSION = '3.19.6';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -2056,6 +2056,19 @@
                         } catch (eAndroid) {}
 
                         if (androidPlatform) {
+                            /*
+                             * v3.19.6: LG webOS работает с Collaps по URL с
+                             * параметром vp, а на Android MX Player без vp
+                             * запускает поток, но после seek застревает на
+                             * служебной заставке lftapp.ink. Проверяем тот же
+                             * direct HLS с vp, но БЕЗ Cloudflare relay и без
+                             * playback headers. Это изолирует влияние vp на
+                             * структуру/поведение HLS при перемотке.
+                             */
+                            if (!/[?&]vp(?:[=&]|$)/i.test(stream)) {
+                                stream += stream.indexOf('?') >= 0 ? '&vp' : '?vp';
+                            }
+
                             ok({
                                 provider: 'Collaps',
                                 directUrl: stream,
@@ -2082,7 +2095,7 @@
                                             ? (' • KP ' + kp)
                                             : ''
                                     ) +
-                                    ' • android official-shape'
+                                    ' • android direct+vp'
                             });
                             return;
                         }
