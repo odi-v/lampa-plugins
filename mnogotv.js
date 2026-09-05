@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.19.9';
+    var VERSION = '3.20.0';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -1631,47 +1631,48 @@
         var variants = [];
 
         /*
-         * Collaps master на Android часто использует отдельную AUDIO rendition.
-         * Если выдрать только video variant, MX показывает картинку без звука.
-         * Поэтому сначала ищем variant без AUDIO=..., то есть muxed A/V.
+         * v3.20.0: GROUP-ID не уникален для одной дорожки. В Collaps
+         * несколько EXT-X-MEDIA могут принадлежать одной AUDIO-группе.
+         * В 3.19.9 мы затирали предыдущие строки и оставляли фактически
+         * одну (часто английскую) дорожку. Теперь сохраняем все rendition.
          */
         for (var a = 0; a < lines.length; a++) {
             var mediaLine = String(lines[a] || '').trim();
             if (mediaLine.indexOf('#EXT-X-MEDIA:') !== 0) continue;
-            if (!/TYPE=AUDIO/i.test(mediaLine)) continue;
 
-            var gid = mediaLine.match(/GROUP-ID="([^"]+)"/i);
-            var auri = mediaLine.match(/URI="([^"]+)"/i);
-            if (!gid || !gid[1]) continue;
+            var attrs = hlsAttributes(mediaLine.slice('#EXT-X-MEDIA:'.length));
+            if (String(attrs.TYPE || '').toUpperCase() !== 'AUDIO') continue;
 
-            var audioUrl = '';
-            if (auri && auri[1]) {
-                audioUrl = auri[1];
+            var gid = String(attrs['GROUP-ID'] || '').trim();
+            if (!gid) continue;
+
+            var audioUrl = String(attrs.URI || '').trim();
+            if (audioUrl) {
                 try { audioUrl = new URL(audioUrl, masterUrl).toString(); } catch (eAudio) {}
             }
 
-            var aname = mediaLine.match(/NAME="([^"]+)"/i);
-            var alang = mediaLine.match(/LANGUAGE="([^"]+)"/i);
-            audioGroups[gid[1]] = {
+            if (!audioGroups[gid]) audioGroups[gid] = [];
+            audioGroups[gid].push({
                 url: audioUrl,
                 raw: mediaLine,
-                name: aname && aname[1] ? aname[1] : 'Audio',
-                language: alang && alang[1] ? alang[1] : ''
-            };
+                name: String(attrs.NAME || attrs.LANGUAGE || ('Audio ' + (audioGroups[gid].length + 1))),
+                language: String(attrs.LANGUAGE || ''),
+                isDefault: String(attrs.DEFAULT || '').toUpperCase() === 'YES',
+                autoselect: String(attrs.AUTOSELECT || '').toUpperCase() !== 'NO',
+                forced: String(attrs.FORCED || '').toUpperCase() === 'YES',
+                channels: String(attrs.CHANNELS || '')
+            });
         }
 
         for (var i = 0; i < lines.length; i++) {
             var line = String(lines[i] || '').trim();
             if (line.indexOf('#EXT-X-STREAM-INF:') !== 0) continue;
 
-            var bandwidth = 0;
+            var streamAttrs = hlsAttributes(line.slice('#EXT-X-STREAM-INF:'.length));
+            var bandwidth = parseInt(streamAttrs.BANDWIDTH || '0', 10) || 0;
             var width = 0;
             var height = 0;
-            var bw = line.match(/BANDWIDTH=(\d+)/i);
-            var rs = line.match(/RESOLUTION=(\d+)x(\d+)/i);
-            var cd = line.match(/CODECS="([^"]+)"/i);
-            var ag = line.match(/AUDIO="([^"]+)"/i);
-            if (bw) bandwidth = parseInt(bw[1], 10) || 0;
+            var rs = String(streamAttrs.RESOLUTION || '').match(/(\d+)x(\d+)/i);
             if (rs) {
                 width = parseInt(rs[1], 10) || 0;
                 height = parseInt(rs[2], 10) || 0;
@@ -1685,30 +1686,26 @@
                 uri = next;
                 break;
             }
-
             if (!uri) continue;
 
             var absolute = uri;
             try { absolute = new URL(uri, masterUrl).toString(); } catch (e) {}
 
-            var audioGroup = ag && ag[1] ? ag[1] : '';
+            var audioGroup = String(streamAttrs.AUDIO || '');
+            var renditions = audioGroup && audioGroups[audioGroup]
+                ? audioGroups[audioGroup].slice()
+                : [];
+
             variants.push({
                 url: absolute,
                 bandwidth: bandwidth,
                 width: width,
                 height: height,
-                codecs: cd && cd[1] ? cd[1] : '',
+                codecs: String(streamAttrs.CODECS || ''),
                 streamInf: line,
                 audioGroup: audioGroup,
-                audioUrl: audioGroup && audioGroups[audioGroup]
-                    ? audioGroups[audioGroup].url
-                    : '',
-                audioName: audioGroup && audioGroups[audioGroup]
-                    ? audioGroups[audioGroup].name
-                    : 'Audio',
-                audioLanguage: audioGroup && audioGroups[audioGroup]
-                    ? audioGroups[audioGroup].language
-                    : '',
+                audioRenditions: renditions,
+                audioUrl: renditions.length ? renditions[0].url : '',
                 muxed: !audioGroup,
                 score: bandwidth || (height * 100000)
             });
@@ -1718,29 +1715,134 @@
 
         var muxed = variants.filter(function (v) { return v.muxed; });
         var pool = muxed.length ? muxed : variants;
-
         pool.sort(function (a, b) { return b.score - a.score; });
+
         var chosen = pool[0];
         chosen.hasMuxed = Boolean(muxed.length);
         chosen.totalVariants = variants.length;
         chosen.audioGroupsCount = Object.keys(audioGroups).length;
+        chosen.audioRenditionsCount = chosen.audioRenditions ? chosen.audioRenditions.length : 0;
         return chosen;
     }
 
-    function collapsSyntheticMasterUrl(variant) {
-        if (!variant || !variant.url || !variant.audioUrl) return '';
+    function compactVoiceKey(value) {
+        return String(value || '')
+            .toLowerCase()
+            .replace(/[^a-zа-яё0-9]+/gi, ' ')
+            .replace(/^\s+|\s+$/g, '');
+    }
+
+    function collapsPreferredAudio(renditions, voiceChoice) {
+        renditions = Array.isArray(renditions) ? renditions : [];
+        if (!renditions.length) return -1;
+
+        var wanted = voiceChoice && voiceChoice.label && voiceChoice.label !== 'Авто'
+            ? compactVoiceKey(voiceChoice.label)
+            : '';
+
+        if (wanted) {
+            for (var i = 0; i < renditions.length; i++) {
+                var hay = compactVoiceKey((renditions[i].name || '') + ' ' + (renditions[i].language || ''));
+                if (hay === wanted || hay.indexOf(wanted) >= 0 || wanted.indexOf(hay) >= 0) return i;
+            }
+        }
+
+        if (voiceChoice && voiceChoice.index >= 0 && voiceChoice.index < renditions.length) {
+            return voiceChoice.index;
+        }
+
+        for (var d = 0; d < renditions.length; d++) {
+            if (renditions[d].isDefault) return d;
+        }
+
+        return 0;
+    }
+
+    function collapsSyntheticMasterUrl(variant, voiceChoice) {
+        if (!variant || !variant.url || !variant.audioRenditions || !variant.audioRenditions.length) return '';
+
+        var preferred = collapsPreferredAudio(variant.audioRenditions, voiceChoice);
+        var audios = variant.audioRenditions.map(function (a, index) {
+            return {
+                url: a.url || '',
+                name: a.name || ('Audio ' + (index + 1)),
+                lang: a.language || '',
+                channels: a.channels || '',
+                autoselect: a.autoselect !== false,
+                forced: !!a.forced,
+                selected: index === preferred
+            };
+        }).filter(function (a) { return !!a.url; });
+
+        if (!audios.length) return '';
 
         return resolverUrl('/synthetic/master.m3u8', {
             video: variant.url,
-            audio: variant.audioUrl,
+            audios: JSON.stringify(audios),
             group: variant.audioGroup || 'audio0',
-            name: variant.audioName || 'Audio',
-            lang: variant.audioLanguage || '',
             bandwidth: variant.bandwidth || 800000,
             width: variant.width || 0,
             height: variant.height || 0,
             codecs: variant.codecs || ''
         });
+    }
+
+    function inspectCollapsMediaPlaylist(text, playlistUrl) {
+        text = String(text || '').replace(/\r/g, '');
+        var lines = text.split('\n');
+        var segments = 0;
+        var discontinuities = 0;
+        var keys = 0;
+        var maps = 0;
+        var dateranges = 0;
+        var hosts = {};
+        var suspicious = '';
+
+        lines.forEach(function (raw) {
+            var line = String(raw || '').trim();
+            if (!line) return;
+            if (line.indexOf('#EXT-X-DISCONTINUITY') === 0) discontinuities++;
+            if (line.indexOf('#EXT-X-KEY:') === 0) keys++;
+            if (line.indexOf('#EXT-X-MAP:') === 0) maps++;
+            if (line.indexOf('#EXT-X-DATERANGE:') === 0) dateranges++;
+            if (line.charAt(0) === '#') return;
+
+            segments++;
+            var absolute = line;
+            try { absolute = new URL(line, playlistUrl).toString(); } catch (e) {}
+            try {
+                var host = new URL(absolute).hostname;
+                if (host) hosts[host] = true;
+            } catch (e2) {}
+
+            if (/lftapp|liftapp|lift3\.ws|liftw\.ws/i.test(absolute)) {
+                suspicious = 'LIFT';
+            }
+        });
+
+        return {
+            segments: segments,
+            hosts: Object.keys(hosts),
+            discontinuities: discontinuities,
+            keys: keys,
+            maps: maps,
+            dateranges: dateranges,
+            endlist: /#EXT-X-ENDLIST/i.test(text),
+            suspicious: suspicious
+        };
+    }
+
+    function collapsMediaDiag(meta) {
+        if (!meta) return 'V?';
+        var host = meta.hosts && meta.hosts.length ? meta.hosts[0] : '?';
+        if (host.length > 22) host = host.slice(0, 19) + '…';
+        return 'V' + meta.segments +
+            ' h' + (meta.hosts ? meta.hosts.length : 0) + ':' + host +
+            ' d' + meta.discontinuities +
+            ' k' + meta.keys +
+            (meta.dateranges ? (' dr' + meta.dateranges) : '') +
+            (meta.endlist ? ' end' : ' live') +
+            (meta.suspicious ? (' ' + meta.suspicious) : '');
     }
 
     function resolveCollapsAndroidVariant(stream, response, ok) {
@@ -1749,35 +1851,63 @@
                 ? response.headers
                 : collapsHeadersFor(response && response.url || '');
 
+        function finishVariant(variant, baseLabel) {
+            if (!variant || !variant.url) {
+                ok({ url: stream, label: 'android native-media-direct', variant: null });
+                return;
+            }
+
+            function finish(diag) {
+                var synthetic =
+                    !variant.muxed && variant.audioRenditions && variant.audioRenditions.length
+                        ? collapsSyntheticMasterUrl(variant, null)
+                        : '';
+
+                ok({
+                    url: synthetic || variant.url,
+                    variant: synthetic ? variant : null,
+                    label:
+                        'android ' +
+                        (synthetic ? 'synthetic-av' : baseLabel) +
+                        (variant.height ? (' ' + variant.height + 'p') : '') +
+                        ' • variants ' + variant.totalVariants +
+                        ' • audio ' + (variant.audioRenditionsCount || 0) +
+                        ' • groups ' + variant.audioGroupsCount +
+                        ' • ' + collapsMediaDiag(diag)
+                });
+            }
+
+            nativeText(
+                variant.url,
+                {},
+                function (mediaText) {
+                    finish(inspectCollapsMediaPlaylist(mediaText, variant.url));
+                },
+                function () {
+                    nativeText(
+                        variant.url,
+                        headers || {},
+                        function (mediaText) {
+                            finish(inspectCollapsMediaPlaylist(mediaText, variant.url));
+                        },
+                        function () { finish(null); }
+                    );
+                }
+            );
+        }
+
         function done(masterText) {
             var variant = pickCollapsVariant(masterText, stream);
 
             if (variant && variant.url) {
                 var mode = variant.muxed
-                    ? 'muxed'
-                    : ('separate-audio' + (variant.audioGroup ? ('[' + variant.audioGroup + ']') : ''));
-
-                var synthetic =
-                    !variant.muxed && variant.audioUrl
-                        ? collapsSyntheticMasterUrl(variant)
-                        : '';
-
-                ok({
-                    url: synthetic || variant.url,
-                    label:
-                        'android ' +
-                        (synthetic ? 'synthetic-av' : ('native-master→' + mode)) +
-                        (variant.height ? (' ' + variant.height + 'p') : '') +
-                        ' • variants ' + variant.totalVariants +
-                        ' • audio-groups ' + variant.audioGroupsCount
-                });
+                    ? 'native-master→muxed'
+                    : ('native-master→separate-audio' + (variant.audioGroup ? ('[' + variant.audioGroup + ']') : ''));
+                finishVariant(variant, mode);
                 return;
             }
 
-            ok({
-                url: stream,
-                label: 'android native-media-direct'
-            });
+            ok({ url: stream, label: 'android native-media-direct', variant: null });
         }
 
         nativeText(
@@ -1785,7 +1915,6 @@
             headers || {},
             done,
             function (firstError) {
-                /* Некоторые CDN не любят Referer/Origin. Повторяем без них. */
                 nativeText(
                     stream,
                     {},
@@ -1793,10 +1922,8 @@
                     function (secondError) {
                         ok({
                             url: stream,
-                            label:
-                                'android master-probe-fallback [' +
-                                errText(secondError || firstError) +
-                                ']'
+                            label: 'android master-probe-fallback [' + errText(secondError || firstError) + ']',
+                            variant: null
                         });
                     }
                 );
@@ -2277,7 +2404,8 @@
                                                     ? (' • KP ' + kp)
                                                     : ''
                                             ) +
-                                            ' • ' + androidPlayable.label
+                                            ' • ' + androidPlayable.label,
+                                        collapsVariant: androidPlayable.variant || null
                                     });
                                 }
                             );
@@ -2455,6 +2583,25 @@
         }
 
         var currentSourceType = sourceType(source);
+
+        /*
+         * v3.20.0: при внешнем Android-плеере пересобираем synthetic master
+         * уже с выбранной пользователем озвучкой как DEFAULT. Все остальные
+         * дорожки при этом остаются в master и доступны самому плееру.
+         */
+        if (
+            useExternal &&
+            currentSourceType === 'collaps' &&
+            resolved.collapsVariant
+        ) {
+            var voiceAwareSynthetic =
+                collapsSyntheticMasterUrl(
+                    resolved.collapsVariant,
+                    voiceChoice || null
+                );
+            if (voiceAwareSynthetic) externalUrl = voiceAwareSynthetic;
+        }
+
         var collapsBuiltin =
             currentSourceType === 'collaps' &&
             !useExternal;
