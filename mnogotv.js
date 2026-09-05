@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.19.4';
+    var VERSION = '3.19.5';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -2082,7 +2082,7 @@
                                             ? (' • KP ' + kp)
                                             : ''
                                     ) +
-                                    ' • android upstream-direct'
+                                    ' • android official-shape'
                             });
                             return;
                         }
@@ -2257,17 +2257,39 @@
             }
         }
 
-        var first = {
-            url: useExternal
-                ? externalUrl
-                : resolved.directUrl,
-            title: title,
-            subtitles: resolved.subtitles || [],
-            translate: { tracks: resolved.tracks || [] },
-            timeline: timeline(movie, season, episode),
-            headers: useExternal ? {} : (resolved.directHeaders || {}),
-            isonline: true
-        };
+        var currentSourceType = sourceType(source);
+        var collapsBuiltin =
+            currentSourceType === 'collaps' &&
+            !useExternal;
+
+        /*
+         * Для Collaps во встроенном Lampa.Player повторяем штатный
+         * collaps-provider Lampa максимально буквально: только URL,
+         * title, timeline и subtitles.
+         *
+         * В частности, НЕ передаём isonline:true и НЕ передаём headers:{}
+         * / translate. На Android эти дополнительные поля могут переводить
+         * воспроизведение на другой HLS-путь (WebView/hls.js), где прямой
+         * manifest Collaps падает с manifestLoadError.
+         */
+        var first = collapsBuiltin
+            ? {
+                url: resolved.directUrl,
+                title: title,
+                subtitles: resolved.subtitles || [],
+                timeline: timeline(movie, season, episode)
+            }
+            : {
+                url: useExternal
+                    ? externalUrl
+                    : resolved.directUrl,
+                title: title,
+                subtitles: resolved.subtitles || [],
+                translate: { tracks: resolved.tracks || [] },
+                timeline: timeline(movie, season, episode),
+                headers: useExternal ? {} : (resolved.directHeaders || {}),
+                isonline: true
+            };
 
         /*
          * Во встроенном Lampa-плеере пробуем заранее выбрать HLS-аудиотрек.
