@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.20.4';
+    var VERSION = '3.20.5';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -1758,19 +1758,27 @@
         return 0;
     }
 
-    function collapsSyntheticMasterUrl(variant, voiceChoice, ref) {
+    function collapsSyntheticMasterUrl(variant, voiceChoice, ref, audioOverrides) {
         if (!variant || !variant.url || !variant.audioRenditions || !variant.audioRenditions.length) return '';
 
         var preferred = collapsPreferredAudio(variant.audioRenditions, voiceChoice);
-        var audios = variant.audioRenditions.map(function (a, index) {
+        var sourceAudios =
+            Array.isArray(audioOverrides) && audioOverrides.length
+                ? audioOverrides
+                : variant.audioRenditions;
+
+        var audios = sourceAudios.map(function (a, index) {
             return {
-                url: a.url || '',
+                url: a.url || a.blob || '',
                 name: a.name || ('Audio ' + (index + 1)),
-                lang: a.language || '',
+                lang: a.language || a.lang || '',
                 channels: a.channels || '',
                 autoselect: a.autoselect !== false,
                 forced: !!a.forced,
-                selected: index === preferred
+                selected:
+                    a.selected !== undefined
+                        ? !!a.selected
+                        : index === preferred
             };
         }).filter(function (a) { return !!a.url; });
 
@@ -1949,6 +1957,92 @@
         }, fail);
     }
 
+
+    /*
+     * v3.20.4 proved that the Android-side native request can read the audio
+     * media playlist, while Cloudflare gets HTTP 424 for that same URL.
+     * Keep Lampa.Player untouched: fetch audio .m3u8 natively in the plugin,
+     * rewrite its segment URIs to absolute URLs, then expose only the nested
+     * audio playlists as blob: URLs referenced by the HTTPS synthetic master.
+     */
+    function collapsBuildAudioBlobRenditions(variant, headers, voiceChoice, ok, fail) {
+        var sourceAudios = Array.isArray(variant && variant.audioRenditions)
+            ? variant.audioRenditions.filter(function (a) { return a && a.url; })
+            : [];
+
+        if (!sourceAudios.length) {
+            fail(new Error('audio blob: дорожки не найдены'));
+            return;
+        }
+
+        var preferred = collapsPreferredAudio(sourceAudios, voiceChoice);
+        var ready = [];
+        var index = 0;
+
+        function getText(url, done, bad) {
+            nativeText(url, headers || {}, done, function (first) {
+                nativeText(url, {}, done, function (second) {
+                    bad(second || first);
+                });
+            });
+        }
+
+        function next() {
+            if (index >= sourceAudios.length) {
+                if (!ready.length) {
+                    fail(new Error('audio blob: ни одна дорожка не подготовлена'));
+                    return;
+                }
+
+                ok(ready);
+                return;
+            }
+
+            var sourceIndex = index;
+            var a = sourceAudios[index++];
+
+            getText(
+                a.url,
+                function (audioText) {
+                    var rewritten =
+                        collapsAbsoluteMediaPlaylist(
+                            audioText,
+                            a.url
+                        );
+
+                    if (rewritten.indexOf('#EXTM3U') !== 0) {
+                        next();
+                        return;
+                    }
+
+                    var blob =
+                        collapsBlobUrl(
+                            rewritten
+                        );
+
+                    if (blob) {
+                        ready.push({
+                            url: blob,
+                            name: a.name || ('Audio ' + (sourceIndex + 1)),
+                            language: a.language || '',
+                            channels: a.channels || '',
+                            autoselect: a.autoselect,
+                            forced: a.forced,
+                            selected: sourceIndex === preferred
+                        });
+                    }
+
+                    next();
+                },
+                function () {
+                    next();
+                }
+            );
+        }
+
+        next();
+    }
+
     function inspectCollapsMediaPlaylist(text, playlistUrl) {
         text = String(text || '').replace(/\r/g, '');
         var lines = text.split('\n');
@@ -2020,13 +2114,17 @@
             }
 
             function finish(diag) {
-                var ref = (response && response.ref) || (headers && headers.Referer) || '';
-                var synthetic =
-                    !variant.muxed && variant.audioRenditions && variant.audioRenditions.length
-                        ? collapsSyntheticMasterUrl(variant, null, ref)
-                        : '';
+                var ref =
+                    (response && response.ref) ||
+                    (headers && headers.Referer) ||
+                    '';
 
-                function emit(audioDiag) {
+                var hasSeparateAudio =
+                    !variant.muxed &&
+                    variant.audioRenditions &&
+                    variant.audioRenditions.length;
+
+                function emit(synthetic, audioDiag) {
                     ok({
                         url: synthetic || variant.url,
                         builtinUrl: '',
@@ -2040,70 +2138,46 @@
                             ' • groups ' + variant.audioGroupsCount +
                             ' • ' + collapsMediaDiag(diag) +
                             (audioDiag ? (' • ' + audioDiag) : '') +
-                            ' • builtin-playlist-proxy'
+                            ' • builtin-audio-blob'
                     });
                 }
 
-                var audios = Array.isArray(variant.audioRenditions) ? variant.audioRenditions : [];
-                var preferred = collapsPreferredAudio(audios, null);
-                var chosenAudio = preferred >= 0 ? audios[preferred] : audios[0];
-
-                if (!synthetic || !chosenAudio || !chosenAudio.url) {
-                    emit('A?');
+                if (!hasSeparateAudio) {
+                    emit('', 'A-muxed');
                     return;
                 }
 
-                var proxyAudio = resolverUrl('/playlist.m3u8', {
-                    url: chosenAudio.url,
-                    ref: ref
-                });
+                collapsBuildAudioBlobRenditions(
+                    variant,
+                    headers || {},
+                    null,
+                    function (audioBlobs) {
+                        var synthetic =
+                            collapsSyntheticMasterUrl(
+                                variant,
+                                null,
+                                ref,
+                                audioBlobs
+                            );
 
-                var directState = 'd?';
-                var directMeta = null;
-
-                function probeProxy() {
-                    nativeText(
-                        proxyAudio,
-                        {},
-                        function (txt) {
-                            var good = String(txt || '').trim().indexOf('#EXTM3U') === 0;
-                            var m = good ? inspectCollapsMediaPlaylist(txt, chosenAudio.url) : null;
-                            var tail = m ? (' A' + m.segments + 'h' + (m.hosts ? m.hosts.length : 0)) : '';
-                            emit('A[' + directState + ' p' + (good ? 'ok' : 'bad') + tail + ']');
-                        },
-                        function (e) {
-                            emit('A[' + directState + ' p' + errText(e).replace(/\s+/g, '') + ']');
-                        }
-                    );
-                }
-
-                nativeText(
-                    chosenAudio.url,
-                    {},
-                    function (txt) {
-                        var good = String(txt || '').trim().indexOf('#EXTM3U') === 0;
-                        directMeta = good ? inspectCollapsMediaPlaylist(txt, chosenAudio.url) : null;
-                        directState = good
-                            ? ('ok' + (directMeta ? directMeta.segments : ''))
-                            : 'bad';
-                        probeProxy();
+                        emit(
+                            synthetic,
+                            'Ablob' + audioBlobs.length
+                        );
                     },
-                    function () {
-                        nativeText(
-                            chosenAudio.url,
-                            headers || {},
-                            function (txt) {
-                                var good = String(txt || '').trim().indexOf('#EXTM3U') === 0;
-                                directMeta = good ? inspectCollapsMediaPlaylist(txt, chosenAudio.url) : null;
-                                directState = good
-                                    ? ('okh' + (directMeta ? directMeta.segments : ''))
-                                    : 'badh';
-                                probeProxy();
-                            },
-                            function (e) {
-                                directState = 'e' + errText(e).replace(/\s+/g, '');
-                                probeProxy();
-                            }
+                    function (e) {
+                        var fallback =
+                            collapsSyntheticMasterUrl(
+                                variant,
+                                null,
+                                ref
+                            );
+
+                        emit(
+                            fallback,
+                            'Ablob-fallback[' +
+                                errText(e).replace(/\s+/g, '') +
+                            ']'
                         );
                     }
                 );
