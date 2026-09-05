@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.20.2';
+    var VERSION = '3.20.3';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -1758,7 +1758,7 @@
         return 0;
     }
 
-    function collapsSyntheticMasterUrl(variant, voiceChoice) {
+    function collapsSyntheticMasterUrl(variant, voiceChoice, ref) {
         if (!variant || !variant.url || !variant.audioRenditions || !variant.audioRenditions.length) return '';
 
         var preferred = collapsPreferredAudio(variant.audioRenditions, voiceChoice);
@@ -1783,7 +1783,8 @@
             bandwidth: variant.bandwidth || 800000,
             width: variant.width || 0,
             height: variant.height || 0,
-            codecs: variant.codecs || ''
+            codecs: variant.codecs || '',
+            ref: ref || ''
         });
     }
 
@@ -2021,7 +2022,7 @@
             function finish(diag) {
                 var synthetic =
                     !variant.muxed && variant.audioRenditions && variant.audioRenditions.length
-                        ? collapsSyntheticMasterUrl(variant, null)
+                        ? collapsSyntheticMasterUrl(variant, null, (response && response.ref) || (headers && headers.Referer) || '')
                         : '';
 
                 ok({
@@ -2036,7 +2037,7 @@
                         ' • audio ' + (variant.audioRenditionsCount || 0) +
                         ' • groups ' + variant.audioGroupsCount +
                         ' • ' + collapsMediaDiag(diag) +
-                        ' • builtin-http'
+                        ' • builtin-playlist-proxy'
                 });
             }
 
