@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.20.0';
+    var VERSION = '3.20.1';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -1787,6 +1787,167 @@
         });
     }
 
+    function collapsAbsoluteMediaPlaylist(text, playlistUrl) {
+        text = String(text || '').replace(/\r/g, '');
+
+        function absolute(raw) {
+            raw = String(raw || '').trim();
+            if (!raw) return raw;
+            try { return new URL(raw, playlistUrl).toString(); } catch (e) { return raw; }
+        }
+
+        return text.split('\n').map(function (raw) {
+            var line = String(raw || '');
+            var trimmed = line.trim();
+            if (!trimmed) return line;
+
+            if (trimmed.charAt(0) !== '#') {
+                return absolute(trimmed);
+            }
+
+            /*
+             * Media playlists иногда содержат URI= в KEY/MAP.
+             * Делам их абсолютными, чтобы blob:-playlist не потерял base URL.
+             */
+            if (/^#EXT-X-(?:KEY|MAP|PART|PRELOAD-HINT):/i.test(trimmed)) {
+                return line.replace(/URI=(\"([^\"]*)\"|'([^']*)')/ig, function (all, quoted, dq, sq) {
+                    var value = dq !== undefined && dq !== '' ? dq : sq;
+                    var q = quoted.charAt(0);
+                    return 'URI=' + q + absolute(value) + q;
+                });
+            }
+
+            return line;
+        }).join('\n');
+    }
+
+    function collapsBlobUrl(text, mime) {
+        try {
+            if (!window.URL || !window.URL.createObjectURL || typeof Blob === 'undefined') return '';
+            return window.URL.createObjectURL(new Blob([String(text || '')], {
+                type: mime || 'application/vnd.apple.mpegurl'
+            }));
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function collapsMasterAttr(value) {
+        return String(value || '').replace(/\\/g, '\\\\').replace(/\"/g, '\\\"');
+    }
+
+    /*
+     * Android встроенный Lampa.Player падает именно на загрузке удалённого
+     * Collaps manifest. Сам Lampa.Reguest.native эти playlist читает.
+     * Поэтому не меняем ядро Player: plugin сам забирает master/media
+     * playlists, превращает их в blob: URLs, а сегменты оставляет прямыми.
+     * Если после этого будет fragLoadError, значит manifest-барьер уже снят
+     * и проблема находится непосредственно на CDN сегментов/CORS.
+     */
+    function collapsBuildBlobMaster(variant, headers, ok, fail) {
+        if (!variant || !variant.url) {
+            fail(new Error('blob master: video variant не найден'));
+            return;
+        }
+
+        function getText(url, done, bad) {
+            nativeText(url, headers || {}, done, function (first) {
+                nativeText(url, {}, done, function (second) {
+                    bad(second || first);
+                });
+            });
+        }
+
+        getText(variant.url, function (videoText) {
+            var rewrittenVideo = collapsAbsoluteMediaPlaylist(videoText, variant.url);
+            if (rewrittenVideo.indexOf('#EXTM3U') !== 0) {
+                fail(new Error('blob master: video playlist не M3U8'));
+                return;
+            }
+
+            var videoBlob = collapsBlobUrl(rewrittenVideo);
+            if (!videoBlob) {
+                fail(new Error('blob master: createObjectURL недоступен'));
+                return;
+            }
+
+            var sourceAudios = Array.isArray(variant.audioRenditions)
+                ? variant.audioRenditions.filter(function (a) { return a && a.url; })
+                : [];
+            var readyAudios = [];
+            var index = 0;
+
+            function finish() {
+                var group = variant.audioGroup || 'audio0';
+                var lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
+
+                readyAudios.forEach(function (a, i) {
+                    var parts = [
+                        '#EXT-X-MEDIA:TYPE=AUDIO',
+                        'GROUP-ID="' + collapsMasterAttr(group) + '"',
+                        'NAME="' + collapsMasterAttr(a.name || ('Audio ' + (i + 1))) + '"',
+                        'AUTOSELECT=' + (a.autoselect === false ? 'NO' : 'YES'),
+                        'DEFAULT=' + (a.isDefault ? 'YES' : 'NO'),
+                        'URI="' + collapsMasterAttr(a.blob) + '"'
+                    ];
+                    if (a.language) parts.push('LANGUAGE="' + collapsMasterAttr(a.language) + '"');
+                    if (a.channels) parts.push('CHANNELS="' + collapsMasterAttr(a.channels) + '"');
+                    if (a.forced) parts.push('FORCED=YES');
+                    lines.push(parts.join(','));
+                });
+
+                var stream = '#EXT-X-STREAM-INF:BANDWIDTH=' + (variant.bandwidth || 800000);
+                if (variant.width && variant.height) stream += ',RESOLUTION=' + variant.width + 'x' + variant.height;
+                if (variant.codecs) stream += ',CODECS="' + collapsMasterAttr(variant.codecs) + '"';
+                if (readyAudios.length) stream += ',AUDIO="' + collapsMasterAttr(group) + '"';
+                lines.push(stream);
+                lines.push(videoBlob);
+                lines.push('');
+
+                var masterBlob = collapsBlobUrl(lines.join('\n'));
+                if (!masterBlob) {
+                    fail(new Error('blob master: master createObjectURL failed'));
+                    return;
+                }
+
+                ok({
+                    url: masterBlob,
+                    audioCount: readyAudios.length,
+                    videoBlob: videoBlob
+                });
+            }
+
+            function nextAudio() {
+                if (index >= sourceAudios.length) {
+                    finish();
+                    return;
+                }
+
+                var a = sourceAudios[index++];
+                getText(a.url, function (audioText) {
+                    var rewritten = collapsAbsoluteMediaPlaylist(audioText, a.url);
+                    var blob = rewritten.indexOf('#EXTM3U') === 0 ? collapsBlobUrl(rewritten) : '';
+                    if (blob) {
+                        readyAudios.push({
+                            blob: blob,
+                            name: a.name || '',
+                            language: a.language || '',
+                            channels: a.channels || '',
+                            autoselect: a.autoselect,
+                            forced: a.forced,
+                            isDefault: a.isDefault
+                        });
+                    }
+                    nextAudio();
+                }, function () {
+                    nextAudio();
+                });
+            }
+
+            nextAudio();
+        }, fail);
+    }
+
     function inspectCollapsMediaPlaylist(text, playlistUrl) {
         text = String(text || '').replace(/\r/g, '');
         var lines = text.split('\n');
@@ -1863,18 +2024,31 @@
                         ? collapsSyntheticMasterUrl(variant, null)
                         : '';
 
-                ok({
-                    url: synthetic || variant.url,
-                    variant: synthetic ? variant : null,
-                    label:
-                        'android ' +
-                        (synthetic ? 'synthetic-av' : baseLabel) +
-                        (variant.height ? (' ' + variant.height + 'p') : '') +
-                        ' • variants ' + variant.totalVariants +
-                        ' • audio ' + (variant.audioRenditionsCount || 0) +
-                        ' • groups ' + variant.audioGroupsCount +
-                        ' • ' + collapsMediaDiag(diag)
-                });
+                function emit(blobInfo, blobError) {
+                    ok({
+                        url: synthetic || variant.url,
+                        builtinUrl: blobInfo && blobInfo.url ? blobInfo.url : '',
+                        variant: synthetic ? variant : null,
+                        label:
+                            'android ' +
+                            (synthetic ? 'synthetic-av' : baseLabel) +
+                            (variant.height ? (' ' + variant.height + 'p') : '') +
+                            ' • variants ' + variant.totalVariants +
+                            ' • audio ' + (variant.audioRenditionsCount || 0) +
+                            ' • groups ' + variant.audioGroupsCount +
+                            ' • ' + collapsMediaDiag(diag) +
+                            (blobInfo && blobInfo.url
+                                ? (' • builtin-blob a' + blobInfo.audioCount)
+                                : (' • blob-fallback[' + errText(blobError || 'n/a') + ']'))
+                    });
+                }
+
+                collapsBuildBlobMaster(
+                    variant,
+                    headers || {},
+                    function (blobInfo) { emit(blobInfo, null); },
+                    function (blobError) { emit(null, blobError); }
+                );
             }
 
             nativeText(
@@ -2405,7 +2579,8 @@
                                                     : ''
                                             ) +
                                             ' • ' + androidPlayable.label,
-                                        collapsVariant: androidPlayable.variant || null
+                                        collapsVariant: androidPlayable.variant || null,
+                                        collapsBuiltinUrl: androidPlayable.builtinUrl || ''
                                     });
                                 }
                             );
@@ -2618,7 +2793,7 @@
          */
         var first = collapsBuiltin
             ? {
-                url: resolved.directUrl,
+                url: resolved.collapsBuiltinUrl || resolved.directUrl,
                 title: title,
                 subtitles: resolved.subtitles || [],
                 timeline: timeline(movie, season, episode)
