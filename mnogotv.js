@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '3.19.7';
+    var VERSION = '3.19.8';
     var PLUGIN_ID = 'mnogotv_v318';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
@@ -1627,7 +1627,34 @@
         if (text.indexOf('#EXTM3U') !== 0) return null;
 
         var lines = text.split('\n');
+        var audioGroups = {};
         var variants = [];
+
+        /*
+         * Collaps master на Android часто использует отдельную AUDIO rendition.
+         * Если выдрать только video variant, MX показывает картинку без звука.
+         * Поэтому сначала ищем variant без AUDIO=..., то есть muxed A/V.
+         */
+        for (var a = 0; a < lines.length; a++) {
+            var mediaLine = String(lines[a] || '').trim();
+            if (mediaLine.indexOf('#EXT-X-MEDIA:') !== 0) continue;
+            if (!/TYPE=AUDIO/i.test(mediaLine)) continue;
+
+            var gid = mediaLine.match(/GROUP-ID="([^"]+)"/i);
+            var auri = mediaLine.match(/URI="([^"]+)"/i);
+            if (!gid || !gid[1]) continue;
+
+            var audioUrl = '';
+            if (auri && auri[1]) {
+                audioUrl = auri[1];
+                try { audioUrl = new URL(audioUrl, masterUrl).toString(); } catch (eAudio) {}
+            }
+
+            audioGroups[gid[1]] = {
+                url: audioUrl,
+                raw: mediaLine
+            };
+        }
 
         for (var i = 0; i < lines.length; i++) {
             var line = String(lines[i] || '').trim();
@@ -1637,6 +1664,7 @@
             var height = 0;
             var bw = line.match(/BANDWIDTH=(\d+)/i);
             var rs = line.match(/RESOLUTION=\d+x(\d+)/i);
+            var ag = line.match(/AUDIO="([^"]+)"/i);
             if (bw) bandwidth = parseInt(bw[1], 10) || 0;
             if (rs) height = parseInt(rs[1], 10) || 0;
 
@@ -1654,17 +1682,31 @@
             var absolute = uri;
             try { absolute = new URL(uri, masterUrl).toString(); } catch (e) {}
 
+            var audioGroup = ag && ag[1] ? ag[1] : '';
             variants.push({
                 url: absolute,
                 bandwidth: bandwidth,
                 height: height,
+                audioGroup: audioGroup,
+                audioUrl: audioGroup && audioGroups[audioGroup]
+                    ? audioGroups[audioGroup].url
+                    : '',
+                muxed: !audioGroup,
                 score: bandwidth || (height * 100000)
             });
         }
 
         if (!variants.length) return null;
-        variants.sort(function (a, b) { return b.score - a.score; });
-        return variants[0];
+
+        var muxed = variants.filter(function (v) { return v.muxed; });
+        var pool = muxed.length ? muxed : variants;
+
+        pool.sort(function (a, b) { return b.score - a.score; });
+        var chosen = pool[0];
+        chosen.hasMuxed = Boolean(muxed.length);
+        chosen.totalVariants = variants.length;
+        chosen.audioGroupsCount = Object.keys(audioGroups).length;
+        return chosen;
     }
 
     function resolveCollapsAndroidVariant(stream, response, ok) {
@@ -1677,11 +1719,17 @@
             var variant = pickCollapsVariant(masterText, stream);
 
             if (variant && variant.url) {
+                var mode = variant.muxed
+                    ? 'muxed'
+                    : ('separate-audio' + (variant.audioGroup ? ('[' + variant.audioGroup + ']') : ''));
+
                 ok({
                     url: variant.url,
                     label:
-                        'android native-master→variant' +
-                        (variant.height ? (' ' + variant.height + 'p') : '')
+                        'android native-master→' + mode +
+                        (variant.height ? (' ' + variant.height + 'p') : '') +
+                        ' • variants ' + variant.totalVariants +
+                        ' • audio-groups ' + variant.audioGroupsCount
                 });
                 return;
             }
@@ -2152,7 +2200,7 @@
 
                         if (androidPlatform) {
                             /*
-                             * v3.19.7: MX умеет начать master HLS, но seek
+                             * v3.19.8: MX умеет начать master HLS, но seek
                              * уходит на lftapp.ink; VLC и встроенный Lampa
                              * master не переваривают. Поэтому Android native
                              * HTTP сначала читает master сам, выбирает самый
