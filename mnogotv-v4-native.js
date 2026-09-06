@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.0-native';
-    var PLUGIN_ID = 'mnogotv_v400_native';
+    var VERSION = '4.0.2-native';
+    var PLUGIN_ID = 'mnogotv_v402_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -2001,44 +2001,62 @@
                         }
 
                         /*
-                         * Для встроенного плеера не проксируем TS/m4s
-                         * сегменты через Cloudflare: на Collaps это уже
-                         * приводило к ответам CDN 424. Через Worker идёт
-                         * только HLS manifest: он нормализует вложенные
-                         * плейлисты, а медиасегменты остаются прямыми.
+                         * HAR 06.09.2026 показал важную вещь: поле `hls`
+                         * Collaps сейчас может указывать не на HLS, а на
+                         * opaque CDN URL, который реально отвечает DASH MPD.
+                         * Поэтому больше не подсовываем его вслепую в
+                         * /playlist.m3u8. Worker сначала определяет формат и
+                         * возвращает URL с правильным расширением .m3u8/.mpd.
                          */
-                        ok({
-                            provider: 'Collaps',
-                            directUrl: resolverUrl('/playlist.m3u8', {
+                        requestJson(
+                            resolverUrl('/collaps/probe', {
                                 url: stream,
-                                ref: response.ref || COLLAPS_REF,
-                                provider: 'collaps'
+                                ref: response.ref || COLLAPS_REF
                             }),
-                            directHeaders: {},
-                            relayUrl: '',
-                            relayReady: false,
-                            externalDirect: false,
-                            subtitles:
-                                normalizeSubs(
-                                    item.cc ||
-                                    item.subtitles ||
-                                    []
-                                ),
-                            tracks:
-                                normalizeTracks(
-                                    item.audio ||
-                                    {}
-                                ),
-                            quality:
-                                '360p–720p',
-                            resolvedBy:
-                                response.label +
-                                (
-                                    kp
-                                        ? (' • KP ' + kp)
-                                        : ''
-                                )
-                        });
+                            function (media) {
+                                if (!media || media.ok === false || !media.url) {
+                                    fail(new Error(
+                                        'Collaps: формат потока не определён' +
+                                        (media && media.error ? (' • ' + media.error) : '')
+                                    ));
+                                    return;
+                                }
+
+                                ok({
+                                    provider: 'Collaps',
+                                    directUrl: normalizeDirectUrl(media.url),
+                                    directHeaders: {},
+                                    relayUrl: '',
+                                    relayReady: false,
+                                    externalDirect: false,
+                                    subtitles:
+                                        normalizeSubs(
+                                            item.cc ||
+                                            item.subtitles ||
+                                            []
+                                        ),
+                                    tracks:
+                                        normalizeTracks(
+                                            item.audio ||
+                                            {}
+                                        ),
+                                    quality:
+                                        media.format === 'dash'
+                                            ? 'DASH'
+                                            : 'HLS',
+                                    resolvedBy:
+                                        response.label +
+                                        (
+                                            kp
+                                                ? (' • KP ' + kp)
+                                                : ''
+                                        ) +
+                                        ' • ' +
+                                        String(media.format || 'media').toUpperCase()
+                                });
+                            },
+                            fail
+                        );
                     },
                     fail
                 );
