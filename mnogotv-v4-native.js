@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.11-native';
-    var PLUGIN_ID = 'mnogotv_v411_native';
+    var VERSION = '4.0.12-native';
+    var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -2178,11 +2178,30 @@
         }
 
         /*
-         * Повторяем порядок online_mod:
-         * 1) официальный Collaps по KP
-         * 2) fallback по IMDb
-         * 3) iframe от MnogoTV только как последний резерв
+         * v4.0.12: сначала пробуем ТОТ embed URL, который реально вернул
+         * MnogoTV/Kinobox для выбранного источника. Для Collaps это обычно
+         * api.ortified.ws/embed/movie/<id>. Пользователь подтвердил, что
+         * такие movie/embed страницы открываются в браузере, а KP-route для
+         * S1E1 у нас отдавал только HLS и упирался в 410 на фрагментах.
+         *
+         * Принимаем только собственные Collaps-host'ы, чтобы не вернуть
+         * старую проблему с чужим iframe и неверно выбранной серией. Саму
+         * серию всё равно выбирает pickCollapsItem(cfg, season, episode).
          */
+        try {
+            var sourceIframe = normalizeDirectUrl(source && source.iframeUrl || '');
+            if (sourceIframe) {
+                var sourceHost = new URL(sourceIframe).hostname.toLowerCase();
+                if (
+                    sourceHost === 'api.ortified.ws' ||
+                    sourceHost === 'api.kinogram.best'
+                ) {
+                    add(sourceIframe, 'source movie embed');
+                }
+            }
+        } catch (eSourceIframe) {}
+
+        /* Fallbacks: KP, затем IMDb. */
         if (kp) {
             add(
                 'https://api.ortified.ws/embed/kp/' + encodeURIComponent(kp),
