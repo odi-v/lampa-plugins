@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.10-native';
-    var PLUGIN_ID = 'mnogotv_v410_native';
+    var VERSION = '4.0.11-native';
+    var PLUGIN_ID = 'mnogotv_v411_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -2317,6 +2317,146 @@
     }
 
 
+
+    /*
+     * v4.0.11: Collaps DASH transport inside the stock Lampa.Player.
+     *
+     * The real VenomPlayer does not start with HLS. Its order is:
+     *   dasha (AV1) -> dash -> hls.
+     * cdn.js rewrites every DASH MPD/WebM URL to /x-en-x/<encoded>.
+     * We mirror only that URL transformation through dash.js RequestModifier.
+     * The media remains inside Lampa.Player; no iframe/external player/CF relay.
+     */
+    var COLLAPS_NATIVE_DASH = {
+        installed: false,
+        active: false,
+        unixTime: 0,
+        originalMediaPlayer: null
+    };
+
+    function collapsAv1Supported() {
+        try {
+            return !!(
+                window.MediaSource &&
+                typeof MediaSource.isTypeSupported === 'function' &&
+                MediaSource.isTypeSupported('video/webm; codecs="av01.0.05M.08"')
+            );
+        } catch (e) {}
+        return false;
+    }
+
+    function configureCollapsNativeDash(unixTime) {
+        COLLAPS_NATIVE_DASH.unixTime = parseInt(unixTime || 0, 10) || 0;
+        COLLAPS_NATIVE_DASH.active = true;
+
+        if (COLLAPS_NATIVE_DASH.installed) return true;
+        if (
+            typeof dashjs === 'undefined' ||
+            !dashjs ||
+            typeof dashjs.MediaPlayer !== 'function'
+        ) {
+            return false;
+        }
+
+        var OriginalMediaPlayer = dashjs.MediaPlayer;
+        COLLAPS_NATIVE_DASH.originalMediaPlayer = OriginalMediaPlayer;
+
+        function WrappedMediaPlayer() {
+            var factory = OriginalMediaPlayer.apply(this, arguments);
+            if (!factory || typeof factory.create !== 'function') return factory;
+
+            var originalCreate = factory.create;
+            factory.create = function () {
+                var player = originalCreate.apply(factory, arguments);
+
+                if (
+                    COLLAPS_NATIVE_DASH.active &&
+                    player &&
+                    typeof player.extend === 'function'
+                ) {
+                    var unix = COLLAPS_NATIVE_DASH.unixTime;
+
+                    try {
+                        player.extend(
+                            'RequestModifier',
+                            function () {
+                                return {
+                                    modifyRequestHeader: function (xhr) {
+                                        return xhr;
+                                    },
+                                    modifyRequestURL: function (url) {
+                                        var value = String(url || '');
+                                        try {
+                                            if (
+                                                isCollapsCdnUrl(value) &&
+                                                value.indexOf('/x-en-x/') === -1
+                                            ) {
+                                                var mapped = collapsClientCdnUrl(
+                                                    value,
+                                                    unix,
+                                                    '',
+                                                    false
+                                                );
+                                                mapped = stripHash(mapped);
+                                                log('Collaps DASH map', value, '=>', mapped);
+                                                return mapped;
+                                            }
+                                        } catch (e) {
+                                            log('Collaps DASH map error', e);
+                                        }
+                                        return value;
+                                    }
+                                };
+                            },
+                            true
+                        );
+                    } catch (e2) {
+                        log('Collaps DASH RequestModifier install error', e2);
+                    }
+
+                    try {
+                        var events = factory.events || {};
+                        if (typeof player.on === 'function' && events.ERROR) {
+                            player.on(events.ERROR, function (evt) {
+                                try {
+                                    var er = evt && evt.error || evt || {};
+                                    var req = er && er.data && er.data.request || {};
+                                    var code = er.code !== undefined ? er.code : '';
+                                    var message = er.message || er.name || 'dash error';
+                                    var reqUrl = req.url || '';
+                                    notify(
+                                        'Collaps DASH DEBUG: ' +
+                                        (code !== '' ? ('code ' + code + ' • ') : '') +
+                                        message +
+                                        (reqUrl ? (' • ' + reqUrl.slice(0, 110)) : '')
+                                    );
+                                } catch (eDbg) {}
+                            });
+                        }
+                    } catch (e3) {}
+                }
+
+                return player;
+            };
+
+            return factory;
+        }
+
+        try {
+            Object.keys(OriginalMediaPlayer).forEach(function (key) {
+                try { WrappedMediaPlayer[key] = OriginalMediaPlayer[key]; } catch (e) {}
+            });
+            try { WrappedMediaPlayer.prototype = OriginalMediaPlayer.prototype; } catch (e2) {}
+            dashjs.MediaPlayer = WrappedMediaPlayer;
+            COLLAPS_NATIVE_DASH.installed = true;
+            log('Collaps DASH RequestModifier installed');
+            return true;
+        } catch (e3) {
+            log('Collaps DASH wrapper install failed', e3);
+            return false;
+        }
+    }
+
     function resolveCollaps(
         source,
         imdb,
@@ -2360,6 +2500,16 @@
                             return;
                         }
 
+                        var dashaStream =
+                            normalizeDirectUrl(
+                                item.dasha ||
+                                (
+                                    item.source &&
+                                    item.source.dasha
+                                ) ||
+                                ''
+                            );
+
                         var dashStream =
                             normalizeDirectUrl(
                                 item.dash ||
@@ -2384,6 +2534,11 @@
                             season === null &&
                             cfg.source
                         ) {
+                            if (!dashaStream) {
+                                dashaStream = normalizeDirectUrl(
+                                    cfg.source.dasha || ''
+                                );
+                            }
                             if (!dashStream) {
                                 dashStream = normalizeDirectUrl(
                                     cfg.source.dash || ''
@@ -2397,233 +2552,106 @@
                             item = cfg.source;
                         }
 
-                        if (!dashStream && !hlsStream) {
-                            fail(
-                                new Error(
-                                    'Collaps: DASH/HLS не найден'
-                                )
-                            );
+                        if (!dashaStream && !dashStream && !hlsStream) {
+                            fail(new Error('Collaps: DASHA/DASH/HLS не найден'));
                             return;
                         }
 
-                        /*
-                         * HAR реального браузерного Collaps показал:
-                         * S1E1 содержит одновременно item.dash и item.hls,
-                         * но сам VenomPlayer загружает DASH MPD, после чего
-                         * получает WebM-сегменты. HLS URL в этом сеансе вообще
-                         * не запрашивался.
-                         *
-                         * Поэтому на Android сначала повторяем реальный путь
-                         * Collaps: DASH. HLS оставляем только fallback.
-                         */
-                        var ref = response.ref || COLLAPS_REF;
                         var cdnMeta = cfg.__mnogotvCdn || {};
                         var cdnUnix = parseInt(cdnMeta.unixTime || 0, 10) || 0;
                         var cdnKey = String(cdnMeta.key || '');
+                        var av1 = collapsAv1Supported();
+                        var selectedDash = '';
+                        var selectedDashLabel = '';
 
-                        /*
-                         * v4.0.6: media no longer passes through Cloudflare.
-                         * The embed HTML was fetched on this device, so its signed CDN
-                         * URLs must also be requested from this device. First verify
-                         * the transformed URL through Lampa.Reguest.native, then hand
-                         * the same client-side URL to the built-in Lampa.Player.
-                         */
-                        function finishClient(raw, format, headers) {
-                            var clientUrl = collapsClientCdnUrl(raw, cdnUnix, cdnKey);
-                            if (!clientUrl) {
-                                fail(new Error('Collaps: client CDN URL не построен'));
+                        /* Exact VenomPlayer order: dasha(AV1) -> dash -> hls. */
+                        if (dashaStream && av1) {
+                            selectedDash = dashaStream;
+                            selectedDashLabel = 'DASHA/AV1';
+                        }
+                        else if (dashStream) {
+                            selectedDash = dashStream;
+                            selectedDashLabel = 'DASH';
+                        }
+
+                        if (selectedDash) {
+                            var clientDashUrl = collapsClientCdnUrl(
+                                selectedDash,
+                                cdnUnix,
+                                cdnKey,
+                                true
+                            );
+
+                            if (!clientDashUrl) {
+                                fail(new Error('Collaps: DASH client URL не построен'));
                                 return;
                             }
 
-                            nativeText(
-                                clientUrl,
-                                headers,
-                                function (body) {
-                                    body = String(body || '').trim();
-
-                                    var valid =
-                                        format === 'dash'
-                                            ? /<MPD\b/i.test(body)
-                                            : body.indexOf('#EXTM3U') === 0;
-
-                                    if (!valid) {
-                                        fail(new Error(
-                                            'Collaps: client ' +
-                                            String(format || '').toUpperCase() +
-                                            ' вернул не manifest'
-                                        ));
-                                        return;
-                                    }
-
-                                    /*
-                                     * Fragment is never sent over HTTP. It only gives
-                                     * Lampa's stream detector an explicit extension.
-                                     */
-                                    var playerUrl =
-                                        clientUrl +
-                                        (
-                                            format === 'dash'
-                                                ? '#manifest.mpd'
-                                                : '#master.m3u8'
-                                        );
-
-                                    if (format === 'hls') {
-                                        configureCollapsNativeHls(
-                                            raw,
-                                            clientUrl,
-                                            cdnUnix,
-                                            cdnKey,
-                                            headers
-                                        );
-                                    }
-
-                                    ok({
-                                        provider: 'Collaps',
-                                        directUrl: playerUrl,
-                                        directHeaders: headers,
-                                        relayUrl: '',
-                                        relayReady: false,
-                                        externalDirect: false,
-                                        subtitles:
-                                            normalizeSubs(
-                                                item.cc ||
-                                                item.subtitles ||
-                                                []
-                                            ),
-                                        tracks:
-                                            normalizeTracks(
-                                                item.audio ||
-                                                {}
-                                            ),
-                                        quality:
-                                            format === 'dash'
-                                                ? 'DASH'
-                                                : 'HLS',
-                                        resolvedBy:
-                                            response.label +
-                                            (
-                                                kp
-                                                    ? (' • KP ' + kp)
-                                                    : ''
-                                            ) +
-                                            ' • ' +
-                                            String(format || 'media').toUpperCase() +
-                                            '/CLIENT'
-                                    });
-                                },
-                                fail
-                            );
-                        }
-
-                        function probeClient(raw, format, fallbackRaw, fallbackFormat) {
-                            if (!raw) {
-                                if (fallbackRaw) {
-                                    finishClient(
-                                        fallbackRaw,
-                                        fallbackFormat,
-                                        collapsPlaybackHeaders(fallbackFormat)
-                                    );
-                                }
-                                else {
-                                    fail(new Error('Collaps: media URL отсутствует'));
-                                }
+                            if (!configureCollapsNativeDash(cdnUnix)) {
+                                fail(new Error('Collaps: dash.js RequestModifier недоступен'));
                                 return;
                             }
 
-                            var headers = collapsPlaybackHeaders(format);
-                            var clientUrl = collapsClientCdnUrl(raw, cdnUnix, cdnKey);
+                            ok({
+                                provider: 'Collaps',
+                                directUrl: stripHash(clientDashUrl) + '#manifest.mpd',
+                                directHeaders: {},
+                                relayUrl: '',
+                                relayReady: false,
+                                externalDirect: false,
+                                subtitles: normalizeSubs(item.cc || item.subtitles || []),
+                                tracks: normalizeTracks(item.audio || {}),
+                                quality: selectedDashLabel,
+                                resolvedBy:
+                                    response.label +
+                                    (kp ? (' • KP ' + kp) : '') +
+                                    ' • ' + selectedDashLabel + '/XHR'
+                            });
+                            return;
+                        }
 
-                            nativeText(
-                                clientUrl,
-                                headers,
-                                function (body) {
-                                    body = String(body || '').trim();
-
-                                    var valid =
-                                        format === 'dash'
-                                            ? /<MPD\b/i.test(body)
-                                            : body.indexOf('#EXTM3U') === 0;
-
-                                    if (valid) {
-                                        var playerUrl =
-                                            clientUrl +
-                                            (
-                                                format === 'dash'
-                                                    ? '#manifest.mpd'
-                                                    : '#master.m3u8'
-                                            );
-
-                                        if (format === 'hls') {
-                                            configureCollapsNativeHls(
-                                                raw,
-                                                clientUrl,
-                                                cdnUnix,
-                                                cdnKey,
-                                                headers
-                                            );
-                                        }
-
-                                        ok({
-                                            provider: 'Collaps',
-                                            directUrl: playerUrl,
-                                            directHeaders: headers,
-                                            relayUrl: '',
-                                            relayReady: false,
-                                            externalDirect: false,
-                                            subtitles: normalizeSubs(item.cc || item.subtitles || []),
-                                            tracks: normalizeTracks(item.audio || {}),
-                                            quality: format === 'dash' ? 'DASH' : 'HLS',
-                                            resolvedBy:
-                                                response.label +
-                                                (kp ? (' • KP ' + kp) : '') +
-                                                ' • ' +
-                                                String(format || 'media').toUpperCase() +
-                                                '/CLIENT'
-                                        });
-                                        return;
-                                    }
-
-                                    if (fallbackRaw) {
-                                        probeClient(
-                                            fallbackRaw,
-                                            fallbackFormat,
-                                            '',
-                                            ''
-                                        );
-                                    }
-                                    else {
-                                        fail(new Error(
-                                            'Collaps: client ' +
-                                            String(format || '').toUpperCase() +
-                                            ' вернул не manifest'
-                                        ));
-                                    }
-                                },
-                                function (firstError) {
-                                    if (fallbackRaw) {
-                                        probeClient(
-                                            fallbackRaw,
-                                            fallbackFormat,
-                                            '',
-                                            ''
-                                        );
-                                    }
-                                    else {
-                                        fail(new Error(
-                                            'Collaps client CDN: ' +
-                                            errText(firstError)
-                                        ));
-                                    }
-                                }
+                        /* Only if DASH is genuinely unavailable, use HLS client path. */
+                        if (hlsStream) {
+                            var hlsHeaders = collapsPlaybackHeaders('hls');
+                            var clientHlsUrl = collapsClientCdnUrl(
+                                hlsStream,
+                                cdnUnix,
+                                cdnKey,
+                                true
                             );
+
+                            if (!clientHlsUrl) {
+                                fail(new Error('Collaps: HLS client URL не построен'));
+                                return;
+                            }
+
+                            configureCollapsNativeHls(
+                                hlsStream,
+                                clientHlsUrl,
+                                cdnUnix,
+                                cdnKey,
+                                hlsHeaders
+                            );
+
+                            ok({
+                                provider: 'Collaps',
+                                directUrl: stripHash(clientHlsUrl) + '#master.m3u8',
+                                directHeaders: hlsHeaders,
+                                relayUrl: '',
+                                relayReady: false,
+                                externalDirect: false,
+                                subtitles: normalizeSubs(item.cc || item.subtitles || []),
+                                tracks: normalizeTracks(item.audio || {}),
+                                quality: 'HLS',
+                                resolvedBy:
+                                    response.label +
+                                    (kp ? (' • KP ' + kp) : '') +
+                                    ' • HLS/CLIENT'
+                            });
+                            return;
                         }
 
-                        if (dashStream) {
-                            probeClient(dashStream, 'dash', hlsStream, 'hls');
-                        }
-                        else {
-                            probeClient(hlsStream, 'hls', '', '');
-                        }
+                        fail(new Error('Collaps: совместимый media path не найден'));
                     },
                     fail
                 );
