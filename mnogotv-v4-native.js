@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.6-native';
+    var VERSION = '4.0.7-native';
     var PLUGIN_ID = 'mnogotv_v406_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -1743,6 +1743,244 @@
         };
     }
 
+
+    /*
+     * v4.0.7: Android native HLS loader for Collaps.
+     *
+     * v4.0.6 proved that Lampa.Reguest.native can fetch the signed Collaps
+     * manifest from the device, while Lampa's stock Hls.js XHR then fails
+     * with manifestLoadError. Lampa creates Hls with `new Hls()` and no
+     * custom config, so we install a default loader which only intercepts
+     * Collaps CDN requests. Every other URL falls back to Hls.js' original
+     * loader unchanged.
+     */
+    var COLLAPS_NATIVE_HLS = {
+        installed: false,
+        originalLoader: null,
+        unixTime: 0,
+        key: '',
+        headers: {},
+        urlMap: {}
+    };
+
+    function stripHash(url) {
+        return String(url || '').split('#')[0];
+    }
+
+    function isCollapsCdnUrl(url) {
+        try {
+            var host = new URL(stripHash(url)).hostname.toLowerCase();
+            return host === 'interkh.com' || host.slice(-12) === '.interkh.com';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function base64ToArrayBuffer(value) {
+        var raw = value;
+        if (raw && typeof raw === 'object') {
+            raw = raw.base64 !== undefined ? raw.base64 :
+                  raw.data !== undefined ? raw.data :
+                  raw.body !== undefined ? raw.body :
+                  raw.response !== undefined ? raw.response :
+                  raw.result !== undefined ? raw.result : '';
+        }
+        raw = String(raw || '');
+        var comma = raw.indexOf('base64,');
+        if (comma >= 0) raw = raw.slice(comma + 7);
+        raw = raw.replace(/\s+/g, '');
+        var binary = atob(raw);
+        var out = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i) & 255;
+        return out.buffer;
+    }
+
+    function hlsNativeStats() {
+        var now = (window.performance && performance.now) ? performance.now() : Date.now();
+        return {
+            aborted: false,
+            loaded: 0,
+            retry: 0,
+            total: 0,
+            chunkCount: 0,
+            bwEstimate: 0,
+            loading: { start: now, first: 0, end: 0 },
+            parsing: { start: 0, end: 0 },
+            buffering: { start: 0, first: 0, end: 0 }
+        };
+    }
+
+    function mapCollapsPlaylistUri(raw, originalBase) {
+        raw = String(raw || '').trim();
+        if (!raw || raw.indexOf('data:') === 0 || raw.indexOf('blob:') === 0) return raw;
+        try {
+            var logical = new URL(raw, originalBase).toString();
+            var client = collapsClientCdnUrl(
+                logical,
+                COLLAPS_NATIVE_HLS.unixTime,
+                COLLAPS_NATIVE_HLS.key
+            );
+            client = stripHash(client);
+            COLLAPS_NATIVE_HLS.urlMap[client] = logical;
+            return client;
+        } catch (e) {
+            return raw;
+        }
+    }
+
+    function rewriteCollapsNativePlaylist(body, originalBase) {
+        return String(body || '').split(/\r?\n/).map(function (line) {
+            if (!line) return line;
+            if (line.charAt(0) !== '#') {
+                return mapCollapsPlaylistUri(line.trim(), originalBase);
+            }
+            return line.replace(/URI="([^"]+)"/g, function (_, uri) {
+                return 'URI="' + mapCollapsPlaylistUri(uri, originalBase) + '"';
+            });
+        }).join('\n');
+    }
+
+    function configureCollapsNativeHls(rawUrl, clientUrl, unixTime, key, headers) {
+        COLLAPS_NATIVE_HLS.unixTime = parseInt(unixTime || 0, 10) || 0;
+        COLLAPS_NATIVE_HLS.key = String(key || '');
+        COLLAPS_NATIVE_HLS.headers = headers || {};
+        COLLAPS_NATIVE_HLS.urlMap = {};
+        COLLAPS_NATIVE_HLS.urlMap[stripHash(clientUrl)] = normalizeDirectUrl(rawUrl);
+
+        if (COLLAPS_NATIVE_HLS.installed) return true;
+        if (typeof Hls === 'undefined' || !Hls.DefaultConfig || !Hls.DefaultConfig.loader) return false;
+
+        var OriginalLoader = Hls.DefaultConfig.loader;
+        COLLAPS_NATIVE_HLS.originalLoader = OriginalLoader;
+
+        function CollapsNativeLoader(config) {
+            this.config = config;
+            this.context = null;
+            this.stats = hlsNativeStats();
+            this.network = null;
+            this.fallback = null;
+        }
+
+        CollapsNativeLoader.prototype.destroy = function () {
+            this.abort();
+            this.context = null;
+            this.config = null;
+        };
+
+        CollapsNativeLoader.prototype.abort = function () {
+            this.stats.aborted = true;
+            try { if (this.network && this.network.clear) this.network.clear(); } catch (e) {}
+            try { if (this.fallback && this.fallback.abort) this.fallback.abort(); } catch (e2) {}
+        };
+
+        CollapsNativeLoader.prototype.getCacheAge = function () { return null; };
+        CollapsNativeLoader.prototype.getResponseHeader = function () { return null; };
+
+        CollapsNativeLoader.prototype.load = function (context, config, callbacks) {
+            this.context = context;
+            this.stats = hlsNativeStats();
+
+            var visibleUrl = stripHash(context && context.url || '');
+            if (!isCollapsCdnUrl(visibleUrl)) {
+                this.fallback = new OriginalLoader(this.config);
+                this.fallback.load(context, config, callbacks);
+                this.stats = this.fallback.stats || this.stats;
+                return;
+            }
+
+            var logicalUrl = COLLAPS_NATIVE_HLS.urlMap[visibleUrl] || visibleUrl;
+            var requestUrl = visibleUrl.indexOf('/x-en-x/') >= 0
+                ? visibleUrl
+                : stripHash(collapsClientCdnUrl(
+                    logicalUrl,
+                    COLLAPS_NATIVE_HLS.unixTime,
+                    COLLAPS_NATIVE_HLS.key
+                ));
+
+            COLLAPS_NATIVE_HLS.urlMap[requestUrl] = logicalUrl;
+
+            var isBinary = String(context && context.responseType || '').toLowerCase() === 'arraybuffer';
+            var headers = {};
+            var baseHeaders = COLLAPS_NATIVE_HLS.headers || {};
+            Object.keys(baseHeaders).forEach(function (k) { headers[k] = baseHeaders[k]; });
+            if (context && context.rangeStart !== undefined && context.rangeEnd !== undefined) {
+                headers.Range = 'bytes=' + context.rangeStart + '-' + (context.rangeEnd - 1);
+            }
+
+            var network = null;
+            try { network = new Lampa.Reguest(); } catch (e) {
+                try { network = new Lampa.Request(); } catch (e2) {}
+            }
+            if (!network || typeof network.native !== 'function') {
+                callbacks.onError({ code: 0, text: 'Lampa.Reguest.native unavailable' }, context, null, this.stats);
+                return;
+            }
+            this.network = network;
+
+            var timeout = (config && (config.timeout || config.maxLoadTimeMs)) || 20000;
+            try { if (network.timeout) network.timeout(Math.max(5000, timeout)); } catch (e3) {}
+
+            var self = this;
+            try {
+                network.native(
+                    requestUrl,
+                    function (response) {
+                        if (self.stats.aborted) return;
+                        var now = (window.performance && performance.now) ? performance.now() : Date.now();
+                        self.stats.loading.first = self.stats.loading.first || now;
+                        self.stats.loading.end = now;
+                        try {
+                            var data;
+                            if (isBinary) {
+                                data = base64ToArrayBuffer(response);
+                                self.stats.loaded = self.stats.total = data.byteLength || 0;
+                            }
+                            else {
+                                data = typeof response === 'string' ? response : String(response || '');
+                                if (/^(manifest|level|audioTrack|subtitleTrack)$/i.test(String(context && context.type || ''))) {
+                                    data = rewriteCollapsNativePlaylist(data, logicalUrl);
+                                }
+                                self.stats.loaded = self.stats.total = data.length || 0;
+                            }
+                            self.stats.chunkCount = 1;
+                            callbacks.onSuccess({ url: context.url, data: data }, self.stats, context, null);
+                        }
+                        catch (decodeError) {
+                            callbacks.onError({ code: 0, text: 'native decode: ' + errText(decodeError) }, context, null, self.stats);
+                        }
+                    },
+                    function (a, c) {
+                        if (self.stats.aborted) return;
+                        var status = a && a.status !== undefined ? Number(a.status) : 0;
+                        callbacks.onError({
+                            code: status || 0,
+                            text: errText(a || c || 'native network error')
+                        }, context, a || null, self.stats);
+                    },
+                    false,
+                    {
+                        dataType: isBinary ? 'base64' : 'text',
+                        headers: headers
+                    }
+                );
+            }
+            catch (e4) {
+                callbacks.onError({ code: 0, text: errText(e4) }, context, null, self.stats);
+            }
+        };
+
+        try {
+            Hls.DefaultConfig.loader = CollapsNativeLoader;
+            COLLAPS_NATIVE_HLS.installed = true;
+            log('Collaps native Hls loader installed');
+            return true;
+        }
+        catch (e5) {
+            log('Collaps native Hls loader install failed', e5);
+            return false;
+        }
+    }
+
     function normalizeSubs(list) {
         if (!Array.isArray(list)) return [];
         return list.map(function (s) {
@@ -2143,6 +2381,16 @@
                                                 : '#master.m3u8'
                                         );
 
+                                    if (format === 'hls') {
+                                        configureCollapsNativeHls(
+                                            raw,
+                                            clientUrl,
+                                            cdnUnix,
+                                            cdnKey,
+                                            headers
+                                        );
+                                    }
+
                                     ok({
                                         provider: 'Collaps',
                                         directUrl: playerUrl,
@@ -2218,6 +2466,16 @@
                                                     ? '#manifest.mpd'
                                                     : '#master.m3u8'
                                             );
+
+                                        if (format === 'hls') {
+                                            configureCollapsNativeHls(
+                                                raw,
+                                                clientUrl,
+                                                cdnUnix,
+                                                cdnKey,
+                                                headers
+                                            );
+                                        }
 
                                         ok({
                                             provider: 'Collaps',
