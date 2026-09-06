@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.8-native';
-    var PLUGIN_ID = 'mnogotv_v406_native';
+    var VERSION = '4.0.9-native';
+    var PLUGIN_ID = 'mnogotv_v409_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -1760,7 +1760,9 @@
         unixTime: 0,
         key: '',
         headers: {},
-        urlMap: {}
+        urlMap: {},
+        lastRequest: null,
+        lastError: null
     };
 
     function stripHash(url) {
@@ -1903,6 +1905,14 @@
             var headers = {};
             var baseHeaders = COLLAPS_NATIVE_HLS.headers || {};
             Object.keys(baseHeaders).forEach(function (k) { headers[k] = baseHeaders[k]; });
+
+            /*
+             * Media fragments are binary resources. A real browser requests
+             * them with a generic Accept header rather than an HLS-manifest MIME. Keep
+             * Origin/Referer, but do not advertise the playlist MIME for a
+             * fragment request.
+             */
+            if (isBinary) headers.Accept = '*/*';
             /*
              * Hls.js initializes rangeStart/rangeEnd to 0/0 for ordinary
              * fragments. v4.0.7 treated the mere presence of those fields as
@@ -1937,6 +1947,19 @@
             try { if (network.timeout) network.timeout(Math.max(5000, timeout)); } catch (e3) {}
 
             var self = this;
+            COLLAPS_NATIVE_HLS.lastRequest = {
+                type: String(context && context.type || ''),
+                responseType: String(context && context.responseType || ''),
+                visibleUrl: visibleUrl,
+                logicalUrl: logicalUrl,
+                requestUrl: requestUrl,
+                rangeStart: Number(context && context.rangeStart || 0),
+                rangeEnd: Number(context && context.rangeEnd || 0),
+                headers: headers
+            };
+            try { window.__mnogotv_collaps_debug = COLLAPS_NATIVE_HLS; } catch (eDbg0) {}
+            log('Collaps native loader request', COLLAPS_NATIVE_HLS.lastRequest);
+
             try {
                 network.native(
                     requestUrl,
@@ -1950,6 +1973,12 @@
                             if (isBinary) {
                                 data = base64ToArrayBuffer(response);
                                 self.stats.loaded = self.stats.total = data.byteLength || 0;
+                                COLLAPS_NATIVE_HLS.lastError = null;
+                                log('Collaps native fragment success', {
+                                    bytes: self.stats.loaded,
+                                    responseKind: Object.prototype.toString.call(response),
+                                    requestUrl: requestUrl
+                                });
                             }
                             else {
                                 data = typeof response === 'string' ? response : String(response || '');
@@ -1962,15 +1991,44 @@
                             callbacks.onSuccess({ url: context.url, data: data }, self.stats, context, null);
                         }
                         catch (decodeError) {
-                            callbacks.onError({ code: 0, text: 'native decode: ' + errText(decodeError) }, context, null, self.stats);
+                            var decodeText = 'native decode: ' + errText(decodeError);
+                            COLLAPS_NATIVE_HLS.lastError = {
+                                phase: isBinary ? 'fragment-decode' : 'text-decode',
+                                code: 0,
+                                text: decodeText,
+                                requestUrl: requestUrl
+                            };
+                            try { window.__mnogotv_collaps_debug = COLLAPS_NATIVE_HLS; } catch (eDbg1) {}
+                            log('Collaps native loader decode error', COLLAPS_NATIVE_HLS.lastError);
+                            try { notify('Collaps DEBUG: ' + decodeText); } catch (eNoty1) {}
+                            callbacks.onError({ code: 0, text: decodeText }, context, null, self.stats);
                         }
                     },
                     function (a, c) {
                         if (self.stats.aborted) return;
                         var status = a && a.status !== undefined ? Number(a.status) : 0;
+                        var nativeTextError = errText(a || c || 'native network error');
+                        COLLAPS_NATIVE_HLS.lastError = {
+                            phase: isBinary ? 'fragment-network' : 'playlist-network',
+                            code: status || 0,
+                            text: nativeTextError,
+                            requestUrl: requestUrl,
+                            visibleUrl: visibleUrl,
+                            responseType: String(context && context.responseType || '')
+                        };
+                        try { window.__mnogotv_collaps_debug = COLLAPS_NATIVE_HLS; } catch (eDbg2) {}
+                        log('Collaps native loader network error', COLLAPS_NATIVE_HLS.lastError);
+                        try {
+                            notify(
+                                'Collaps DEBUG: ' +
+                                COLLAPS_NATIVE_HLS.lastError.phase +
+                                ' HTTP ' + (status || 0) +
+                                ' • ' + nativeTextError
+                            );
+                        } catch (eNoty2) {}
                         callbacks.onError({
                             code: status || 0,
-                            text: errText(a || c || 'native network error')
+                            text: nativeTextError
                         }, context, a || null, self.stats);
                     },
                     false,
