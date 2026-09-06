@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.4-native';
+    var VERSION = '4.0.5-native';
     var PLUGIN_ID = 'mnogotv_v404_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -1645,13 +1645,35 @@
     }
 
     function parseCollapsHtml(html) {
-        html = String(html || '').replace(/\n/g, '');
-        var find = html.match(/makePlayer\(({.*?})\);/);
+        html = String(html || '');
+
+        /*
+         * Collaps загружает media не по URL из makePlayer напрямую.
+         * api.ortified.ws/cdn.js добавляет bare-token fa4cdd5c и затем
+         * переводит запросы .mpd/.webm в /x-en-x/<encoded>.
+         * Эти два значения живут СНАРУЖИ makePlayer, поэтому сохраняем их
+         * рядом с распарсенным конфигом.
+         */
+        var unixMatch = html.match(/unixTime\s*=\s*(\d+)/i);
+        var keyMatch = null;
+        var keyRe = /fa4cdd5c\s*=\s*["']([0-9a-f]+)["']/ig;
+        var km;
+        while ((km = keyRe.exec(html))) keyMatch = km[1];
+
+        var flat = html.replace(/\n/g, '');
+        var find = flat.match(/makePlayer\(({.*?})\);/);
         var json = null;
 
         try {
             json = find && (0, eval)('"use strict"; (' + find[1] + ');');
         } catch (e) {}
+
+        if (json) {
+            json.__mnogotvCdn = {
+                unixTime: unixMatch ? parseInt(unixMatch[1], 10) : 0,
+                key: keyMatch || ''
+            };
+        }
 
         return json;
     }
@@ -2012,6 +2034,9 @@
                          * Collaps: DASH. HLS оставляем только fallback.
                          */
                         var ref = response.ref || COLLAPS_REF;
+                        var cdnMeta = cfg.__mnogotvCdn || {};
+                        var cdnUnix = parseInt(cdnMeta.unixTime || 0, 10) || 0;
+                        var cdnKey = String(cdnMeta.key || '');
 
                         function finishMedia(media) {
                             if (!media || media.ok === false || !media.url) {
@@ -2052,7 +2077,8 @@
                                             : ''
                                     ) +
                                     ' • ' +
-                                    String(media.format || 'media').toUpperCase()
+                                    String(media.format || 'media').toUpperCase() +
+                                    (media.transport ? ('/' + String(media.transport).toUpperCase()) : '')
                             });
                         }
 
@@ -2060,7 +2086,9 @@
                             requestJson(
                                 resolverUrl('/collaps/probe', {
                                     url: raw,
-                                    ref: ref
+                                    ref: ref,
+                                    unix: cdnUnix,
+                                    key: cdnKey
                                 }),
                                 finishMedia,
                                 function (firstError) {
@@ -2068,7 +2096,9 @@
                                         requestJson(
                                             resolverUrl('/collaps/probe', {
                                                 url: fallbackRaw,
-                                                ref: ref
+                                                ref: ref,
+                                                unix: cdnUnix,
+                                                key: cdnKey
                                             }),
                                             finishMedia,
                                             fail
