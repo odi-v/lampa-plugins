@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.9-native';
-    var PLUGIN_ID = 'mnogotv_v409_native';
+    var VERSION = '4.0.10-native';
+    var PLUGIN_ID = 'mnogotv_v410_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -1700,8 +1700,18 @@
         return value + (value.indexOf('?') >= 0 ? '&' : '?') + key;
     }
 
-    function collapsClientCdnUrl(rawUrl, unixTime, key) {
-        var logical = appendCollapsBareToken(normalizeDirectUrl(rawUrl), key);
+    function collapsClientCdnUrl(rawUrl, unixTime, key, appendSourceToken) {
+        /*
+         * IMPORTANT: Collaps adds fa4cdd5c only to the TOP-LEVEL source
+         * (hls/dash) before VenomPlayer starts. cdn.js does NOT append this
+         * bare token to child playlists or media fragments. v4.0.7-v4.0.9
+         * appended it to every URI we rewrote, which made the x-en-x request
+         * for the first TS fragment invalid and the CDN answered HTTP 410.
+         */
+        var logical = normalizeDirectUrl(rawUrl);
+        if (appendSourceToken !== false) {
+            logical = appendCollapsBareToken(logical, key);
+        }
         if (!logical) return '';
 
         var u;
@@ -1820,7 +1830,8 @@
             var client = collapsClientCdnUrl(
                 logical,
                 COLLAPS_NATIVE_HLS.unixTime,
-                COLLAPS_NATIVE_HLS.key
+                COLLAPS_NATIVE_HLS.key,
+                false
             );
             client = stripHash(client);
             COLLAPS_NATIVE_HLS.urlMap[client] = logical;
@@ -1896,7 +1907,8 @@
                 : stripHash(collapsClientCdnUrl(
                     logicalUrl,
                     COLLAPS_NATIVE_HLS.unixTime,
-                    COLLAPS_NATIVE_HLS.key
+                    COLLAPS_NATIVE_HLS.key,
+                    false
                 ));
 
             COLLAPS_NATIVE_HLS.urlMap[requestUrl] = logicalUrl;
