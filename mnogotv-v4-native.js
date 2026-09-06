@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.3-native';
-    var PLUGIN_ID = 'mnogotv_v403_native';
+    var VERSION = '4.0.4-native';
+    var PLUGIN_ID = 'mnogotv_v404_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -1955,100 +1955,138 @@
                             return;
                         }
 
-                        var stream =
-                            item.hls ||
-                            (
-                                item.source &&
-                                item.source.hls
-                            ) ||
-                            '';
+                        var dashStream =
+                            normalizeDirectUrl(
+                                item.dash ||
+                                (
+                                    item.source &&
+                                    item.source.dash
+                                ) ||
+                                ''
+                            );
+
+                        var hlsStream =
+                            normalizeDirectUrl(
+                                item.hls ||
+                                (
+                                    item.source &&
+                                    item.source.hls
+                                ) ||
+                                ''
+                            );
 
                         if (
-                            !stream &&
                             season === null &&
                             cfg.source
                         ) {
-                            stream =
-                                cfg.source.hls ||
-                                '';
-
-                            item =
-                                cfg.source;
+                            if (!dashStream) {
+                                dashStream = normalizeDirectUrl(
+                                    cfg.source.dash || ''
+                                );
+                            }
+                            if (!hlsStream) {
+                                hlsStream = normalizeDirectUrl(
+                                    cfg.source.hls || ''
+                                );
+                            }
+                            item = cfg.source;
                         }
 
-                        stream =
-                            normalizeDirectUrl(
-                                stream
-                            );
-
-                        if (!stream) {
+                        if (!dashStream && !hlsStream) {
                             fail(
                                 new Error(
-                                    'Collaps: HLS не найден'
+                                    'Collaps: DASH/HLS не найден'
                                 )
                             );
                             return;
                         }
 
                         /*
-                         * HAR 06.09.2026 показал, что актуальный Collaps
-                         * отдаёт отдельные `hls` и `dash` URL. Браузерный
-                         * плеер обращается к CDN БЕЗ старого параметра `vp`.
-                         * На текущем CDN добавление `&vp` приводит к HTTP 424.
-                         * Поэтому raw HLS проверяем как есть.
+                         * HAR реального браузерного Collaps показал:
+                         * S1E1 содержит одновременно item.dash и item.hls,
+                         * но сам VenomPlayer загружает DASH MPD, после чего
+                         * получает WebM-сегменты. HLS URL в этом сеансе вообще
+                         * не запрашивался.
                          *
-                         * Это важное отличие от старого online_mod: его
-                         * исторический `&vp` больше нельзя добавлять вслепую.
+                         * Поэтому на Android сначала повторяем реальный путь
+                         * Collaps: DASH. HLS оставляем только fallback.
                          */
-                        requestJson(
-                            resolverUrl('/collaps/probe', {
-                                url: stream,
-                                ref: response.ref || COLLAPS_REF
-                            }),
-                            function (media) {
-                                if (!media || media.ok === false || !media.url) {
-                                    fail(new Error(
-                                        'Collaps: формат потока не определён' +
-                                        (media && media.error ? (' • ' + media.error) : '')
-                                    ));
-                                    return;
-                                }
+                        var ref = response.ref || COLLAPS_REF;
 
-                                ok({
-                                    provider: 'Collaps',
-                                    directUrl: normalizeDirectUrl(media.url),
-                                    directHeaders: {},
-                                    relayUrl: '',
-                                    relayReady: false,
-                                    externalDirect: false,
-                                    subtitles:
-                                        normalizeSubs(
-                                            item.cc ||
-                                            item.subtitles ||
-                                            []
-                                        ),
-                                    tracks:
-                                        normalizeTracks(
-                                            item.audio ||
-                                            {}
-                                        ),
-                                    quality:
-                                        media.format === 'dash'
-                                            ? 'DASH'
-                                            : 'HLS',
-                                    resolvedBy:
-                                        response.label +
-                                        (
-                                            kp
-                                                ? (' • KP ' + kp)
-                                                : ''
-                                        ) +
-                                        ' • ' +
-                                        String(media.format || 'media').toUpperCase()
-                                });
-                            },
-                            fail
-                        );
+                        function finishMedia(media) {
+                            if (!media || media.ok === false || !media.url) {
+                                fail(new Error(
+                                    'Collaps: формат потока не определён' +
+                                    (media && media.error ? (' • ' + media.error) : '')
+                                ));
+                                return;
+                            }
+
+                            ok({
+                                provider: 'Collaps',
+                                directUrl: normalizeDirectUrl(media.url),
+                                directHeaders: {},
+                                relayUrl: '',
+                                relayReady: false,
+                                externalDirect: false,
+                                subtitles:
+                                    normalizeSubs(
+                                        item.cc ||
+                                        item.subtitles ||
+                                        []
+                                    ),
+                                tracks:
+                                    normalizeTracks(
+                                        item.audio ||
+                                        {}
+                                    ),
+                                quality:
+                                    media.format === 'dash'
+                                        ? 'DASH'
+                                        : 'HLS',
+                                resolvedBy:
+                                    response.label +
+                                    (
+                                        kp
+                                            ? (' • KP ' + kp)
+                                            : ''
+                                    ) +
+                                    ' • ' +
+                                    String(media.format || 'media').toUpperCase()
+                            });
+                        }
+
+                        function probe(raw, fallbackRaw) {
+                            requestJson(
+                                resolverUrl('/collaps/probe', {
+                                    url: raw,
+                                    ref: ref
+                                }),
+                                finishMedia,
+                                function (firstError) {
+                                    if (fallbackRaw) {
+                                        requestJson(
+                                            resolverUrl('/collaps/probe', {
+                                                url: fallbackRaw,
+                                                ref: ref
+                                            }),
+                                            finishMedia,
+                                            fail
+                                        );
+                                    }
+                                    else {
+                                        fail(firstError);
+                                    }
+                                }
+                            );
+                        }
+
+                        if (dashStream) {
+                            probe(dashStream, hlsStream);
+                        }
+                        else {
+                            probe(hlsStream, '');
+                        }
                     },
                     fail
                 );
