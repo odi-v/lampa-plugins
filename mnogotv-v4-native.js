@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.7-native';
+    var VERSION = '4.0.8-native';
     var PLUGIN_ID = 'mnogotv_v406_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -1903,8 +1903,24 @@
             var headers = {};
             var baseHeaders = COLLAPS_NATIVE_HLS.headers || {};
             Object.keys(baseHeaders).forEach(function (k) { headers[k] = baseHeaders[k]; });
-            if (context && context.rangeStart !== undefined && context.rangeEnd !== undefined) {
-                headers.Range = 'bytes=' + context.rangeStart + '-' + (context.rangeEnd - 1);
+            /*
+             * Hls.js initializes rangeStart/rangeEnd to 0/0 for ordinary
+             * fragments. v4.0.7 treated the mere presence of those fields as
+             * a real byte-range and sent the invalid header `Range: bytes=0--1`,
+             * which makes normal fragments fail with fragLoadError.
+             * Match Hls.js' stock loader: add Range only when rangeEnd is > 0
+             * and the interval is actually non-empty.
+             */
+            if (
+                context &&
+                Number(context.rangeEnd) > Number(context.rangeStart) &&
+                Number(context.rangeEnd) > 0
+            ) {
+                headers.Range =
+                    'bytes=' +
+                    Number(context.rangeStart || 0) +
+                    '-' +
+                    (Number(context.rangeEnd) - 1);
             }
 
             var network = null;
