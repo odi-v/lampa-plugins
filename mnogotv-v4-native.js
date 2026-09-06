@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.5-native';
-    var PLUGIN_ID = 'mnogotv_v404_native';
+    var VERSION = '4.0.6-native';
+    var PLUGIN_ID = 'mnogotv_v406_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -1684,6 +1684,65 @@
         return url;
     }
 
+    /*
+     * Collaps CDN URLs are issued for the client that loaded the embed.
+     * Cloudflare relay changes the network origin/IP and current interkh.com
+     * answers 424. Build the same /x-en-x/ URL on the device instead.
+     */
+    var COLLAPS_CDN_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+    var COLLAPS_CDN_SUBST = 'DlChEXitLONYRkFjAsnBbymWzSHMqKPgQZpvwerofJTVdIuUcxaG';
+
+    function appendCollapsBareToken(rawUrl, key) {
+        var value = String(rawUrl || '').trim();
+        key = String(key || '').trim();
+        if (!value || !key) return value;
+        if (value.indexOf('&' + key) !== -1 || value.slice(-(key.length + 1)) === '?' + key) return value;
+        return value + (value.indexOf('?') >= 0 ? '&' : '?') + key;
+    }
+
+    function collapsClientCdnUrl(rawUrl, unixTime, key) {
+        var logical = appendCollapsBareToken(normalizeDirectUrl(rawUrl), key);
+        if (!logical) return '';
+
+        var u;
+        try { u = new URL(logical); } catch (e) { return logical; }
+
+        if (u.pathname.indexOf('/x-en-x/') !== -1) return u.toString();
+
+        var unix = parseInt(unixTime || 0, 10) || 0;
+        if (!unix) return u.toString();
+
+        var hour = Math.round(unix / 3600);
+        var payload = hour + '/' + u.pathname + u.search;
+        var base64 = '';
+
+        try {
+            base64 = btoa(unescape(encodeURIComponent(payload)));
+        } catch (e2) {
+            try { base64 = btoa(payload); } catch (e3) { return u.toString(); }
+        }
+
+        var encoded = '';
+        for (var i = 0; i < base64.length; i++) {
+            var ch = base64.charAt(i);
+            var pos = COLLAPS_CDN_ALPHABET.indexOf(ch);
+            encoded += pos >= 0 ? COLLAPS_CDN_SUBST.charAt(pos) : ch;
+        }
+
+        return u.origin + '/x-en-x/' + encoded;
+    }
+
+    function collapsPlaybackHeaders(format) {
+        return {
+            'User-Agent': COLLAPS_UA,
+            'Origin': COLLAPS_HOST,
+            'Referer': COLLAPS_REF,
+            'Accept': format === 'dash'
+                ? 'application/dash+xml,*/*;q=0.8'
+                : 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*;q=0.8'
+        };
+    }
+
     function normalizeSubs(list) {
         if (!Array.isArray(list)) return [];
         return list.map(function (s) {
@@ -2038,84 +2097,188 @@
                         var cdnUnix = parseInt(cdnMeta.unixTime || 0, 10) || 0;
                         var cdnKey = String(cdnMeta.key || '');
 
-                        function finishMedia(media) {
-                            if (!media || media.ok === false || !media.url) {
-                                fail(new Error(
-                                    'Collaps: формат потока не определён' +
-                                    (media && media.error ? (' • ' + media.error) : '')
-                                ));
+                        /*
+                         * v4.0.6: media no longer passes through Cloudflare.
+                         * The embed HTML was fetched on this device, so its signed CDN
+                         * URLs must also be requested from this device. First verify
+                         * the transformed URL through Lampa.Reguest.native, then hand
+                         * the same client-side URL to the built-in Lampa.Player.
+                         */
+                        function finishClient(raw, format, headers) {
+                            var clientUrl = collapsClientCdnUrl(raw, cdnUnix, cdnKey);
+                            if (!clientUrl) {
+                                fail(new Error('Collaps: client CDN URL не построен'));
                                 return;
                             }
 
-                            ok({
-                                provider: 'Collaps',
-                                directUrl: normalizeDirectUrl(media.url),
-                                directHeaders: {},
-                                relayUrl: '',
-                                relayReady: false,
-                                externalDirect: false,
-                                subtitles:
-                                    normalizeSubs(
-                                        item.cc ||
-                                        item.subtitles ||
-                                        []
-                                    ),
-                                tracks:
-                                    normalizeTracks(
-                                        item.audio ||
-                                        {}
-                                    ),
-                                quality:
-                                    media.format === 'dash'
-                                        ? 'DASH'
-                                        : 'HLS',
-                                resolvedBy:
-                                    response.label +
-                                    (
-                                        kp
-                                            ? (' • KP ' + kp)
-                                            : ''
-                                    ) +
-                                    ' • ' +
-                                    String(media.format || 'media').toUpperCase() +
-                                    (media.transport ? ('/' + String(media.transport).toUpperCase()) : '')
-                            });
+                            nativeText(
+                                clientUrl,
+                                headers,
+                                function (body) {
+                                    body = String(body || '').trim();
+
+                                    var valid =
+                                        format === 'dash'
+                                            ? /<MPD\b/i.test(body)
+                                            : body.indexOf('#EXTM3U') === 0;
+
+                                    if (!valid) {
+                                        fail(new Error(
+                                            'Collaps: client ' +
+                                            String(format || '').toUpperCase() +
+                                            ' вернул не manifest'
+                                        ));
+                                        return;
+                                    }
+
+                                    /*
+                                     * Fragment is never sent over HTTP. It only gives
+                                     * Lampa's stream detector an explicit extension.
+                                     */
+                                    var playerUrl =
+                                        clientUrl +
+                                        (
+                                            format === 'dash'
+                                                ? '#manifest.mpd'
+                                                : '#master.m3u8'
+                                        );
+
+                                    ok({
+                                        provider: 'Collaps',
+                                        directUrl: playerUrl,
+                                        directHeaders: headers,
+                                        relayUrl: '',
+                                        relayReady: false,
+                                        externalDirect: false,
+                                        subtitles:
+                                            normalizeSubs(
+                                                item.cc ||
+                                                item.subtitles ||
+                                                []
+                                            ),
+                                        tracks:
+                                            normalizeTracks(
+                                                item.audio ||
+                                                {}
+                                            ),
+                                        quality:
+                                            format === 'dash'
+                                                ? 'DASH'
+                                                : 'HLS',
+                                        resolvedBy:
+                                            response.label +
+                                            (
+                                                kp
+                                                    ? (' • KP ' + kp)
+                                                    : ''
+                                            ) +
+                                            ' • ' +
+                                            String(format || 'media').toUpperCase() +
+                                            '/CLIENT'
+                                    });
+                                },
+                                fail
+                            );
                         }
 
-                        function probe(raw, fallbackRaw) {
-                            requestJson(
-                                resolverUrl('/collaps/probe', {
-                                    url: raw,
-                                    ref: ref,
-                                    unix: cdnUnix,
-                                    key: cdnKey
-                                }),
-                                finishMedia,
-                                function (firstError) {
+                        function probeClient(raw, format, fallbackRaw, fallbackFormat) {
+                            if (!raw) {
+                                if (fallbackRaw) {
+                                    finishClient(
+                                        fallbackRaw,
+                                        fallbackFormat,
+                                        collapsPlaybackHeaders(fallbackFormat)
+                                    );
+                                }
+                                else {
+                                    fail(new Error('Collaps: media URL отсутствует'));
+                                }
+                                return;
+                            }
+
+                            var headers = collapsPlaybackHeaders(format);
+                            var clientUrl = collapsClientCdnUrl(raw, cdnUnix, cdnKey);
+
+                            nativeText(
+                                clientUrl,
+                                headers,
+                                function (body) {
+                                    body = String(body || '').trim();
+
+                                    var valid =
+                                        format === 'dash'
+                                            ? /<MPD\b/i.test(body)
+                                            : body.indexOf('#EXTM3U') === 0;
+
+                                    if (valid) {
+                                        var playerUrl =
+                                            clientUrl +
+                                            (
+                                                format === 'dash'
+                                                    ? '#manifest.mpd'
+                                                    : '#master.m3u8'
+                                            );
+
+                                        ok({
+                                            provider: 'Collaps',
+                                            directUrl: playerUrl,
+                                            directHeaders: headers,
+                                            relayUrl: '',
+                                            relayReady: false,
+                                            externalDirect: false,
+                                            subtitles: normalizeSubs(item.cc || item.subtitles || []),
+                                            tracks: normalizeTracks(item.audio || {}),
+                                            quality: format === 'dash' ? 'DASH' : 'HLS',
+                                            resolvedBy:
+                                                response.label +
+                                                (kp ? (' • KP ' + kp) : '') +
+                                                ' • ' +
+                                                String(format || 'media').toUpperCase() +
+                                                '/CLIENT'
+                                        });
+                                        return;
+                                    }
+
                                     if (fallbackRaw) {
-                                        requestJson(
-                                            resolverUrl('/collaps/probe', {
-                                                url: fallbackRaw,
-                                                ref: ref,
-                                                unix: cdnUnix,
-                                                key: cdnKey
-                                            }),
-                                            finishMedia,
-                                            fail
+                                        probeClient(
+                                            fallbackRaw,
+                                            fallbackFormat,
+                                            '',
+                                            ''
                                         );
                                     }
                                     else {
-                                        fail(firstError);
+                                        fail(new Error(
+                                            'Collaps: client ' +
+                                            String(format || '').toUpperCase() +
+                                            ' вернул не manifest'
+                                        ));
+                                    }
+                                },
+                                function (firstError) {
+                                    if (fallbackRaw) {
+                                        probeClient(
+                                            fallbackRaw,
+                                            fallbackFormat,
+                                            '',
+                                            ''
+                                        );
+                                    }
+                                    else {
+                                        fail(new Error(
+                                            'Collaps client CDN: ' +
+                                            errText(firstError)
+                                        ));
                                     }
                                 }
                             );
                         }
 
                         if (dashStream) {
-                            probe(dashStream, hlsStream);
+                            probeClient(dashStream, 'dash', hlsStream, 'hls');
                         }
                         else {
-                            probe(hlsStream, '');
+                            probeClient(hlsStream, 'hls', '', '');
                         }
                     },
                     fail
