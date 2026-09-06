@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.2-native';
-    var PLUGIN_ID = 'mnogotv_v402_native';
+    var VERSION = '4.0.3-native';
+    var PLUGIN_ID = 'mnogotv_v403_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -1991,22 +1991,14 @@
                         }
 
                         /*
-                         * Точно как online_mod: к HLS добавляется
-                         * буквальный "&vp".
-                         */
-                        if (
-                            stream.indexOf('&vp') === -1
-                        ) {
-                            stream += '&vp';
-                        }
-
-                        /*
-                         * HAR 06.09.2026 показал важную вещь: поле `hls`
-                         * Collaps сейчас может указывать не на HLS, а на
-                         * opaque CDN URL, который реально отвечает DASH MPD.
-                         * Поэтому больше не подсовываем его вслепую в
-                         * /playlist.m3u8. Worker сначала определяет формат и
-                         * возвращает URL с правильным расширением .m3u8/.mpd.
+                         * HAR 06.09.2026 показал, что актуальный Collaps
+                         * отдаёт отдельные `hls` и `dash` URL. Браузерный
+                         * плеер обращается к CDN БЕЗ старого параметра `vp`.
+                         * На текущем CDN добавление `&vp` приводит к HTTP 424.
+                         * Поэтому raw HLS проверяем как есть.
+                         *
+                         * Это важное отличие от старого online_mod: его
+                         * исторический `&vp` больше нельзя добавлять вслепую.
                          */
                         requestJson(
                             resolverUrl('/collaps/probe', {
