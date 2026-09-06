@@ -4,7 +4,7 @@
     var VERSION = '4.0.0-native';
     var PLUGIN_ID = 'mnogotv_v400_native';
     var COMPONENT = 'mnogotv_v318_component';
-    var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
+    var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
     if (window[PLUGIN_ID]) return;
     window[PLUGIN_ID] = true;
