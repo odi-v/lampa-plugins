@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.13-native';
+    var VERSION = '4.0.14-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -2451,7 +2451,14 @@
         installed: false,
         active: false,
         unixTime: 0,
-        originalMediaPlayer: null
+        originalMediaPlayer: null,
+        xhrInstalled: false,
+        originalXHR: null,
+        requestCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        lastUrl: '',
+        lastStatus: 0
     };
 
     function collapsAv1Supported() {
@@ -2465,9 +2472,475 @@
         return false;
     }
 
+
+    /*
+     * v4.0.14: dash.js в штатном Lampa.Player делает обычные XHR.
+     * У Collaps CDN CORS разрешён только для Origin https://api.ortified.ws,
+     * а WebView Lampa имеет другой origin. Поэтому URL мы уже строим правильно,
+     * но браузерный XHR зависает/блокируется.
+     *
+     * Для interkh.com перехватываем XMLHttpRequest и выполняем тот же GET через
+     * Lampa.Reguest.native на самом Android-устройстве. Для всех остальных URL
+     * остаётся настоящий XMLHttpRequest.
+     */
+    function installCollapsDashNativeXHR() {
+        if (COLLAPS_NATIVE_DASH.xhrInstalled) return true;
+
+        var OriginalXHR = window.XMLHttpRequest;
+        if (typeof OriginalXHR !== 'function') return false;
+
+        COLLAPS_NATIVE_DASH.originalXHR = OriginalXHR;
+
+        function guessNativeContentType(url, responseType) {
+            var value = String(url || '').toLowerCase();
+            if (value.indexOf('.mpd') >= 0) return 'application/dash+xml';
+            if (value.indexOf('.webm') >= 0) return 'video/webm';
+            if (value.indexOf('.mp4') >= 0 || value.indexOf('.m4s') >= 0) return 'video/mp4';
+            if (String(responseType || '').toLowerCase() === 'arraybuffer') return 'application/octet-stream';
+            return 'text/plain';
+        }
+
+        function NativeDashXHR() {
+            this._delegate = null;
+            this._nativeRequest = null;
+            this._useNative = false;
+            this._method = 'GET';
+            this._url = '';
+            this._async = true;
+            this._headers = {};
+            this._listeners = {};
+
+            this.readyState = 0;
+            this.status = 0;
+            this.statusText = '';
+            this.response = null;
+            this.responseText = '';
+            this.responseURL = '';
+            this.responseXML = null;
+
+            this._responseType = '';
+            this._timeout = 0;
+            this._withCredentials = false;
+
+            this.onloadstart = null;
+            this.onprogress = null;
+            this.onreadystatechange = null;
+            this.onload = null;
+            this.onerror = null;
+            this.onabort = null;
+            this.ontimeout = null;
+            this.onloadend = null;
+        }
+
+        NativeDashXHR.UNSENT = 0;
+        NativeDashXHR.OPENED = 1;
+        NativeDashXHR.HEADERS_RECEIVED = 2;
+        NativeDashXHR.LOADING = 3;
+        NativeDashXHR.DONE = 4;
+
+        NativeDashXHR.prototype.UNSENT = 0;
+        NativeDashXHR.prototype.OPENED = 1;
+        NativeDashXHR.prototype.HEADERS_RECEIVED = 2;
+        NativeDashXHR.prototype.LOADING = 3;
+        NativeDashXHR.prototype.DONE = 4;
+
+        NativeDashXHR.prototype._emit = function (type, extra) {
+            var evt = extra || {};
+            try { evt.type = evt.type || type; } catch (e) {}
+            try { evt.target = evt.target || this; } catch (e2) {}
+            try { evt.currentTarget = evt.currentTarget || this; } catch (e3) {}
+
+            var prop = this['on' + type];
+            if (typeof prop === 'function') {
+                try { prop.call(this, evt); } catch (e4) {}
+            }
+
+            var list = this._listeners[type] || [];
+            list.slice().forEach(function (fn) {
+                try { fn.call(this, evt); } catch (e5) {}
+            }, this);
+        };
+
+        NativeDashXHR.prototype.addEventListener = function (type, fn) {
+            if (typeof fn !== 'function') return;
+            if (!this._listeners[type]) this._listeners[type] = [];
+            this._listeners[type].push(fn);
+        };
+
+        NativeDashXHR.prototype.removeEventListener = function (type, fn) {
+            var list = this._listeners[type] || [];
+            this._listeners[type] = list.filter(function (x) { return x !== fn; });
+        };
+
+        NativeDashXHR.prototype.dispatchEvent = function (evt) {
+            this._emit(evt && evt.type || '', evt || {});
+            return true;
+        };
+
+        NativeDashXHR.prototype._syncDelegate = function () {
+            var d = this._delegate;
+            if (!d) return;
+            try { this.readyState = d.readyState; } catch (e) {}
+            try { this.status = d.status; } catch (e2) {}
+            try { this.statusText = d.statusText; } catch (e3) {}
+            try { this.response = d.response; } catch (e4) {}
+            try { this.responseText = d.responseText; } catch (e5) {}
+            try { this.responseURL = d.responseURL || this._url; } catch (e6) {}
+            try { this.responseXML = d.responseXML; } catch (e7) {}
+        };
+
+        NativeDashXHR.prototype._wireDelegate = function () {
+            var self = this;
+            var d = this._delegate;
+            if (!d || d.__mnogotvWired) return;
+            d.__mnogotvWired = true;
+
+            [
+                'loadstart',
+                'progress',
+                'readystatechange',
+                'load',
+                'error',
+                'abort',
+                'timeout',
+                'loadend'
+            ].forEach(function (type) {
+                try {
+                    d.addEventListener(type, function (evt) {
+                        self._syncDelegate();
+                        self._emit(type, evt || {});
+                    });
+                } catch (e) {}
+            });
+        };
+
+        NativeDashXHR.prototype.open = function (method, url, async, user, password) {
+            this._method = String(method || 'GET').toUpperCase();
+            this._url = stripHash(String(url || ''));
+            this.responseURL = this._url;
+            this._async = async !== false;
+
+            this._useNative =
+                COLLAPS_NATIVE_DASH.active &&
+                isCollapsCdnUrl(this._url);
+
+            if (this._useNative) {
+                this.readyState = 1;
+                this._emit('readystatechange', {});
+                return;
+            }
+
+            this._delegate = new OriginalXHR();
+            this._wireDelegate();
+
+            try { this._delegate.timeout = this._timeout || 0; } catch (e0) {}
+            try { this._delegate.withCredentials = this._withCredentials; } catch (e1) {}
+            try {
+                this._delegate.open(
+                    this._method,
+                    this._url,
+                    this._async,
+                    user,
+                    password
+                );
+            } catch (e2) {
+                throw e2;
+            }
+        };
+
+        NativeDashXHR.prototype.setRequestHeader = function (name, value) {
+            if (this._useNative) {
+                this._headers[String(name)] = String(value);
+                return;
+            }
+            if (this._delegate) this._delegate.setRequestHeader(name, value);
+        };
+
+        NativeDashXHR.prototype.getResponseHeader = function (name) {
+            if (!this._useNative && this._delegate) {
+                try { return this._delegate.getResponseHeader(name); } catch (e) {}
+                return null;
+            }
+
+            var key = String(name || '').toLowerCase();
+            if (key === 'content-type') {
+                return guessNativeContentType(this._url, this._responseType);
+            }
+            if (key === 'accept-ranges') return 'bytes';
+            return null;
+        };
+
+        NativeDashXHR.prototype.getAllResponseHeaders = function () {
+            if (!this._useNative && this._delegate) {
+                try { return this._delegate.getAllResponseHeaders(); } catch (e) {}
+                return '';
+            }
+            return (
+                'Content-Type: ' +
+                guessNativeContentType(this._url, this._responseType) +
+                '\\r\\nAccept-Ranges: bytes\\r\\n'
+            );
+        };
+
+        NativeDashXHR.prototype.overrideMimeType = function (mime) {
+            if (!this._useNative && this._delegate && this._delegate.overrideMimeType) {
+                try { this._delegate.overrideMimeType(mime); } catch (e) {}
+            }
+        };
+
+        NativeDashXHR.prototype.send = function (body) {
+            if (!this._useNative) {
+                if (!this._delegate) throw new Error('XMLHttpRequest.open() not called');
+                try { this._delegate.responseType = this._responseType || ''; } catch (e0) {}
+                try { this._delegate.timeout = this._timeout || 0; } catch (e1) {}
+                try { this._delegate.withCredentials = this._withCredentials; } catch (e2) {}
+                this._delegate.send(body);
+                return;
+            }
+
+            var self = this;
+            var network = null;
+
+            try { network = new Lampa.Reguest(); } catch (e3) {
+                try { network = new Lampa.Request(); } catch (e4) {}
+            }
+
+            if (!network || typeof network.native !== 'function') {
+                this.status = 0;
+                this.readyState = 4;
+                this._emit('readystatechange', {});
+                this._emit('error', {});
+                this._emit('loadend', {});
+                return;
+            }
+
+            this._nativeRequest = network;
+            COLLAPS_NATIVE_DASH.requestCount++;
+            COLLAPS_NATIVE_DASH.lastUrl = this._url;
+
+            var headers = {};
+            Object.keys(this._headers || {}).forEach(function (k) {
+                headers[k] = self._headers[k];
+            });
+
+            /*
+             * Это ровно тот сетевой контекст, который виден в успешном HAR.
+             * XHR в WebView сам такой Origin выставить не может, native bridge
+             * может передать его как обычный HTTP header.
+             */
+            headers['User-Agent'] = COLLAPS_UA;
+            headers['Origin'] = COLLAPS_HOST;
+            headers['Referer'] = COLLAPS_REF;
+            headers['Accept'] = '*/*';
+
+            var binary =
+                String(this._responseType || '').toLowerCase() === 'arraybuffer';
+
+            try {
+                if (network.clear) network.clear();
+                if (network.timeout) {
+                    network.timeout(
+                        Math.max(
+                            10000,
+                            Number(this._timeout || 0) || 30000
+                        )
+                    );
+                }
+            } catch (e5) {}
+
+            this._emit('loadstart', {});
+
+            try {
+                network.native(
+                    this._url,
+                    function (payload) {
+                        var data;
+                        try {
+                            data = binary
+                                ? base64ToArrayBuffer(payload)
+                                : String(payload || '');
+                        } catch (decodeError) {
+                            COLLAPS_NATIVE_DASH.errorCount++;
+                            COLLAPS_NATIVE_DASH.lastStatus = 0;
+                            self.status = 0;
+                            self.statusText = 'native decode error';
+                            self.readyState = 4;
+                            self._emit('readystatechange', {});
+                            self._emit('error', { error: decodeError });
+                            self._emit('loadend', {});
+                            notify(
+                                'Collaps DASH DEBUG: native decode • ' +
+                                errText(decodeError)
+                            );
+                            return;
+                        }
+
+                        var size = binary
+                            ? (data.byteLength || 0)
+                            : String(data || '').length;
+
+                        COLLAPS_NATIVE_DASH.successCount++;
+                        COLLAPS_NATIVE_DASH.lastStatus = 200;
+
+                        self.status = 200;
+                        self.statusText = 'OK';
+                        self.responseURL = self._url;
+
+                        self.readyState = 2;
+                        self._emit('readystatechange', {});
+
+                        self.readyState = 3;
+                        self._emit('readystatechange', {});
+                        self._emit('progress', {
+                            lengthComputable: size > 0,
+                            loaded: size,
+                            total: size
+                        });
+
+                        self.response = data;
+                        if (!binary) self.responseText = String(data || '');
+
+                        self.readyState = 4;
+                        self._emit('readystatechange', {});
+                        self._emit('load', {});
+                        self._emit('loadend', {});
+                    },
+                    function (a, c) {
+                        var status =
+                            a &&
+                            a.status !== undefined
+                                ? Number(a.status)
+                                : 0;
+
+                        COLLAPS_NATIVE_DASH.errorCount++;
+                        COLLAPS_NATIVE_DASH.lastStatus = status || 0;
+
+                        self.status = status || 0;
+                        self.statusText = errText(a || c || 'native network error');
+                        try {
+                            self.responseText =
+                                a && a.responseText
+                                    ? String(a.responseText)
+                                    : '';
+                        } catch (e6) {}
+                        self.readyState = 4;
+                        self._emit('readystatechange', {});
+                        self._emit('error', {
+                            status: self.status,
+                            error: a || c || null
+                        });
+                        self._emit('loadend', {});
+
+                        notify(
+                            'Collaps DASH DEBUG: native HTTP ' +
+                            (self.status || 0) +
+                            ' • ' +
+                            self._url.slice(0, 95)
+                        );
+                    },
+                    false,
+                    {
+                        dataType: binary ? 'base64' : 'text',
+                        headers: headers
+                    }
+                );
+            } catch (e7) {
+                COLLAPS_NATIVE_DASH.errorCount++;
+                COLLAPS_NATIVE_DASH.lastStatus = 0;
+                self.status = 0;
+                self.statusText = errText(e7);
+                self.readyState = 4;
+                self._emit('readystatechange', {});
+                self._emit('error', { error: e7 });
+                self._emit('loadend', {});
+            }
+        };
+
+        NativeDashXHR.prototype.abort = function () {
+            try {
+                if (this._nativeRequest && this._nativeRequest.clear) {
+                    this._nativeRequest.clear();
+                }
+            } catch (e) {}
+
+            if (!this._useNative && this._delegate) {
+                try { this._delegate.abort(); } catch (e2) {}
+                return;
+            }
+
+            this.status = 0;
+            this.readyState = 4;
+            this._emit('readystatechange', {});
+            this._emit('abort', {});
+            this._emit('loadend', {});
+        };
+
+        Object.defineProperty(
+            NativeDashXHR.prototype,
+            'responseType',
+            {
+                get: function () {
+                    if (!this._useNative && this._delegate) {
+                        try { return this._delegate.responseType; } catch (e) {}
+                    }
+                    return this._responseType || '';
+                },
+                set: function (value) {
+                    this._responseType = String(value || '');
+                    if (!this._useNative && this._delegate) {
+                        try { this._delegate.responseType = value; } catch (e) {}
+                    }
+                }
+            }
+        );
+
+        Object.defineProperty(
+            NativeDashXHR.prototype,
+            'timeout',
+            {
+                get: function () { return this._timeout || 0; },
+                set: function (value) {
+                    this._timeout = Number(value || 0) || 0;
+                    if (!this._useNative && this._delegate) {
+                        try { this._delegate.timeout = this._timeout; } catch (e) {}
+                    }
+                }
+            }
+        );
+
+        Object.defineProperty(
+            NativeDashXHR.prototype,
+            'withCredentials',
+            {
+                get: function () { return !!this._withCredentials; },
+                set: function (value) {
+                    this._withCredentials = !!value;
+                    if (!this._useNative && this._delegate) {
+                        try { this._delegate.withCredentials = !!value; } catch (e) {}
+                    }
+                }
+            }
+        );
+
+        try {
+            window.XMLHttpRequest = NativeDashXHR;
+            COLLAPS_NATIVE_DASH.xhrInstalled = true;
+            log('Collaps DASH native XMLHttpRequest bridge installed');
+            return true;
+        } catch (e8) {
+            log('Collaps DASH native XMLHttpRequest bridge failed', e8);
+            return false;
+        }
+    }
+
     function configureCollapsNativeDash(unixTime) {
         COLLAPS_NATIVE_DASH.unixTime = parseInt(unixTime || 0, 10) || 0;
         COLLAPS_NATIVE_DASH.active = true;
+
+        if (!installCollapsDashNativeXHR()) {
+            log('Collaps DASH native XMLHttpRequest bridge unavailable');
+            return false;
+        }
 
         if (COLLAPS_NATIVE_DASH.installed) return true;
         if (
@@ -2710,7 +3183,7 @@
                             }
 
                             if (!configureCollapsNativeDash(cdnUnix)) {
-                                fail(new Error('Collaps: dash.js RequestModifier недоступен'));
+                                fail(new Error('Collaps: DASH native transport недоступен'));
                                 return;
                             }
 
@@ -2727,7 +3200,7 @@
                                 resolvedBy:
                                     response.label +
                                     (kp ? (' • KP ' + kp) : '') +
-                                    ' • ' + selectedDashLabel + '/XHR'
+                                    ' • ' + selectedDashLabel + '/NATIVE-XHR'
                             });
                             return;
                         }
