@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.12-native';
+    var VERSION = '4.0.13-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -1568,31 +1568,129 @@
         }
     }
 
-    function collapsEmbedText(attempt, ok, fail) {
+    function collapsEmbedNavigationHeaders() {
         /*
-         * Актуальный online_mod в режиме встроенного Lampa
-         * использует network.silent и пустые playback headers.
-         *
-         * Если конкретная сборка Lampa не даёт silent для этого
-         * домена, оставляем native fallback только для получения
-         * makePlayer-конфига.
+         * HAR рабочего браузерного Collaps показывает, что embed загружается
+         * как обычная document navigation: desktop UA + HTML Accept, без
+         * Origin/Referer. На Android TV network.silent использует окружение
+         * WebView и может получить другой makePlayer-конфиг, где остаётся
+         * только HLS. Поэтому сначала просим embed через native bridge с
+         * браузероподобными navigation headers.
          */
-        silentText(
-            attempt.url,
-            {},
-            ok,
-            function (silentError) {
-                nativeText(
-                    attempt.url,
-                    attempt.headers || {},
-                    ok,
-                    function (nativeError) {
-                        fail(
-                            nativeError ||
-                            silentError
-                        );
+        return {
+            'User-Agent': COLLAPS_UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ru,en;q=0.9',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Upgrade-Insecure-Requests': '1'
+        };
+    }
+
+    function collapsConfigHasDash(cfg, season, episode) {
+        try {
+            var item = pickCollapsItem(cfg, season, episode);
+            if (!item) return false;
+            return !!(
+                item.dasha ||
+                item.dash ||
+                (item.source && (item.source.dasha || item.source.dash))
+            );
+        } catch (e) {}
+        return false;
+    }
+
+    function collapsEmbedConfig(attempt, season, episode, ok, fail) {
+        var nativeError = null;
+        var nativeHtml = '';
+        var nativeCfg = null;
+
+        function trySilent() {
+            silentText(
+                attempt.url,
+                {},
+                function (silentHtml) {
+                    var silentCfg = parseCollapsHtml(silentHtml);
+
+                    /*
+                     * Если desktop/native дал DASH, он всегда приоритетнее.
+                     * Иначе берём silent только если именно он дал DASH или
+                     * native-конфиг вообще не распарсился.
+                     */
+                    if (
+                        nativeCfg &&
+                        collapsConfigHasDash(nativeCfg, season, episode)
+                    ) {
+                        ok(nativeCfg, 'native-desktop');
+                        return;
                     }
-                );
+
+                    if (
+                        silentCfg &&
+                        collapsConfigHasDash(silentCfg, season, episode)
+                    ) {
+                        ok(silentCfg, 'silent-dash');
+                        return;
+                    }
+
+                    if (nativeCfg) {
+                        ok(nativeCfg, 'native-desktop-hls');
+                        return;
+                    }
+
+                    if (silentCfg) {
+                        ok(silentCfg, 'silent-hls');
+                        return;
+                    }
+
+                    fail(
+                        nativeError ||
+                        new Error('Collaps: makePlayer не найден')
+                    );
+                },
+                function (silentError) {
+                    if (nativeCfg) {
+                        ok(
+                            nativeCfg,
+                            collapsConfigHasDash(nativeCfg, season, episode)
+                                ? 'native-desktop'
+                                : 'native-desktop-hls'
+                        );
+                        return;
+                    }
+
+                    fail(
+                        silentError ||
+                        nativeError ||
+                        new Error('Collaps embed недоступен')
+                    );
+                }
+            );
+        }
+
+        nativeText(
+            attempt.url,
+            collapsEmbedNavigationHeaders(),
+            function (html) {
+                nativeHtml = String(html || '');
+                nativeCfg = parseCollapsHtml(nativeHtml);
+
+                /*
+                 * Не делаем второй запрос, если уже получили нужный DASH.
+                 */
+                if (
+                    nativeCfg &&
+                    collapsConfigHasDash(nativeCfg, season, episode)
+                ) {
+                    ok(nativeCfg, 'native-desktop');
+                    return;
+                }
+
+                trySilent();
+            },
+            function (err) {
+                nativeError = err;
+                trySilent();
             }
         );
     }
@@ -2161,7 +2259,7 @@
         );
     }
 
-    function tryCollapsUrls(source, imdb, kp, ok, fail) {
+    function tryCollapsUrls(source, imdb, kp, season, episode, ok, fail) {
         var urls = [];
         var seen = {};
 
@@ -2245,16 +2343,19 @@
 
             var attempt = urls[index++];
 
-            collapsEmbedText(
+            collapsEmbedConfig(
                 attempt,
-                function (html) {
-                    var cfg = parseCollapsHtml(html);
-
+                season,
+                episode,
+                function (cfg, mode) {
                     if (cfg) {
                         ok({
                             config: cfg,
                             url: attempt.url,
-                            label: attempt.label,
+                            label:
+                                attempt.label +
+                                ' • ' +
+                                (mode || 'embed'),
                             headers: attempt.headers,
                             ref: attempt.headers.Referer
                         });
@@ -2491,6 +2592,8 @@
                     source,
                     imdb,
                     kp,
+                    season,
+                    episode,
                     function (response) {
                         var cfg =
                             response.config;
