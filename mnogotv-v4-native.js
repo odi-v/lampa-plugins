@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.14-native';
+    var VERSION = '4.0.15-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -2182,11 +2182,33 @@
     function normalizeTracks(audio) {
         var names = audio && Array.isArray(audio.names) ? audio.names : [];
         var order = audio && Array.isArray(audio.order) ? audio.order : [];
-        var tracks = names.map(function (name, index) {
-            return { language: name, order: order[index] !== undefined ? order[index] : 1000 };
-        }).filter(function (item) { return item.language && item.language !== 'delete'; });
-        tracks.sort(function (a, b) { return a.order - b.order; });
-        return tracks.map(function (item) { return { language: item.language }; });
+
+        /*
+         * Collaps audio.names contains the human-readable dubbing names.
+         * audio.order maps each name to the REAL media-track number.
+         *
+         * Example from the real S1E1 config:
+         * names: [Невафильм, LostFilm, HDRezka Studio, Eng.Original,
+         *         DniproFilm (укр), delete]
+         * order: [0, 1, 2, 4, 3, 5]
+         *
+         * Older v4 builds sorted by order and then threw the index away.
+         * The UI could therefore claim one dubbing while dash.js continued
+         * playing its own default audio track.
+         */
+        return names.map(function (name, sourceIndex) {
+            var label = String(name || '').trim();
+            var mapped = parseInt(order[sourceIndex], 10);
+
+            if (!label || label === 'delete') return null;
+
+            return {
+                language: label,
+                label: label,
+                index: isNaN(mapped) ? sourceIndex : mapped,
+                sourceIndex: sourceIndex
+            };
+        }).filter(Boolean);
     }
 
     function timeline(movie, season, episode) {
@@ -2458,7 +2480,12 @@
         successCount: 0,
         errorCount: 0,
         lastUrl: '',
-        lastStatus: 0
+        lastStatus: 0,
+
+        /* Selected Collaps dubbing. -1 means provider/default track. */
+        audioIndex: -1,
+        audioLabel: '',
+        audioAppliedKey: ''
     };
 
     function collapsAv1Supported() {
@@ -2933,6 +2960,165 @@
         }
     }
 
+    function setCollapsDashAudioChoice(voiceChoice) {
+        var index =
+            voiceChoice &&
+            voiceChoice.index !== undefined
+                ? parseInt(voiceChoice.index, 10)
+                : -1;
+
+        COLLAPS_NATIVE_DASH.audioIndex =
+            isNaN(index)
+                ? -1
+                : index;
+
+        COLLAPS_NATIVE_DASH.audioLabel =
+            voiceChoice &&
+            voiceChoice.label
+                ? String(voiceChoice.label)
+                : '';
+
+        /*
+         * Force the next dash.js instance to apply the new choice even if
+         * the same MediaPlayer wrapper remains installed.
+         */
+        COLLAPS_NATIVE_DASH.audioAppliedKey = '';
+    }
+
+    function collapsDashTrackNumber(track, fallbackIndex) {
+        track = track || {};
+
+        var explicit = [
+            track.index,
+            track.id,
+            track.mediaInfo && track.mediaInfo.index,
+            track.mediaInfo && track.mediaInfo.id
+        ];
+
+        for (var i = 0; i < explicit.length; i++) {
+            var n = parseInt(explicit[i], 10);
+            if (!isNaN(n)) return n;
+        }
+
+        /*
+         * Collaps MPD uses language tags rus0, rus1, ..., ukr7, eng8.
+         * The trailing number is the physical audio AdaptationSet number.
+         */
+        var lang = String(
+            track.lang ||
+            track.language ||
+            track.mediaInfo && track.mediaInfo.lang ||
+            ''
+        );
+
+        var m = lang.match(/(\d+)$/);
+        if (m) return parseInt(m[1], 10);
+
+        return fallbackIndex;
+    }
+
+    function applyCollapsDashAudioChoice(player, reason) {
+        if (
+            !COLLAPS_NATIVE_DASH.active ||
+            !player ||
+            COLLAPS_NATIVE_DASH.audioIndex < 0
+        ) {
+            return false;
+        }
+
+        if (
+            typeof player.getTracksFor !== 'function' ||
+            typeof player.setCurrentTrack !== 'function'
+        ) {
+            return false;
+        }
+
+        var tracks = [];
+        try {
+            tracks = player.getTracksFor('audio') || [];
+        } catch (e) {
+            return false;
+        }
+
+        if (!tracks.length) return false;
+
+        var wanted = COLLAPS_NATIVE_DASH.audioIndex;
+        var chosen = null;
+        var chosenArrayIndex = -1;
+
+        for (var i = 0; i < tracks.length; i++) {
+            if (Number(collapsDashTrackNumber(tracks[i], i)) === Number(wanted)) {
+                chosen = tracks[i];
+                chosenArrayIndex = i;
+                break;
+            }
+        }
+
+        /*
+         * Last-resort fallback for MPDs without ids/lang suffixes.
+         */
+        if (!chosen && tracks[wanted]) {
+            chosen = tracks[wanted];
+            chosenArrayIndex = wanted;
+        }
+
+        if (!chosen) {
+            log(
+                'Collaps DASH audio track not found',
+                wanted,
+                tracks
+            );
+            return false;
+        }
+
+        var key =
+            String(wanted) +
+            '|' +
+            String(
+                chosen.id !== undefined
+                    ? chosen.id
+                    : chosenArrayIndex
+            ) +
+            '|' +
+            String(chosen.lang || '');
+
+        if (COLLAPS_NATIVE_DASH.audioAppliedKey === key) {
+            return true;
+        }
+
+        try {
+            player.setCurrentTrack(chosen);
+            COLLAPS_NATIVE_DASH.audioAppliedKey = key;
+
+            log(
+                'Collaps DASH audio selected',
+                {
+                    wantedIndex: wanted,
+                    label: COLLAPS_NATIVE_DASH.audioLabel,
+                    chosenArrayIndex: chosenArrayIndex,
+                    chosenId: chosen.id,
+                    chosenLang: chosen.lang,
+                    reason: reason || ''
+                }
+            );
+
+            try {
+                notify(
+                    'Collaps: озвучка ' +
+                    (
+                        COLLAPS_NATIVE_DASH.audioLabel ||
+                        ('дорожка ' + (wanted + 1))
+                    )
+                );
+            } catch (eNoty) {}
+
+            return true;
+        } catch (e2) {
+            log('Collaps DASH setCurrentTrack failed', e2);
+            return false;
+        }
+    }
+
     function configureCollapsNativeDash(unixTime) {
         COLLAPS_NATIVE_DASH.unixTime = parseInt(unixTime || 0, 10) || 0;
         COLLAPS_NATIVE_DASH.active = true;
@@ -3005,6 +3191,93 @@
                         );
                     } catch (e2) {
                         log('Collaps DASH RequestModifier install error', e2);
+                    }
+
+                    /*
+                     * Generic Lampa.PlayerVideo.setParams({track}) is not a
+                     * reliable selector for dash.js. Select the Collaps audio
+                     * AdaptationSet inside dash.js itself.
+                     */
+                    try {
+                        var audioEvents =
+                            factory.events ||
+                            (
+                                dashjs &&
+                                dashjs.MediaPlayer &&
+                                dashjs.MediaPlayer.events
+                            ) ||
+                            {};
+
+                        if (typeof player.on === 'function') {
+                            if (audioEvents.STREAM_INITIALIZED) {
+                                player.on(
+                                    audioEvents.STREAM_INITIALIZED,
+                                    function () {
+                                        applyCollapsDashAudioChoice(
+                                            player,
+                                            'STREAM_INITIALIZED'
+                                        );
+                                    }
+                                );
+                            }
+
+                            if (audioEvents.PLAYBACK_METADATA_LOADED) {
+                                player.on(
+                                    audioEvents.PLAYBACK_METADATA_LOADED,
+                                    function () {
+                                        applyCollapsDashAudioChoice(
+                                            player,
+                                            'PLAYBACK_METADATA_LOADED'
+                                        );
+                                    }
+                                );
+                            }
+
+                            if (audioEvents.PLAYBACK_STARTED) {
+                                player.on(
+                                    audioEvents.PLAYBACK_STARTED,
+                                    function () {
+                                        applyCollapsDashAudioChoice(
+                                            player,
+                                            'PLAYBACK_STARTED'
+                                        );
+                                    }
+                                );
+                            }
+                        }
+
+                        /*
+                         * Some dash.js builds expose the tracks a little later
+                         * than STREAM_INITIALIZED. Retry briefly after
+                         * initialize(), without delaying playback.
+                         */
+                        if (typeof player.initialize === 'function') {
+                            var originalInitialize = player.initialize;
+
+                            player.initialize = function () {
+                                var result =
+                                    originalInitialize.apply(
+                                        player,
+                                        arguments
+                                    );
+
+                                [250, 700, 1500, 3000].forEach(function (ms) {
+                                    setTimeout(function () {
+                                        applyCollapsDashAudioChoice(
+                                            player,
+                                            'retry-' + ms
+                                        );
+                                    }, ms);
+                                });
+
+                                return result;
+                            };
+                        }
+                    } catch (eAudio) {
+                        log(
+                            'Collaps DASH audio selector install error',
+                            eAudio
+                        );
                     }
 
                     try {
@@ -3418,22 +3691,36 @@
          */
         try { Lampa.Player.runas('lampa'); } catch (eRunas) {}
 
-        try {
-            if (Lampa.PlayerVideo) {
-                if (
-                    voiceChoice &&
-                    voiceChoice.index >= 0 &&
-                    typeof Lampa.PlayerVideo.setParams === 'function'
-                ) {
-                    Lampa.PlayerVideo.setParams({ track: voiceChoice.index });
+        var isCollapsDash =
+            String(source && source.type || '').toLowerCase() === 'collaps' &&
+            String(resolved && resolved.directUrl || '').indexOf('#manifest.mpd') >= 0;
+
+        if (isCollapsDash) {
+            /*
+             * dash.js audio is selected by our WrappedMediaPlayer above.
+             * Do not also apply the generic Lampa track parameter because its
+             * track numbering is not guaranteed to match DASH AdaptationSets.
+             */
+            setCollapsDashAudioChoice(voiceChoice);
+        }
+        else {
+            try {
+                if (Lampa.PlayerVideo) {
+                    if (
+                        voiceChoice &&
+                        voiceChoice.index >= 0 &&
+                        typeof Lampa.PlayerVideo.setParams === 'function'
+                    ) {
+                        Lampa.PlayerVideo.setParams({ track: voiceChoice.index });
+                    }
+                    else if (
+                        typeof Lampa.PlayerVideo.clearParamas === 'function'
+                    ) {
+                        Lampa.PlayerVideo.clearParamas();
+                    }
                 }
-                else if (
-                    typeof Lampa.PlayerVideo.clearParamas === 'function'
-                ) {
-                    Lampa.PlayerVideo.clearParamas();
-                }
-            }
-        } catch (e0) {}
+            } catch (e0) {}
+        }
 
         log('play', {
             source: source && source.type,
