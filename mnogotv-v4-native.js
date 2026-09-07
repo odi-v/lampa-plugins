@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.17-native';
+    var VERSION = '4.0.18-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3885,21 +3885,22 @@
         }
 
         /*
-         * Collect public absolute/protocol-relative URLs from inline JS.
-         * We only probe /api/movies on origins that the Alloha page itself
-         * references; private/local addresses are rejected above.
+         * Do NOT probe every URL mentioned in the page. v4.0.17 did that and
+         * ended up testing analytics/CDN/font hosts. Keep only URLs whose
+         * surrounding text hints that they belong to the API/player config.
          */
-        var abs = normalized.match(/https?:\/\/[a-z0-9.-]+(?::\d+)?(?:\/[^"'\\\s<>]*)?/ig) || [];
+        var hinted =
+            /(?:api|domain|server|host|player|movie)[^"'<>]{0,80}(https?:\/\/[a-z0-9.-]+(?::\d+)?(?:\/[^"'\\\s<>]*)?)/ig;
+        var hm;
 
-        abs.forEach(function (url) {
-            allohaPushApiBase(candidates, url, iframeUrl, false);
-        });
-
-        var rel = normalized.match(/\/\/[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:\/[^"'\\\s<>]*)?/ig) || [];
-
-        rel.forEach(function (url) {
-            allohaPushApiBase(candidates, url, iframeUrl, false);
-        });
+        while ((hm = hinted.exec(normalized))) {
+            allohaPushApiBase(
+                candidates,
+                hm[1],
+                iframeUrl,
+                false
+            );
+        }
 
         return candidates;
     }
@@ -3909,6 +3910,25 @@
         var src = String(html || '').replace(/\\\//g, '/');
         var re = /<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/ig;
         var m;
+
+        function score(url) {
+            var s = String(url || '').toLowerCase();
+            var value = 0;
+
+            if (/player|alloha|embed|movie|app|main|index/.test(s)) value += 10;
+            if (/jquery|bootstrap|analytics|metric|counter|ads|vendor/.test(s)) value -= 10;
+
+            try {
+                if (
+                    new URL(url).origin ===
+                    new URL(iframeUrl).origin
+                ) {
+                    value += 4;
+                }
+            } catch (e) {}
+
+            return value;
+        }
 
         while ((m = re.exec(src))) {
             try {
@@ -3923,17 +3943,117 @@
                     urls.push(url);
                 }
             } catch (e) {}
-
-            if (urls.length >= 10) break;
         }
 
-        return urls;
+        urls.sort(function (a, b) {
+            return score(b) - score(a);
+        });
+
+        /*
+         * v4.0.17 could inspect up to ten scripts sequentially with a 15 s
+         * native timeout each. On a TV that turns "discover endpoint" into a
+         * two-minute meditation exercise. Four likely scripts are enough for
+         * diagnostics and keep the resolver bounded.
+         */
+        return urls.slice(0, 4);
+    }
+
+    function allohaNativeTextBounded(url, headers, timeoutMs, ok, fail) {
+        var network = null;
+        var finished = false;
+        var timer = null;
+
+        function done(fn, value) {
+            if (finished) return;
+            finished = true;
+
+            if (timer) {
+                try { clearTimeout(timer); } catch (e0) {}
+                timer = null;
+            }
+
+            fn(value);
+        }
+
+        try { network = new Lampa.Reguest(); } catch (e) {
+            try { network = new Lampa.Request(); } catch (e2) {}
+        }
+
+        if (!network || typeof network.native !== 'function') {
+            fail(new Error('Lampa.Reguest.native недоступен'));
+            return;
+        }
+
+        timeoutMs = Math.max(1200, Number(timeoutMs || 0) || 3500);
+
+        timer = setTimeout(function () {
+            try {
+                if (network && network.clear) network.clear();
+            } catch (e3) {}
+
+            done(
+                fail,
+                new Error('timeout ' + timeoutMs + 'ms')
+            );
+        }, timeoutMs + 250);
+
+        try {
+            if (network.clear) network.clear();
+            if (network.timeout) network.timeout(timeoutMs);
+
+            network.native(
+                url,
+                function (body) {
+                    done(ok, String(body || ''));
+                },
+                function (a, c) {
+                    var status =
+                        a && a.status !== undefined
+                            ? Number(a.status)
+                            : 0;
+
+                    done(
+                        fail,
+                        new Error(
+                            status
+                                ? ('HTTP ' + status)
+                                : errText(a || c || 'network error')
+                        )
+                    );
+                },
+                false,
+                {
+                    dataType: 'text',
+                    headers: headers || {}
+                }
+            );
+        } catch (e4) {
+            done(fail, e4);
+        }
+    }
+
+    function allohaNativeJsonBounded(url, headers, timeoutMs, ok, fail) {
+        allohaNativeTextBounded(
+            url,
+            headers,
+            timeoutMs,
+            function (body) {
+                try {
+                    ok(JSON.parse(String(body || '')));
+                } catch (e) {
+                    fail(new Error('JSON parse error'));
+                }
+            },
+            fail
+        );
     }
 
     function allohaDiscoverApiBases(iframeUrl, html, done) {
         var bases = allohaApiBase(iframeUrl, html);
         var scripts = allohaScriptUrls(iframeUrl, html);
         var index = 0;
+        var started = Date.now();
+        var MAX_DISCOVERY_MS = 12000;
 
         function mergeFromText(body, sourceUrl) {
             allohaApiBase(sourceUrl || iframeUrl, body).forEach(function (base) {
@@ -3942,20 +4062,24 @@
         }
 
         function next() {
-            if (index >= scripts.length) {
+            if (
+                index >= scripts.length ||
+                Date.now() - started >= MAX_DISCOVERY_MS
+            ) {
                 done(bases);
                 return;
             }
 
             var scriptUrl = scripts[index++];
 
-            nativeText(
+            allohaNativeTextBounded(
                 scriptUrl,
                 {
                     'User-Agent': COLLAPS_UA,
                     'Accept': '*/*',
                     'Referer': iframeUrl
                 },
+                2800,
                 function (body) {
                     mergeFromText(body, scriptUrl);
                     next();
@@ -4171,7 +4295,7 @@
                          * Usually the correct endpoint is among the first few
                          * inline/script origins.
                          */
-                        apiQueue = apiQueue.slice(0, 30);
+                        apiQueue = apiQueue.slice(0, 8);
 
                         function shortHost(url) {
                             try {
@@ -4185,8 +4309,14 @@
                             }
                         }
 
+                        var apiStarted = Date.now();
+                        var MAX_API_MS = 18000;
+
                         function nextApi() {
-                            if (baseIndex >= apiQueue.length) {
+                            if (
+                                baseIndex >= apiQueue.length ||
+                                Date.now() - apiStarted >= MAX_API_MS
+                            ) {
                                 var shown =
                                     attempts.slice(0, 7).join(', ');
 
@@ -4204,13 +4334,14 @@
                             var apiUrl = apiQueue[baseIndex++];
                             attempts.push(shortHost(apiUrl));
 
-                            nativeJson(
+                            allohaNativeJsonBounded(
                                 apiUrl,
                                 {
                                     'User-Agent': COLLAPS_UA,
                                     'Accept': 'application/json,*/*;q=0.8',
                                     'Referer': iframe
                                 },
+                                3500,
                                 function (json) {
                                     var picked =
                                         allohaPickHls(
