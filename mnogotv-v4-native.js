@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.15-native';
+    var VERSION = '4.0.16-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3528,6 +3528,507 @@
     }
 
 
+    /*
+     * Alloha native adapter v4.0.16
+     *
+     * Worker used to receive 404 from theatre.stravers.live.  The updated
+     * Android Lampa shell has a working native HTTP bridge, so Alloha is
+     * resolved on the device:
+     *
+     * iframe -> native HTML -> fileList -> media.id -> /api/movies/<id>
+     *        -> hlsSource -> built-in Lampa.Player
+     *
+     * The structure follows the current online_mod Alloha flow, but uses the
+     * iframe/translation data already returned by MnogoTV /sources.
+     */
+
+    function allohaHeaders(url) {
+        var origin = '';
+
+        try {
+            origin = new URL(String(url || '')).origin || '';
+        } catch (e) {}
+
+        return {
+            'User-Agent': COLLAPS_UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'ru,en;q=0.9'
+        };
+    }
+
+    function nativeJson(url, headers, ok, fail, postdata) {
+        var network = null;
+
+        try { network = new Lampa.Reguest(); } catch (e) {
+            try { network = new Lampa.Request(); } catch (e2) {}
+        }
+
+        if (!network || typeof network.native !== 'function') {
+            fail(new Error('Lampa.Reguest.native недоступен'));
+            return;
+        }
+
+        try {
+            network.clear();
+            network.timeout(15000);
+
+            network.native(
+                url,
+                function (data) {
+                    try {
+                        if (typeof data === 'string') data = JSON.parse(data);
+                    } catch (e3) {
+                        fail(new Error('Alloha: JSON parse error'));
+                        return;
+                    }
+
+                    ok(data || {});
+                },
+                function (a, c) {
+                    var status =
+                        a && a.status !== undefined
+                            ? a.status
+                            : '';
+
+                    fail(
+                        new Error(
+                            status
+                                ? ('HTTP ' + status)
+                                : errText(a || c || 'network error')
+                        )
+                    );
+                },
+                postdata || false,
+                {
+                    dataType: 'json',
+                    headers: headers || {}
+                }
+            );
+        } catch (e4) {
+            fail(e4);
+        }
+    }
+
+    function decodeAllohaFileListString(raw) {
+        raw = String(raw || '');
+
+        /*
+         * fileList is embedded inside a JS single-quoted string.  The common
+         * payload is already JSON with escaped apostrophes/backslashes.
+         */
+        try {
+            return JSON.parse(raw);
+        } catch (e) {}
+
+        try {
+            var s = raw
+                .replace(/\\'/g, "'")
+                .replace(/\\\\/g, "\\")
+                .replace(/\\\//g, "/")
+                .replace(/\\n/g, "")
+                .replace(/\\r/g, "")
+                .replace(/\\t/g, "\t");
+
+            return JSON.parse(s);
+        } catch (e2) {}
+
+        return null;
+    }
+
+    function parseAllohaFileList(html) {
+        html = String(html || '').replace(/\n/g, '');
+
+        var patterns = [
+            /fileList\s*=\s*JSON\.parse\('(\{[\s\S]*?\})'\)\s*;/i,
+            /fileList\s*=\s*JSON\.parse\("(\{[\s\S]*?\})"\)\s*;/i
+        ];
+
+        for (var i = 0; i < patterns.length; i++) {
+            var m = html.match(patterns[i]);
+
+            if (m && m[1]) {
+                var parsed = decodeAllohaFileListString(m[1]);
+
+                if (parsed && parsed.all) return parsed;
+            }
+        }
+
+        return null;
+    }
+
+    function firstObjectValue(obj) {
+        if (!obj || typeof obj !== 'object') return null;
+
+        var keys = Object.keys(obj);
+
+        for (var i = 0; i < keys.length; i++) {
+            var value = obj[keys[i]];
+            if (value !== undefined && value !== null) return value;
+        }
+
+        return null;
+    }
+
+    function allohaPickMedia(pl, season, episode, voiceChoice) {
+        if (!pl || !pl.all) return null;
+
+        var translationId =
+            voiceChoice &&
+            voiceChoice.translationId
+                ? String(voiceChoice.translationId)
+                : '';
+
+        if (String(pl.type || '').toLowerCase() === 'serial') {
+            var seasons = pl.all || {};
+            var seasonObj =
+                seasons[String(season)] ||
+                seasons[season] ||
+                firstObjectValue(seasons);
+
+            if (!seasonObj) return null;
+
+            var episodeObj =
+                seasonObj[String(episode)] ||
+                seasonObj[episode] ||
+                firstObjectValue(seasonObj);
+
+            if (!episodeObj) return null;
+
+            if (
+                translationId &&
+                episodeObj[translationId]
+            ) {
+                return episodeObj[translationId];
+            }
+
+            /*
+             * Some backends use numeric keys that arrive as strings, which
+             * is fine in JS objects. If the chosen MnogoTV translation isn't
+             * present for this episode, fall back to the first available one.
+             */
+            return firstObjectValue(episodeObj);
+        }
+
+        /*
+         * Movie structure in Alloha is usually:
+         * all[type][translation][quality] -> media.
+         * Walk it and prefer a media object that looks playable.
+         */
+        var queue = [pl.all];
+        var fallback = null;
+
+        while (queue.length) {
+            var node = queue.shift();
+
+            if (!node || typeof node !== 'object') continue;
+
+            if (
+                node.id !== undefined &&
+                node.id !== null
+            ) {
+                if (!fallback) fallback = node;
+
+                if (
+                    translationId &&
+                    (
+                        String(node.translation_id || '') === translationId ||
+                        String(node.translationId || '') === translationId ||
+                        String(node.translation || '') === translationId
+                    )
+                ) {
+                    return node;
+                }
+            }
+
+            Object.keys(node).forEach(function (key) {
+                var child = node[key];
+
+                if (
+                    child &&
+                    typeof child === 'object'
+                ) {
+                    queue.push(child);
+                }
+            });
+        }
+
+        return fallback;
+    }
+
+    function allohaApiBase(iframeUrl, html) {
+        var candidates = [];
+
+        try {
+            var origin = new URL(String(iframeUrl || '')).origin;
+            if (origin) candidates.push(origin + '/');
+        } catch (e) {}
+
+        /*
+         * If the page exposes an absolute /api/movies endpoint/domain in JS,
+         * prefer that over the iframe origin.
+         */
+        var src = String(html || '');
+        var matches = src.match(/https?:\/\/[^"'\\\s]+\/api\/movies\//ig) || [];
+
+        matches.forEach(function (url) {
+            var base = url.replace(/api\/movies\/.*$/i, '');
+            if (candidates.indexOf(base) === -1) candidates.unshift(base);
+        });
+
+        return candidates;
+    }
+
+    function allohaPickHls(json, qualityLabel) {
+        var list =
+            json &&
+            Array.isArray(json.hlsSource)
+                ? json.hlsSource
+                : [];
+
+        if (!list.length) return null;
+
+        var source =
+            list.filter(function (item) {
+                return item && item['default'];
+            })[0] ||
+            list[0] ||
+            {};
+
+        var qualities = source.quality || {};
+        var variants = [];
+
+        Object.keys(qualities).forEach(function (q) {
+            var raw = String(qualities[q] || '');
+            var link = raw.split(' or ').filter(Boolean)[0] || '';
+
+            if (!link) return;
+
+            variants.push({
+                label: String(q) + 'p',
+                quality: parseInt(q, 10) || 0,
+                url: normalizeDirectUrl(link)
+            });
+        });
+
+        variants = variants.filter(function (v) { return !!v.url; });
+
+        variants.sort(function (a, b) {
+            return b.quality - a.quality;
+        });
+
+        if (!variants.length) return null;
+
+        var wanted = parseInt(
+            String(qualityLabel || '').replace(/[^\d]/g, ''),
+            10
+        );
+
+        var selected = null;
+
+        if (wanted) {
+            selected =
+                variants.filter(function (v) {
+                    return v.quality === wanted;
+                })[0] ||
+                variants.filter(function (v) {
+                    return v.quality <= wanted;
+                })[0];
+        }
+
+        if (!selected) {
+            /*
+             * Keep 4K/AV1 experiments out of the first Alloha bring-up.
+             * 1080p is enough to prove the transport.
+             */
+            selected =
+                variants.filter(function (v) {
+                    return v.quality <= 1080;
+                })[0] ||
+                variants[0];
+        }
+
+        return {
+            selected: selected,
+            variants: variants
+        };
+    }
+
+    function allohaSubs(tracks) {
+        if (!Array.isArray(tracks)) return [];
+
+        return tracks.filter(function (t) {
+            return (
+                t &&
+                String(t.kind || '').toLowerCase() === 'captions' &&
+                t.src
+            );
+        }).map(function (t) {
+            var link =
+                String(t.src || '')
+                    .split(' or ')
+                    .filter(Boolean)[0] ||
+                '';
+
+            if (!link) return null;
+
+            return {
+                label: t.label || t.lang || 'Субтитры',
+                url: normalizeDirectUrl(link)
+            };
+        }).filter(Boolean);
+    }
+
+    function resolveAlloha(
+        source,
+        imdb,
+        season,
+        episode,
+        qualityLabel,
+        voiceChoice,
+        ok,
+        fail
+    ) {
+        var iframe =
+            normalizeDirectUrl(
+                voiceChoice &&
+                voiceChoice.iframeUrl
+                    ? voiceChoice.iframeUrl
+                    : (
+                        source &&
+                        source.iframeUrl
+                    )
+            );
+
+        if (!iframe) {
+            fail(new Error('Alloha: iframeUrl не получен'));
+            return;
+        }
+
+        nativeText(
+            iframe,
+            allohaHeaders(iframe),
+            function (html) {
+                var pl = parseAllohaFileList(html);
+
+                if (!pl || !pl.all) {
+                    fail(new Error(
+                        'Alloha: iframe открыт, но fileList не найден'
+                    ));
+                    return;
+                }
+
+                var media =
+                    allohaPickMedia(
+                        pl,
+                        season,
+                        episode,
+                        voiceChoice
+                    );
+
+                if (!media || !media.id) {
+                    fail(new Error(
+                        'Alloha: media.id для выбранной серии/озвучки не найден'
+                    ));
+                    return;
+                }
+
+                var bases = allohaApiBase(iframe, html);
+                var errors = [];
+                var index = 0;
+
+                function nextApi() {
+                    if (index >= bases.length) {
+                        fail(new Error(
+                            'Alloha API: ' +
+                            (errors.join(' | ') || 'endpoint не найден')
+                        ));
+                        return;
+                    }
+
+                    var base = bases[index++];
+                    var apiUrl =
+                        base +
+                        'api/movies/' +
+                        encodeURIComponent(media.id);
+
+                    nativeJson(
+                        apiUrl,
+                        {
+                            'User-Agent': COLLAPS_UA,
+                            'Accept': 'application/json,*/*;q=0.8',
+                            'Referer': iframe
+                        },
+                        function (json) {
+                            var picked =
+                                allohaPickHls(
+                                    json,
+                                    qualityLabel
+                                );
+
+                            if (
+                                !picked ||
+                                !picked.selected ||
+                                !picked.selected.url
+                            ) {
+                                errors.push(
+                                    base + ': hlsSource пуст'
+                                );
+                                nextApi();
+                                return;
+                            }
+
+                            var qualityMap = {};
+
+                            picked.variants.forEach(function (v) {
+                                qualityMap[v.label] = v.url;
+                            });
+
+                            ok({
+                                provider: 'Alloha',
+                                directUrl: picked.selected.url,
+                                directHeaders: {},
+                                relayUrl: '',
+                                relayReady: false,
+                                externalDirect: false,
+                                subtitles: allohaSubs(json.tracks || []),
+                                tracks: [],
+                                hlsQualities: picked.variants,
+                                quality:
+                                    picked.selected.label ||
+                                    qualityLabel ||
+                                    'Авто',
+                                resolvedBy:
+                                    'alloha native • fileList • media ' +
+                                    media.id +
+                                    ' • ' +
+                                    (
+                                        voiceChoice &&
+                                        voiceChoice.label
+                                            ? voiceChoice.label
+                                            : 'Авто'
+                                    )
+                            });
+                        },
+                        function (e) {
+                            errors.push(
+                                base + ': ' + errText(e)
+                            );
+                            nextApi();
+                        }
+                    );
+                }
+
+                nextApi();
+            },
+            function (e) {
+                fail(new Error(
+                    'Alloha iframe native: ' + errText(e)
+                ));
+            }
+        );
+    }
+
+
     function resolveNativeProvider(
         source,
         imdb,
@@ -3636,10 +4137,21 @@
             return;
         }
 
-        if (
-            type === 'alloha' ||
-            type === 'turbo'
-        ) {
+        if (type === 'alloha') {
+            resolveAlloha(
+                source,
+                imdb,
+                season,
+                episode,
+                qualityLabel,
+                voiceChoice,
+                ok,
+                fail
+            );
+            return;
+        }
+
+        if (type === 'turbo') {
             resolveNativeProvider(
                 source,
                 imdb,
