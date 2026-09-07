@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.16-native';
+    var VERSION = '4.0.17-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3755,27 +3755,246 @@
         return fallback;
     }
 
-    function allohaApiBase(iframeUrl, html) {
-        var candidates = [];
+    function allohaIsSafePublicHost(host) {
+        host = String(host || '').toLowerCase();
+
+        if (
+            !host ||
+            host === 'localhost' ||
+            host === '127.0.0.1' ||
+            host === '::1'
+        ) {
+            return false;
+        }
+
+        if (
+            /^10\./.test(host) ||
+            /^192\.168\./.test(host) ||
+            /^169\.254\./.test(host) ||
+            /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+        ) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function allohaPushApiBase(candidates, value, iframeUrl, priority) {
+        value = String(value || '')
+            .replace(/&amp;/g, '&')
+            .replace(/\\\//g, '/')
+            .trim();
+
+        if (!value) return;
 
         try {
-            var origin = new URL(String(iframeUrl || '')).origin;
-            if (origin) candidates.push(origin + '/');
+            if (value.indexOf('//') === 0) {
+                var proto = new URL(String(iframeUrl || '')).protocol || 'https:';
+                value = proto + value;
+            }
+
+            if (!/^https?:\/\//i.test(value)) {
+                value = new URL(value, iframeUrl).href;
+            }
+
+            var u = new URL(value);
+
+            if (!allohaIsSafePublicHost(u.hostname)) return;
+
+            var bases = [];
+
+            /*
+             * Exact /api/movies/... reference: preserve everything before api/.
+             */
+            var apiPos = u.href.toLowerCase().indexOf('/api/movies/');
+            if (apiPos >= 0) {
+                bases.push(u.href.substring(0, apiPos + 1));
+            }
+
+            /*
+             * A variable named domain/apiDomain may include a path prefix.
+             * Preserve that prefix as well as the origin.
+             */
+            var path = u.pathname || '/';
+            if (
+                path &&
+                path !== '/' &&
+                !/\.[a-z0-9]{1,6}$/i.test(path.split('/').pop() || '')
+            ) {
+                if (path.slice(-1) !== '/') path += '/';
+                bases.push(u.origin + path);
+            }
+
+            bases.push(u.origin + '/');
+
+            bases.forEach(function (base) {
+                if (candidates.indexOf(base) !== -1) return;
+
+                if (priority) candidates.unshift(base);
+                else candidates.push(base);
+            });
         } catch (e) {}
+    }
+
+    function allohaApiBase(iframeUrl, html) {
+        var candidates = [];
+        var src = String(html || '');
 
         /*
-         * If the page exposes an absolute /api/movies endpoint/domain in JS,
-         * prefer that over the iframe origin.
+         * v4.0.16 assumed that /api/movies lived on the iframe host.
+         * The working online_mod does NOT do that: it extracts a separate
+         * "domain" from the page and calls extract.domain + api/movies/<id>.
+         * We cannot reuse its private decrypt blob, so discover the same
+         * endpoint from the page/script URLs and domain-like JS variables.
          */
-        var src = String(html || '');
-        var matches = src.match(/https?:\/\/[^"'\\\s]+\/api\/movies\//ig) || [];
 
-        matches.forEach(function (url) {
-            var base = url.replace(/api\/movies\/.*$/i, '');
-            if (candidates.indexOf(base) === -1) candidates.unshift(base);
+        try {
+            allohaPushApiBase(
+                candidates,
+                new URL(String(iframeUrl || '')).origin + '/',
+                iframeUrl,
+                false
+            );
+        } catch (e0) {}
+
+        var normalized = src.replace(/\\\//g, '/');
+
+        var directApi =
+            normalized.match(/https?:\/\/[^"'\\\s<>]+\/api\/movies\//ig) ||
+            [];
+
+        directApi.forEach(function (url) {
+            allohaPushApiBase(candidates, url, iframeUrl, true);
+        });
+
+        /*
+         * Variables seen in provider players commonly use names like
+         * domain/apiDomain/api_host/server/host. Prefer these candidates.
+         */
+        var named =
+            /(?:\b(?:api[_-]?domain|api[_-]?host|api[_-]?url|domain|server|host)\b)\s*[:=]\s*['"]([^'"]+)['"]/ig;
+        var m;
+
+        while ((m = named.exec(normalized))) {
+            allohaPushApiBase(
+                candidates,
+                m[1],
+                iframeUrl,
+                true
+            );
+        }
+
+        /*
+         * Collect public absolute/protocol-relative URLs from inline JS.
+         * We only probe /api/movies on origins that the Alloha page itself
+         * references; private/local addresses are rejected above.
+         */
+        var abs = normalized.match(/https?:\/\/[a-z0-9.-]+(?::\d+)?(?:\/[^"'\\\s<>]*)?/ig) || [];
+
+        abs.forEach(function (url) {
+            allohaPushApiBase(candidates, url, iframeUrl, false);
+        });
+
+        var rel = normalized.match(/\/\/[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:\/[^"'\\\s<>]*)?/ig) || [];
+
+        rel.forEach(function (url) {
+            allohaPushApiBase(candidates, url, iframeUrl, false);
         });
 
         return candidates;
+    }
+
+    function allohaScriptUrls(iframeUrl, html) {
+        var urls = [];
+        var src = String(html || '').replace(/\\\//g, '/');
+        var re = /<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/ig;
+        var m;
+
+        while ((m = re.exec(src))) {
+            try {
+                var url = new URL(m[1], iframeUrl).href;
+                var u = new URL(url);
+
+                if (
+                    /^https?:$/i.test(u.protocol) &&
+                    allohaIsSafePublicHost(u.hostname) &&
+                    urls.indexOf(url) === -1
+                ) {
+                    urls.push(url);
+                }
+            } catch (e) {}
+
+            if (urls.length >= 10) break;
+        }
+
+        return urls;
+    }
+
+    function allohaDiscoverApiBases(iframeUrl, html, done) {
+        var bases = allohaApiBase(iframeUrl, html);
+        var scripts = allohaScriptUrls(iframeUrl, html);
+        var index = 0;
+
+        function mergeFromText(body, sourceUrl) {
+            allohaApiBase(sourceUrl || iframeUrl, body).forEach(function (base) {
+                if (bases.indexOf(base) === -1) bases.push(base);
+            });
+        }
+
+        function next() {
+            if (index >= scripts.length) {
+                done(bases);
+                return;
+            }
+
+            var scriptUrl = scripts[index++];
+
+            nativeText(
+                scriptUrl,
+                {
+                    'User-Agent': COLLAPS_UA,
+                    'Accept': '*/*',
+                    'Referer': iframeUrl
+                },
+                function (body) {
+                    mergeFromText(body, scriptUrl);
+                    next();
+                },
+                function () {
+                    next();
+                }
+            );
+        }
+
+        next();
+    }
+
+    function allohaApiUrls(base, mediaId) {
+        base = String(base || '');
+        if (base && base.slice(-1) !== '/') base += '/';
+
+        var id = encodeURIComponent(mediaId);
+        var urls = [];
+
+        function add(url) {
+            if (url && urls.indexOf(url) === -1) urls.push(url);
+        }
+
+        if (/\/api\/$/i.test(base)) {
+            add(base + 'movies/' + id);
+        }
+        else {
+            add(base + 'api/movies/' + id);
+        }
+
+        /*
+         * Some mirrors expose the same handler with a trailing slash.
+         */
+        urls.slice().forEach(function (url) {
+            add(url + '/');
+        });
+
+        return urls;
     }
 
     function allohaPickHls(json, qualityLabel) {
@@ -3932,93 +4151,128 @@
                     return;
                 }
 
-                var bases = allohaApiBase(iframe, html);
-                var errors = [];
-                var index = 0;
+                allohaDiscoverApiBases(
+                    iframe,
+                    html,
+                    function (bases) {
+                        var attempts = [];
+                        var errors = [];
+                        var baseIndex = 0;
+                        var apiQueue = [];
 
-                function nextApi() {
-                    if (index >= bases.length) {
-                        fail(new Error(
-                            'Alloha API: ' +
-                            (errors.join(' | ') || 'endpoint не найден')
-                        ));
-                        return;
-                    }
+                        bases.forEach(function (base) {
+                            allohaApiUrls(base, media.id).forEach(function (url) {
+                                if (apiQueue.indexOf(url) === -1) apiQueue.push(url);
+                            });
+                        });
 
-                    var base = bases[index++];
-                    var apiUrl =
-                        base +
-                        'api/movies/' +
-                        encodeURIComponent(media.id);
+                        /*
+                         * Avoid spending a minute probing a pathological page.
+                         * Usually the correct endpoint is among the first few
+                         * inline/script origins.
+                         */
+                        apiQueue = apiQueue.slice(0, 30);
 
-                    nativeJson(
-                        apiUrl,
-                        {
-                            'User-Agent': COLLAPS_UA,
-                            'Accept': 'application/json,*/*;q=0.8',
-                            'Referer': iframe
-                        },
-                        function (json) {
-                            var picked =
-                                allohaPickHls(
-                                    json,
-                                    qualityLabel
+                        function shortHost(url) {
+                            try {
+                                var u = new URL(url);
+                                return u.host + u.pathname.replace(
+                                    /\/api\/movies\/.*$/i,
+                                    '/api/movies/…'
                                 );
+                            } catch (e) {
+                                return String(url || '').slice(0, 80);
+                            }
+                        }
 
-                            if (
-                                !picked ||
-                                !picked.selected ||
-                                !picked.selected.url
-                            ) {
-                                errors.push(
-                                    base + ': hlsSource пуст'
-                                );
-                                nextApi();
+                        function nextApi() {
+                            if (baseIndex >= apiQueue.length) {
+                                var shown =
+                                    attempts.slice(0, 7).join(', ');
+
+                                fail(new Error(
+                                    'Alloha API: endpoint не найден' +
+                                    (
+                                        shown
+                                            ? (' • пробовал: ' + shown)
+                                            : ''
+                                    )
+                                ));
                                 return;
                             }
 
-                            var qualityMap = {};
+                            var apiUrl = apiQueue[baseIndex++];
+                            attempts.push(shortHost(apiUrl));
 
-                            picked.variants.forEach(function (v) {
-                                qualityMap[v.label] = v.url;
-                            });
+                            nativeJson(
+                                apiUrl,
+                                {
+                                    'User-Agent': COLLAPS_UA,
+                                    'Accept': 'application/json,*/*;q=0.8',
+                                    'Referer': iframe
+                                },
+                                function (json) {
+                                    var picked =
+                                        allohaPickHls(
+                                            json,
+                                            qualityLabel
+                                        );
 
-                            ok({
-                                provider: 'Alloha',
-                                directUrl: picked.selected.url,
-                                directHeaders: {},
-                                relayUrl: '',
-                                relayReady: false,
-                                externalDirect: false,
-                                subtitles: allohaSubs(json.tracks || []),
-                                tracks: [],
-                                hlsQualities: picked.variants,
-                                quality:
-                                    picked.selected.label ||
-                                    qualityLabel ||
-                                    'Авто',
-                                resolvedBy:
-                                    'alloha native • fileList • media ' +
-                                    media.id +
-                                    ' • ' +
-                                    (
-                                        voiceChoice &&
-                                        voiceChoice.label
-                                            ? voiceChoice.label
-                                            : 'Авто'
-                                    )
-                            });
-                        },
-                        function (e) {
-                            errors.push(
-                                base + ': ' + errText(e)
+                                    if (
+                                        !picked ||
+                                        !picked.selected ||
+                                        !picked.selected.url
+                                    ) {
+                                        errors.push(
+                                            shortHost(apiUrl) +
+                                            ': hlsSource пуст'
+                                        );
+                                        nextApi();
+                                        return;
+                                    }
+
+                                    ok({
+                                        provider: 'Alloha',
+                                        directUrl: picked.selected.url,
+                                        directHeaders: {},
+                                        relayUrl: '',
+                                        relayReady: false,
+                                        externalDirect: false,
+                                        subtitles: allohaSubs(json.tracks || []),
+                                        tracks: [],
+                                        hlsQualities: picked.variants,
+                                        quality:
+                                            picked.selected.label ||
+                                            qualityLabel ||
+                                            'Авто',
+                                        resolvedBy:
+                                            'alloha native • api ' +
+                                            shortHost(apiUrl) +
+                                            ' • media ' +
+                                            media.id +
+                                            ' • ' +
+                                            (
+                                                voiceChoice &&
+                                                voiceChoice.label
+                                                    ? voiceChoice.label
+                                                    : 'Авто'
+                                            )
+                                    });
+                                },
+                                function (e) {
+                                    errors.push(
+                                        shortHost(apiUrl) +
+                                        ': ' +
+                                        errText(e)
+                                    );
+                                    nextApi();
+                                }
                             );
-                            nextApi();
                         }
-                    );
-                }
 
-                nextApi();
+                        nextApi();
+                    }
+                );
             },
             function (e) {
                 fail(new Error(
