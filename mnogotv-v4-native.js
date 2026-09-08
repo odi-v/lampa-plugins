@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.1.5-r2-isolated-ws-dashfix';
-    var PLUGIN_ID = 'mnogotv_v415r2_native';
+    var VERSION = '4.1.6-native-auto';
+    var PLUGIN_ID = 'mnogotv_v416_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -732,16 +732,21 @@
         }
 
         /*
-         * AUTO:
-         * - if VeoVeo exposes a master HLS URL, keep real HLS ABR and let
-         *   Hls.js start at its lowest level (configured globally below);
-         * - if the catalog only contains separate fixed renditions, begin
-         *   around 480p and keep AUTO selected in the UI.
+         * AUTO must not force a low rendition.
+         * - Prefer an HLS master when VeoVeo exposes one, so Hls.js owns ABR.
+         * - Otherwise keep the provider/catalog default ordering and use its
+         *   first/default variant. Manual quality remains available in player.
          */
         var master = null;
+        var providerDefault = null;
 
         variants.forEach(function (v) {
+            if (!providerDefault && v && (v.default || v.isDefault || v.selected)) {
+                providerDefault = v;
+            }
+
             if (
+                !master &&
                 String(v.filepath || '')
                     .toLowerCase()
                     .indexOf('.m3u8') >= 0
@@ -750,7 +755,7 @@
             }
         });
 
-        return master || lowStartVariant(variants, 480) || variants[0];
+        return master || providerDefault || variants[0];
     }
 
 
@@ -850,34 +855,6 @@
      * multi-megabyte 1080/2160 fragment. Manual quality selection remains
      * available in the native Lampa.Player quality menu.
      */
-    function lowStartVariant(variants, target) {
-        variants = Array.isArray(variants) ? variants.slice() : [];
-        target = parseInt(target || 480, 10) || 480;
-
-        variants.sort(function (a, b) {
-            var aq = Number(a && (a.quality || numericQuality(a.label || a.title || a.name)) || 0);
-            var bq = Number(b && (b.quality || numericQuality(b.label || b.title || b.name)) || 0);
-            return bq - aq;
-        });
-
-        var exact = variants.filter(function (v) {
-            return Number(v && (v.quality || numericQuality(v.label || v.title || v.name)) || 0) === target;
-        })[0];
-        if (exact) return exact;
-
-        var lower = variants.filter(function (v) {
-            var q = Number(v && (v.quality || numericQuality(v.label || v.title || v.name)) || 0);
-            return q > 0 && q <= target;
-        });
-        if (lower.length) return lower[0];
-
-        var withQuality = variants.filter(function (v) {
-            return Number(v && (v.quality || numericQuality(v.label || v.title || v.name)) || 0) > 0;
-        });
-        if (withQuality.length) return withQuality[withQuality.length - 1];
-
-        return variants[0] || null;
-    }
 
     function veoQualitySummary(item) {
         var variants = normalizeVeoVariants(item);
@@ -1571,7 +1548,14 @@
             }
         });
 
-        var autoVariant = master || lowStartVariant(variants, 480) || variants[0];
+        var autoVariant = null;
+        var providerDefault = null;
+        variants.forEach(function (variant) {
+            if (!providerDefault && variant && (variant.default || variant.isDefault || variant.selected)) {
+                providerDefault = variant;
+            }
+        });
+        autoVariant = master || providerDefault || variants[0];
         if (autoVariant) result.auto = entryFor(autoVariant, 'auto');
 
         var seen = {};
@@ -1723,7 +1707,7 @@
                                     ' • player-quality' +
                                     (
                                         String(qualityLabel || 'Авто') === 'Авто'
-                                            ? ' • auto-low-start'
+                                            ? ' • native-auto'
                                             : ''
                                     )
                             });
@@ -2291,14 +2275,11 @@
         Hls.DefaultConfig.loader = MnogoTvProviderLoader;
 
         /*
-         * AUTO starts conservatively. Hls.js level 0 is the lowest rendition
-         * in the master playlist; ABR remains enabled and may climb after
-         * bandwidth is measured. This affects VeoVeo/Collaps master HLS, while
-         * Alloha uses its own 480p AUTO mapping because its qualities are
-         * separate protected URLs.
+         * Native AUTO: never pin playback to the lowest HLS level.
+         * startLevel=-1 hands the initial choice back to Hls.js ABR. Do not
+         * override its bandwidth estimate here.
          */
-        try { Hls.DefaultConfig.startLevel = 0; } catch (eStart) {}
-        try { Hls.DefaultConfig.abrEwmaDefaultEstimate = 650000; } catch (eAbr) {}
+        try { Hls.DefaultConfig.startLevel = -1; } catch (eStart) {}
 
         MNOGOTV_HLS_RUNTIME.routerCtor = MnogoTvProviderLoader;
         MNOGOTV_HLS_RUNTIME.installed = true;
@@ -3748,14 +3729,13 @@
                             player.updateSettings({
                                 streaming: {
                                     abr: {
-                                        autoSwitchBitrate: { video: true },
-                                        initialBitrate: { video: 650 }
+                                        autoSwitchBitrate: { video: true }
                                     }
                                 }
                             });
                         }
                     } catch (eLowStart) {
-                        log('Collaps DASH low-start setting ignored', eLowStart);
+                        log('Collaps DASH AUTO setting ignored', eLowStart);
                     }
                 }
 
@@ -4114,7 +4094,7 @@
                                     (kp ? (' • KP ' + kp) : '') +
                                     ' • ' + selectedDashLabel + '/NATIVE-XHR' +
                                     ' • full-ladder' +
-                                    ' • auto-low-start'
+                                    ' • native-auto'
                             });
                             return;
                         }
@@ -4171,13 +4151,13 @@
                                         hlsTracks
                                     ),
                                 quality: 'Авто',
-                                selectedQuality: 'низкое → ABR',
+                                selectedQuality: 'AUTO/ABR',
                                 resolvedBy:
                                     response.label +
                                     (kp ? (' • KP ' + kp) : '') +
                                     ' • HLS/CLIENT' +
                                     ' • native-player-quality' +
-                                    ' • auto-low-start'
+                                    ' • native-auto'
                             });
                             return;
                         }
@@ -4770,7 +4750,7 @@
             return Number(b.quality || 0) - Number(a.quality || 0);
         });
 
-        return lowStartVariant(variants, 480) || picked.selected || variants[variants.length - 1];
+        return (picked && picked.selected) || variants[0];
     }
 
     /*
@@ -4925,7 +4905,11 @@
         }
 
         if (!selected) {
-            selected = lowStartVariant(variants, 480) || variants[variants.length - 1] || variants[0];
+            selected =
+                variants.filter(function (v) {
+                    return Number(v.quality || 0) <= 1080;
+                })[0] ||
+                variants[0];
         }
 
         return {
@@ -5382,32 +5366,31 @@
             return v && v.url;
         });
 
+        var current = numericQuality(currentQuality || '');
+
         list.sort(function (a, b) {
             var aq = Number(a.quality || numericQuality(a.label || '') || 0);
             var bq = Number(b.quality || numericQuality(b.label || '') || 0);
-            var ad = Math.abs(aq - 480);
-            var bd = Math.abs(bq - 480);
 
-            if (ad !== bd) return ad - bd;
-
-            /*
-             * Around the same distance prefer the lower rendition first.
-             * AUTO should start conservatively, not celebrate by choosing 4K.
-             */
-            return aq - bq;
-        });
-
-        if (currentQuality) {
-            list.sort(function (a, b) {
-                var aCurrent = String(a.label || '') === String(currentQuality);
-                var bCurrent = String(b.label || '') === String(currentQuality);
+            if (current) {
+                var aCurrent = aq === current;
+                var bCurrent = bq === current;
                 if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
-                return 0;
-            });
-        }
+
+                var aLower = aq < current;
+                var bLower = bq < current;
+                if (aLower !== bLower) return aLower ? -1 : 1;
+
+                if (aLower && bLower) return bq - aq;
+                if (!aLower && !bLower) return aq - bq;
+            }
+
+            return bq - aq;
+        });
 
         return list;
     }
+
 
     function allohaApplyVariantRuntime(variant) {
         if (!variant || !variant.url) return false;
@@ -5516,7 +5499,7 @@
 
             try {
                 notify(
-                    'A415R2 AUTO → ' +
+                    'A416 AUTO → ' +
                     label +
                     (
                         socketStarted
@@ -5747,7 +5730,7 @@
 
             if (!ALLOHA_NATIVE_HLS.wsReadyNotified) {
                 ALLOHA_NATIVE_HLS.wsReadyNotified = true;
-                try { notify('A415R2 WS READY'); } catch (eNotifyWsReady) {}
+                try { notify('A416 WS READY'); } catch (eNotifyWsReady) {}
             }
 
             allohaPushHistory({
@@ -5784,7 +5767,7 @@
                 if (!ALLOHA_NATIVE_HLS.edgeNotified) {
                     ALLOHA_NATIVE_HLS.edgeNotified = true;
                     try {
-                        notify('A415R2 EDGE OK • 32');
+                        notify('A416 EDGE OK • 32');
                     } catch (eNotifyEdge) {}
                 }
 
@@ -5926,7 +5909,7 @@
                     if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
                         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
                         try {
-                            notify('A415R2 EDGE TIMEOUT • guard64');
+                            notify('A416 EDGE TIMEOUT • guard64');
                         } catch (eNotifyEdgeTimeout) {}
                     }
 
@@ -6280,7 +6263,7 @@
                         if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 1) {
                             try {
                                 notify(
-                                    'A415R2 OK ' + successLeaf +
+                                    'A416 OK ' + successLeaf +
                                     ' • ' + allohaHumanBytes(self.stats.loaded) +
                                     ' • C' + self.stats.chunkCount +
                                     ' • ' + successInfo.tokenKind +
@@ -6517,7 +6500,7 @@
 
                     try {
                         notify(
-                            'A415R2 FAIL ' + failedLeaf +
+                            'A416 FAIL ' + failedLeaf +
                             ' • H' + (status || 0) +
                             ' • ' + acceptsControlsKind + edgeLen +
                             ' • M' + (allohaActiveMirrorNumber() || '?') +
@@ -7299,7 +7282,7 @@
                                     ),
                                 selectedQuality:
                                     selectedVariant.label ||
-                                    '480p',
+                                    'Авто',
                                 quality:
                                     String(qualityLabel || 'Авто') === 'Авто'
                                         ? 'Авто'
@@ -7317,7 +7300,7 @@
                                     (edgeSocketStarted ? 'ws-wait' : 'no-ws') +
                                     ' • player-quality' +
                                     ' • edge-refresh' +
-                                    (String(qualityLabel || 'Авто') === 'Авто' ? ' • auto-real-480-start' : '') +
+                                    (String(qualityLabel || 'Авто') === 'Авто' ? ' • native-auto' : '') +
                                     ' • chunk1m' +
                                     (
                                         selectedVariant.mirrors &&
