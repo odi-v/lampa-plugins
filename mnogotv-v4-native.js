@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.1.1-isolated-quality';
+    var VERSION = '4.1.2-isolated-quality-auto';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -732,28 +732,67 @@
         }
 
         /*
-         * Авто: сохраняем поведение рабочей 3.7.0.
-         * Сначала m3u8, затем первый доступный вариант.
+         * AUTO:
+         * - if VeoVeo exposes a master HLS URL, keep real HLS ABR and let
+         *   Hls.js start at its lowest level (configured globally below);
+         * - if the catalog only contains separate fixed renditions, begin
+         *   around 480p and keep AUTO selected in the UI.
          */
-        var preferred = variants[0];
+        var master = null;
 
         variants.forEach(function (v) {
             if (
-                String(v.filepath)
+                String(v.filepath || '')
                     .toLowerCase()
                     .indexOf('.m3u8') >= 0
             ) {
-                preferred = v;
+                master = v;
             }
         });
 
-        return preferred;
+        return master || lowStartVariant(variants, 480) || variants[0];
     }
 
 
     function numericQuality(label) {
         var m = String(label || '').match(/(2160|1440|1080|720|480|360)/);
         return m ? parseInt(m[1], 10) : 0;
+    }
+
+    /*
+     * v4.1.2: AUTO is intentionally conservative. The UI still shows AUTO,
+     * but a provider that exposes separate renditions starts around 480p.
+     * This gives the TV a fast first frame and avoids immediately pulling a
+     * multi-megabyte 1080/2160 fragment. Manual quality selection remains
+     * available in the native Lampa.Player quality menu.
+     */
+    function lowStartVariant(variants, target) {
+        variants = Array.isArray(variants) ? variants.slice() : [];
+        target = parseInt(target || 480, 10) || 480;
+
+        variants.sort(function (a, b) {
+            var aq = Number(a && (a.quality || numericQuality(a.label || a.title || a.name)) || 0);
+            var bq = Number(b && (b.quality || numericQuality(b.label || b.title || b.name)) || 0);
+            return bq - aq;
+        });
+
+        var exact = variants.filter(function (v) {
+            return Number(v && (v.quality || numericQuality(v.label || v.title || v.name)) || 0) === target;
+        })[0];
+        if (exact) return exact;
+
+        var lower = variants.filter(function (v) {
+            var q = Number(v && (v.quality || numericQuality(v.label || v.title || v.name)) || 0);
+            return q > 0 && q <= target;
+        });
+        if (lower.length) return lower[0];
+
+        var withQuality = variants.filter(function (v) {
+            return Number(v && (v.quality || numericQuality(v.label || v.title || v.name)) || 0) > 0;
+        });
+        if (withQuality.length) return withQuality[withQuality.length - 1];
+
+        return variants[0] || null;
     }
 
     function veoQualitySummary(item) {
@@ -1381,6 +1420,72 @@
         );
     }
 
+    function veoPlayerQualityMap(item) {
+        var variants = normalizeVeoVariants(item);
+        var result = {};
+        if (!variants.length) return result;
+
+        function resolveVariant(variant, done) {
+            var file = normalizeDirectUrl(variant && variant.filepath || '');
+            if (!file) {
+                done('');
+                return;
+            }
+
+            if (file.toLowerCase().indexOf('.json') >= 0) {
+                veoResolveJsonFile(
+                    file,
+                    veoHeaders(file),
+                    function (stream) { done(normalizeDirectUrl(stream)); },
+                    function () { done(''); }
+                );
+                return;
+            }
+
+            done(file);
+        }
+
+        function entryFor(variant, mode) {
+            return {
+                url: normalizeDirectUrl(variant && variant.filepath || ''),
+                label: mode === 'auto' ? 'MnogoTV' : '',
+                __variant: variant,
+                __mode: mode,
+                call: function (instance, done) {
+                    var target =
+                        instance && instance.__variant
+                            ? instance.__variant
+                            : variant;
+
+                    resolveVariant(target, function (stream) {
+                        if (stream) done(stream);
+                    });
+                }
+            };
+        }
+
+        var master = null;
+        variants.forEach(function (variant) {
+            if (String(variant.filepath || '').toLowerCase().indexOf('.m3u8') >= 0) {
+                master = variant;
+            }
+        });
+
+        var autoVariant = master || lowStartVariant(variants, 480) || variants[0];
+        if (autoVariant) result.auto = entryFor(autoVariant, 'auto');
+
+        var seen = {};
+        variants.forEach(function (variant) {
+            var label = veoVariantLabel(variant);
+            if (!label || label === 'Вариант' || seen[label]) return;
+            seen[label] = true;
+            result[label] = entryFor(variant, 'manual');
+        });
+
+        return result;
+    }
+
+
     function resolveVeoVeo(
         source,
         imdb,
@@ -1460,15 +1565,33 @@
                                 subtitles: [],
                                 tracks: probe.tracks || [],
                                 hlsQualities: probe.qualities || [],
-                                quality:
+                                playerQualities:
+                                    probe.qualities && probe.qualities.length > 1
+                                        ? {}
+                                        : veoPlayerQualityMap(item),
+                                selectedQuality:
                                     numericQuality(selectedQuality)
                                         ? selectedQuality
                                         : (probe.bestQuality || selectedQuality),
+                                quality:
+                                    String(qualityLabel || 'Авто') === 'Авто'
+                                        ? 'Авто'
+                                        : (
+                                            numericQuality(selectedQuality)
+                                                ? selectedQuality
+                                                : (probe.bestQuality || selectedQuality)
+                                        ),
                                 resolvedBy:
                                     'VeoVeo ' +
                                     resolvedId.method +
                                     ' → ' +
-                                    resolvedId.movieId
+                                    resolvedId.movieId +
+                                    ' • player-quality' +
+                                    (
+                                        String(qualityLabel || 'Авто') === 'Авто'
+                                            ? ' • auto-low-start'
+                                            : ''
+                                    )
                             });
                         }
                     );
@@ -2032,6 +2155,17 @@
         };
 
         Hls.DefaultConfig.loader = MnogoTvProviderLoader;
+
+        /*
+         * AUTO starts conservatively. Hls.js level 0 is the lowest rendition
+         * in the master playlist; ABR remains enabled and may climb after
+         * bandwidth is measured. This affects VeoVeo/Collaps master HLS, while
+         * Alloha uses its own 480p AUTO mapping because its qualities are
+         * separate protected URLs.
+         */
+        try { Hls.DefaultConfig.startLevel = 0; } catch (eStart) {}
+        try { Hls.DefaultConfig.abrEwmaDefaultEstimate = 650000; } catch (eAbr) {}
+
         MNOGOTV_HLS_RUNTIME.routerCtor = MnogoTvProviderLoader;
         MNOGOTV_HLS_RUNTIME.installed = true;
 
@@ -3443,6 +3577,23 @@
             factory.create = function () {
                 var player = originalCreate.apply(factory, arguments);
 
+                if (COLLAPS_NATIVE_DASH.active && player) {
+                    try {
+                        if (typeof player.updateSettings === 'function') {
+                            player.updateSettings({
+                                streaming: {
+                                    abr: {
+                                        autoSwitchBitrate: { video: true },
+                                        initialBitrate: { video: 650 }
+                                    }
+                                }
+                            });
+                        }
+                    } catch (eLowStart) {
+                        log('Collaps DASH low-start setting ignored', eLowStart);
+                    }
+                }
+
                 if (
                     COLLAPS_NATIVE_DASH.active &&
                     player &&
@@ -3618,6 +3769,13 @@
         }
     }
 
+    /*
+     * v4.1.2: Collaps quality is intentionally left to the native Hls.js
+     * level selector. Unlike Alloha, Collaps has a real master playlist, so
+     * URL-swapping each quality would unnecessarily reload HTMLVideoElement
+     * and can trigger Lampa's audio-track redefinition bug.
+     */
+
     function resolveCollaps(
         source,
         imdb,
@@ -3737,7 +3895,7 @@
                             selectedDashLabel = 'DASH';
                         }
 
-                        if (selectedDash) {
+                        if (selectedDash && !hlsStream) {
                             var clientDashUrl = collapsClientCdnUrl(
                                 selectedDash,
                                 cdnUnix,
@@ -3764,16 +3922,18 @@
                                 externalDirect: false,
                                 subtitles: normalizeSubs(item.cc || item.subtitles || []),
                                 tracks: normalizeTracks(item.audio || {}),
-                                quality: selectedDashLabel,
+                                quality: 'Авто',
+                                selectedQuality: selectedDashLabel,
                                 resolvedBy:
                                     response.label +
                                     (kp ? (' • KP ' + kp) : '') +
-                                    ' • ' + selectedDashLabel + '/NATIVE-XHR'
+                                    ' • ' + selectedDashLabel + '/NATIVE-XHR' +
+                                    ' • auto-low-start'
                             });
                             return;
                         }
 
-                        /* Only if DASH is genuinely unavailable, use HLS client path. */
+                        /* v4.1.2: prefer HLS when present so Lampa can expose stable AUTO/manual quality levels. DASH remains the fallback for DASH-only titles. */
                         if (hlsStream) {
                             var hlsHeaders = collapsPlaybackHeaders('hls');
                             var clientHlsUrl = collapsClientCdnUrl(
@@ -3805,11 +3965,14 @@
                                 externalDirect: false,
                                 subtitles: normalizeSubs(item.cc || item.subtitles || []),
                                 tracks: normalizeTracks(item.audio || {}),
-                                quality: 'HLS',
+                                quality: 'Авто',
+                                selectedQuality: 'низкое → ABR',
                                 resolvedBy:
                                     response.label +
                                     (kp ? (' • KP ' + kp) : '') +
-                                    ' • HLS/CLIENT'
+                                    ' • HLS/CLIENT' +
+                                    ' • native-player-quality' +
+                                    ' • auto-low-start'
                             });
                             return;
                         }
@@ -4402,22 +4565,7 @@
             return Number(b.quality || 0) - Number(a.quality || 0);
         });
 
-        var wanted = 0;
-        try {
-            if (Lampa.Storage && typeof Lampa.Storage.field === 'function') {
-                wanted = parseInt(Lampa.Storage.field('video_quality_default'), 10) || 0;
-            }
-        } catch (e0) {}
-
-        if (wanted) {
-            return variants.filter(function (v) {
-                return Number(v.quality || 0) === wanted;
-            })[0] || variants.filter(function (v) {
-                return Number(v.quality || 0) <= wanted;
-            })[0] || variants[variants.length - 1];
-        }
-
-        return picked.selected || variants[0];
+        return lowStartVariant(variants, 480) || picked.selected || variants[variants.length - 1];
     }
 
     /*
@@ -4556,11 +4704,7 @@
         }
 
         if (!selected) {
-            selected =
-                variants.filter(function (v) {
-                    return v.quality <= 1080;
-                })[0] ||
-                variants[0];
+            selected = lowStartVariant(variants, 480) || variants[variants.length - 1] || variants[0];
         }
 
         return {
@@ -6256,10 +6400,13 @@
                                         hlsHeaders,
                                         guardId
                                     ),
-                                quality:
+                                selectedQuality:
                                     selectedVariant.label ||
-                                    qualityLabel ||
-                                    'Авто',
+                                    '480p',
+                                quality:
+                                    String(qualityLabel || 'Авто') === 'Авто'
+                                        ? 'Авто'
+                                        : (selectedVariant.label || qualityLabel || 'Авто'),
                                 resolvedBy:
                                     'alloha native • bnsi same-origin' +
                                     ' • media ' + media.id +
@@ -6272,6 +6419,7 @@
                                     ' • edge ' +
                                     (edgeSocketStarted ? 'ws-wait' : 'no-ws') +
                                     ' • player-quality' +
+                                    (String(qualityLabel || 'Авто') === 'Авто' ? ' • auto-480-start' : '') +
                                     ' • chunk1m' +
                                     (
                                         selectedVariant.mirrors &&
@@ -6982,6 +7130,245 @@
         var voiceChoice = { index: -1, label: 'Авто', translationId: '', iframeUrl: '', quality: '' };
         var playerMode = 'lampa';
 
+        /*
+         * Per-title / per-episode availability cache. The source selector only
+         * lists providers that actually expose a playable item for the current
+         * movie/episode. Network/CDN playback errors are not treated as
+         * "video absent"; only definitive catalog/embed misses are cached as
+         * absent.
+         */
+        function sourceAvailabilityKey(s) {
+            return String(
+                (s && (s.type || s.name)) ||
+                'source'
+            ).toLowerCase();
+        }
+
+        function mediaSlot(ep) {
+            if (!isSeries(movie)) return 'movie';
+            var num = parseInt(ep && ep.episode_number || 0, 10) || 0;
+            return 's' + Number(season || 1) + 'e' + num;
+        }
+
+        function presenceCache(s) {
+            if (!s.__mnogotv_presence) s.__mnogotv_presence = {};
+            return s.__mnogotv_presence;
+        }
+
+        function cachedPresence(s, ep) {
+            var key = mediaSlot(ep);
+            var cacheMap = presenceCache(s);
+            return Object.prototype.hasOwnProperty.call(cacheMap, key)
+                ? cacheMap[key]
+                : null;
+        }
+
+        function setPresence(s, ep, value, reason) {
+            if (!s) return;
+            var key = mediaSlot(ep);
+            presenceCache(s)[key] = !!value;
+            if (!value) {
+                s.__mnogotv_absent_reason = errText(reason) || 'Данное видео отсутствует';
+            }
+        }
+
+        function sourceStructurallyAvailable(s) {
+            if (!s || !s.supported) return false;
+
+            var type = sourceType(s);
+
+            if (type === 'alloha') {
+                return !!allohaIframeFromSource(s, null);
+            }
+
+            if (
+                type === 'veoveo' ||
+                type === 'veo' ||
+                type.indexOf('veoveo') >= 0
+            ) {
+                return !!normalizeDirectUrl(s.iframeUrl || s.iframe || '');
+            }
+
+            return true;
+        }
+
+        function missingVideoError(err) {
+            var text = errText(err).toLowerCase();
+            return /(iframeurl не получен|filepath не найден|поток пустой|поток не найден|серия .* не найдена|media\.id .* не найден|hlssource пуст|dasha\/dash\/hls не найден|sources в json не найдены|ссылка в json не найдена|makeplayer не найден)/i.test(text);
+        }
+
+        function markSourceAbsent(s, ep, err) {
+            if (!s) return;
+            setPresence(s, ep, false, err);
+            log('source marked absent', {
+                source: sourceAvailabilityKey(s),
+                slot: mediaSlot(ep),
+                reason: errText(err) || 'Данное видео отсутствует'
+            });
+        }
+
+        function sourceVisibleFor(s, ep) {
+            if (!sourceStructurallyAvailable(s)) return false;
+            return cachedPresence(s, ep) !== false;
+        }
+
+        function probeSourcePresence(s, ep, done) {
+            if (!sourceStructurallyAvailable(s)) {
+                setPresence(s, ep, false, 'Данное видео отсутствует');
+                done(false);
+                return;
+            }
+
+            var cached = cachedPresence(s, ep);
+            if (cached !== null) {
+                done(cached);
+                return;
+            }
+
+            var type = sourceType(s);
+            var epNum = isSeries(movie)
+                ? parseInt(ep && ep.episode_number || 0, 10) || null
+                : null;
+
+            var settled = false;
+            var presenceTimer = setTimeout(function () {
+                /* Unknown is better than falsely hiding a real provider. */
+                finish(true, 'availability timeout');
+            }, 6500);
+
+            function finish(value, reason) {
+                if (settled) return;
+                settled = true;
+                try { clearTimeout(presenceTimer); } catch (eTimer) {}
+                setPresence(s, ep, !!value, reason);
+                done(!!value);
+            }
+
+            if (
+                type === 'veoveo' ||
+                type === 'veo' ||
+                type.indexOf('veoveo') >= 0
+            ) {
+                fetchVeoEpisodeItem(
+                    s,
+                    imdb,
+                    isSeries(movie) ? season : null,
+                    epNum,
+                    function (result) {
+                        finish(normalizeVeoVariants(result && result.item).length > 0);
+                    },
+                    function (e) { finish(false, e); }
+                );
+                return;
+            }
+
+            if (type === 'collaps') {
+                getKpId(
+                    imdb,
+                    function (kp) {
+                        tryCollapsUrls(
+                            s,
+                            imdb,
+                            kp,
+                            isSeries(movie) ? season : null,
+                            epNum,
+                            function (response) {
+                                var cfg = response && response.config;
+                                var item = pickCollapsItem(
+                                    cfg,
+                                    isSeries(movie) ? season : null,
+                                    epNum
+                                );
+
+                                if (!item && !isSeries(movie) && cfg && cfg.source) {
+                                    item = cfg.source;
+                                }
+
+                                var has = !!(item && (
+                                    item.dasha || item.dash || item.hls ||
+                                    (item.source && (item.source.dasha || item.source.dash || item.source.hls))
+                                ));
+                                finish(has, has ? '' : 'Collaps: поток не найден');
+                            },
+                            function (e) {
+                                if (missingVideoError(e)) finish(false, e);
+                                else finish(true);
+                            }
+                        );
+                    }
+                );
+                return;
+            }
+
+            if (type === 'alloha') {
+                var iframe = allohaIframeFromSource(s, voiceChoice);
+                if (!iframe) {
+                    finish(false, 'Alloha: iframeUrl не получен');
+                    return;
+                }
+
+                nativeText(
+                    iframe,
+                    allohaHeaders(iframe),
+                    function (html) {
+                        var pl = parseAllohaFileList(html);
+                        var media = pl && allohaPickMedia(
+                            pl,
+                            isSeries(movie) ? season : null,
+                            epNum,
+                            voiceChoice
+                        );
+                        finish(!!(media && media.id), 'Alloha: media.id не найден');
+                    },
+                    function (e) {
+                        if (missingVideoError(e)) finish(false, e);
+                        else finish(true);
+                    }
+                );
+                return;
+            }
+
+            if (type === 'turbo') {
+                resolveNativeProvider(
+                    s,
+                    imdb,
+                    isSeries(movie) ? season : null,
+                    epNum,
+                    'Авто',
+                    voiceChoice,
+                    function (resolved) {
+                        finish(!!(resolved && resolved.directUrl));
+                    },
+                    function (e) {
+                        if (missingVideoError(e)) finish(false, e);
+                        else finish(true);
+                    }
+                );
+                return;
+            }
+
+            finish(true);
+        }
+
+        function probeAllSources(ep, done) {
+            var list = sources.filter(function (s) { return s && s.supported; });
+            if (!list.length) { done(); return; }
+
+            var left = list.length;
+            list.forEach(function (s) {
+                probeSourcePresence(s, ep, function () {
+                    left--;
+                    if (left <= 0) done();
+                });
+            });
+        }
+
+        function visibleSources(ep) {
+            return sources.filter(function (s) {
+                return sourceVisibleFor(s, ep);
+            });
+        }
+
         var root = $('<div class="mnogotv-v318"></div>');
         var layout = $('<div class="mnogotv-v318__layout"></div>');
         var infoPanel = $('<aside class="mnogotv-v318__info"></aside>');
@@ -7689,213 +8076,79 @@
         }
 
         function chooseSource() {
-            var items = [];
-            sources.forEach(function (s) {
-                var type =
-                    String(
-                        s && s.type || ''
-                    ).toLowerCase();
+            var targetEp =
+                isSeries(movie)
+                    ? (currentFocus || episodes[0] || null)
+                    : null;
 
-                var suffix = '';
+            status.text('Проверяю доступность источников…');
 
-                if (
-                    type === 'turbo'
-                ) {
-                    suffix =
-                        ' • native';
-                }
-                else if (
-                    type === 'collaps'
-                ) {
-                    suffix =
-                        ' • native';
-                }
-                else if (!s.supported) {
-                    suffix =
-                        ' • пока без адаптера';
-                }
-                else if (
-                    type === 'alloha'
-                ) {
-                    suffix =
-                        ' • native';
-                }
-                else if (
-                    type === 'veoveo' ||
-                    type === 'veo' ||
-                    type.indexOf('veoveo') >= 0
-                ) {
-                    suffix =
-                        ' • рекомендуется';
-                }
+            probeAllSources(targetEp, function () {
+                status.text('');
 
-                items.push({
-                    title:
-                        (s.name || s.type || 'Источник') +
-                        suffix,
-                    source: s,
-                    selected: source === s
-                });
-            });
-            items.push({ title: '← Назад', goBack: true });
+                var items = [];
+                visibleSources(targetEp).forEach(function (s) {
+                    var type = String(s && s.type || '').toLowerCase();
+                    var suffix = '';
 
-            Lampa.Select.show({
-                title: 'MnogoTV — источник',
-                items: items,
-                onBack: function () { Lampa.Controller.toggle('content'); },
-                onSelect: function (item) {
-                    if (item.goBack) { Lampa.Controller.toggle('content'); return; }
-                    if (!item.source.supported) {
-                        var disabledType =
-                            sourceType(
-                                item.source
-                            );
-
-                        var reason =
-                            disabledType === 'turbo'
-                                ? 'Turbo открывается, но его iframe не управляется пультом и не принимает выбранную серию.'
-                                : (
-                                    disabledType === 'collaps'
-                                        ? 'Collaps на этой приставке даёт manifestLoadError. Нужен отдельный proxy/native адаптер.'
-                                        : (
-                                            (
-                                                item.source.name ||
-                                                item.source.type ||
-                                                'Источник'
-                                            ) +
-                                            ' пока без отдельного адаптера'
-                                        )
-                                );
-
-                        notify(
-                            'MnogoTV: ' +
-                            reason
-                        );
-
-                        Lampa.Controller.toggle(
-                            'content'
-                        );
-
-                        return;
+                    if (type === 'turbo') suffix = ' • native';
+                    else if (type === 'collaps') suffix = ' • native';
+                    else if (type === 'alloha') suffix = ' • native';
+                    else if (
+                        type === 'veoveo' ||
+                        type === 'veo' ||
+                        type.indexOf('veoveo') >= 0
+                    ) {
+                        suffix = ' • рекомендуется';
                     }
-                    source = item.source;
-                    qualityLabel = 'Авто';
-                    resetVoice();
-                    status.text('');
-                    setSourceLabel();
-                    Lampa.Controller.toggle('content');
-                    renderEpisodes();
+
+                    items.push({
+                        title: (s.name || s.type || 'Источник') + suffix,
+                        source: s,
+                        selected: source === s
+                    });
+                });
+
+                if (!items.length) {
+                    items.push({
+                        title: 'Данное видео отсутствует',
+                        disabled: true
+                    });
                 }
+
+                items.push({ title: '← Назад', goBack: true });
+
+                Lampa.Select.show({
+                    title: 'MnogoTV — источник',
+                    items: items,
+                    onBack: function () { Lampa.Controller.toggle('content'); },
+                    onSelect: function (item) {
+                        if (item.goBack) {
+                            Lampa.Controller.toggle('content');
+                            return;
+                        }
+
+                        if (item.disabled || !item.source) {
+                            notify('MnogoTV: Данное видео отсутствует');
+                            Lampa.Controller.toggle('content');
+                            return;
+                        }
+
+                        source = item.source;
+                        qualityLabel = 'Авто';
+                        resetVoice();
+                        status.text('');
+                        setSourceLabel();
+                        Lampa.Controller.toggle('content');
+                        renderEpisodes();
+                    }
+                });
             });
         }
 
         function chooseQuality() {
-            var type =
-                String(
-                    source &&
-                    source.type ||
-                    ''
-                ).toLowerCase();
-
-            if (
-                !source ||
-                !(
-                    type === 'veoveo' ||
-                    type === 'veo' ||
-                    type.indexOf('veoveo') >= 0
-                )
-            ) {
-                notify(
-                    'MnogoTV: выбор качества доступен для VeoVeo'
-                );
-                return;
-            }
-
-            var ep =
-                currentFocus ||
-                episodes[0];
-
-            if (!ep) {
-                notify(
-                    'MnogoTV: сначала выбери серию'
-                );
-                return;
-            }
-
-            status.text(
-                'VeoVeo: получаю варианты качества…'
-            );
-
-            getVeoQualityOptions(
-                source,
-                imdb,
-                season,
-                parseInt(
-                    ep.episode_number ||
-                    0,
-                    10
-                ),
-                function (options) {
-                    status.text('');
-
-                    var items = [{
-                        title: 'Авто',
-                        quality: 'Авто',
-                        selected:
-                            qualityLabel === 'Авто'
-                    }];
-
-                    options.forEach(function (opt) {
-                        items.push({
-                            title: opt.label,
-                            quality: opt.label,
-                            selected:
-                                qualityLabel ===
-                                opt.label
-                        });
-                    });
-
-                    items.push({
-                        title: '← Назад',
-                        goBack: true
-                    });
-
-                    Lampa.Select.show({
-                        title: 'VeoVeo — качество',
-                        items: items,
-
-                        onBack: function () {
-                            Lampa.Controller.toggle('content');
-                        },
-
-                        onSelect: function (item) {
-                            if (item.goBack) {
-                                Lampa.Controller.toggle('content');
-                                return;
-                            }
-
-                            qualityLabel =
-                                item.quality ||
-                                'Авто';
-                            resetVoice();
-
-                            setSourceLabel();
-
-                            Lampa.Controller.toggle('content');
-                        }
-                    });
-                },
-                function (e) {
-                    status.text(
-                        'Качество: ' +
-                        errText(e)
-                    );
-
-                    notify(
-                        'MnogoTV: ' +
-                        errText(e)
-                    );
-                }
+            notify(
+                'MnogoTV: качество выбирается в плеере Lampa • AUTO по умолчанию'
             );
         }
 
@@ -7938,23 +8191,33 @@
                 var actualRunas = 'lampa';
 
                 if (
+                    qualityLabel !== 'Авто' &&
                     resolved.quality &&
                     resolved.quality !== 'Вариант'
                 ) {
-                    qualityLabel =
-                        resolved.quality;
-
+                    qualityLabel = resolved.quality;
                     setSourceLabel();
+                }
+
+                var statusQuality =
+                    resolved.quality ||
+                    qualityLabel ||
+                    'Авто';
+
+                if (
+                    statusQuality === 'Авто' &&
+                    resolved.selectedQuality
+                ) {
+                    statusQuality +=
+                        ' (старт ' +
+                        resolved.selectedQuality +
+                        ')';
                 }
 
                 status.text(
                     (resolved.provider || 'Источник') +
                     ' • ' +
-                    (
-                        resolved.quality ||
-                        qualityLabel ||
-                        'Авто'
-                    ) +
+                    statusQuality +
                     ' • ' +
                     (resolved.resolvedBy || 'resolver') +
                     ' • isolated'
@@ -7971,6 +8234,13 @@
                     voiceChoice
                 );
             }, function (e) {
+                if (missingVideoError(e)) {
+                    markSourceAbsent(source, ep, e);
+                    status.text('Данное видео отсутствует');
+                    notify('MnogoTV: Данное видео отсутствует');
+                    return;
+                }
+
                 status.text('Ошибка: ' + errText(e));
                 notify('MnogoTV: ' + errText(e));
             });
@@ -8081,7 +8351,7 @@
                     ) {
                         if (
                             sources[i] &&
-                            sources[i].supported &&
+                            sourceStructurallyAvailable(sources[i]) &&
                             sources[i].preferred
                         ) {
                             source = sources[i];
@@ -8097,7 +8367,7 @@
                         ) {
                             if (
                                 sources[j] &&
-                                sources[j].supported
+                                sourceStructurallyAvailable(sources[j])
                             ) {
                                 source = sources[j];
                                 break;
@@ -8105,7 +8375,7 @@
                         }
                     }
                     setSourceLabel();
-                    if (!source) { status.text('Нет поддерживаемых источников'); return; }
+                    if (!source) { status.text('Данное видео отсутствует'); return; }
                     if (isSeries(movie)) {
                         getSeasons(movie, function (listSeasons) {
                             seasons = listSeasons;
