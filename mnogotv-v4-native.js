@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.24-native';
+    var VERSION = '4.0.25-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4173,7 +4173,7 @@
 
 
     /*
-     * v4.0.24: do not assume that every quality listed by /bnsi is actually
+     * v4.0.25: do not assume that every quality listed by /bnsi is actually
      * fetchable for this title/session. Real-device tests proved:
      *   - multi-quality titles can expose 1080p that answers HTTP 403;
      *   - the same title works at 480p;
@@ -4321,7 +4321,7 @@
 
 
     /*
-     * v4.0.24: Alloha HLS quality-probe + chunked native transport.
+     * v4.0.25: HAR-ordered Alloha WS handshake + chunked native transport.
      *
      * HAR proves that /bnsi success is only half of the job:
      *   1) master.m3u8 uses Accepts-Controls = Borth fingerprint (64 hex);
@@ -4351,6 +4351,10 @@
         lastMirrorSwitch: null,
         lastError: null,
         edgeReceivedAt: 0,
+        wsExpected: false,
+        wsReady: false,
+        wsReadyAt: 0,
+        wsReadyNotified: false,
         edgeNotified: false,
         edgeTimeoutNotified: false,
         fragmentSuccessCount: 0,
@@ -4519,12 +4523,18 @@
         } catch (e2) {}
 
         ALLOHA_NATIVE_HLS.ws = null;
+        ALLOHA_NATIVE_HLS.wsReady = false;
+        ALLOHA_NATIVE_HLS.wsReadyAt = 0;
     }
 
     function startAllohaEdgeSocket(json, quality, audioId) {
         closeAllohaEdgeSocket();
         ALLOHA_NATIVE_HLS.edgeHash = '';
         ALLOHA_NATIVE_HLS.edgeReceivedAt = 0;
+        ALLOHA_NATIVE_HLS.wsExpected = false;
+        ALLOHA_NATIVE_HLS.wsReady = false;
+        ALLOHA_NATIVE_HLS.wsReadyAt = 0;
+        ALLOHA_NATIVE_HLS.wsReadyNotified = false;
         ALLOHA_NATIVE_HLS.edgeNotified = false;
         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = false;
 
@@ -4537,6 +4547,8 @@
             log('Alloha edge WebSocket unavailable');
             return false;
         }
+
+        ALLOHA_NATIVE_HLS.wsExpected = true;
 
         var wsUrl = String(json.pnr || '');
 
@@ -4577,11 +4589,27 @@
             log('Alloha edge WebSocket connected', wsUrl);
 
             /*
-             * This is the exact startup sequence captured in HAR.
-             * The server then answers with config_update.edge_hash.
+             * Exact HAR ordering:
+             *   WS 101 -> playback_start + init -> master.m3u8 -> edge_hash.
+             * The master does not need edge_hash yet, but it MUST NOT outrun
+             * the WebSocket handshake. Real-device 403s in 4.0.23/24 were
+             * that race.
              */
             send('playback_start');
             send('init');
+
+            ALLOHA_NATIVE_HLS.wsReady = true;
+            ALLOHA_NATIVE_HLS.wsReadyAt = Date.now();
+
+            if (!ALLOHA_NATIVE_HLS.wsReadyNotified) {
+                ALLOHA_NATIVE_HLS.wsReadyNotified = true;
+                try { notify('A25 WS READY'); } catch (eNotifyWsReady) {}
+            }
+
+            allohaPushHistory({
+                phase: 'ws-ready',
+                ts: Date.now()
+            });
 
             try {
                 ALLOHA_NATIVE_HLS.heartbeatTimer = setInterval(function () {
@@ -4612,7 +4640,7 @@
                 if (!ALLOHA_NATIVE_HLS.edgeNotified) {
                     ALLOHA_NATIVE_HLS.edgeNotified = true;
                     try {
-                        notify('A24 EDGE OK • 32');
+                        notify('A25 EDGE OK • 32');
                     } catch (eNotifyEdge) {}
                 }
 
@@ -4665,7 +4693,7 @@
                     if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
                         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
                         try {
-                            notify('A24 EDGE TIMEOUT • guard64');
+                            notify('A25 EDGE TIMEOUT • guard64');
                         } catch (eNotifyEdgeTimeout) {}
                     }
 
@@ -4974,7 +5002,7 @@
                         if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 1) {
                             try {
                                 notify(
-                                    'A24 OK ' + successLeaf +
+                                    'A25 OK ' + successLeaf +
                                     ' • ' + allohaHumanBytes(self.stats.loaded) +
                                     ' • C' + self.stats.chunkCount +
                                     ' • edge' + successInfo.edgeLength +
@@ -5031,7 +5059,7 @@
 
                     try {
                         notify(
-                            'A24 DECODE ' + allohaHlsLeaf(requestUrl) +
+                            'A25 DECODE ' + allohaHlsLeaf(requestUrl) +
                             ' • edge' +
                             String(
                                 ALLOHA_NATIVE_HLS.edgeHash ||
@@ -5135,7 +5163,7 @@
 
                     try {
                         notify(
-                            'A24 FAIL ' + failedLeaf +
+                            'A25 FAIL ' + failedLeaf +
                             ' • H' + (status || 0) +
                             ' • edge' + edgeLen +
                             ' • M' + (allohaActiveMirrorNumber() || '?') +
@@ -5446,9 +5474,37 @@
             }
 
             /*
-             * A level request can start almost immediately after the master.
-             * Give the WS config_update a short window to deliver edge_hash.
+             * HAR ordering is strict enough to matter:
+             *   WS open -> playback_start/init -> master -> edge_hash -> level/frags.
+             * Wait for WS readiness before the master so it cannot race the
+             * session setup and receive HTTP 403. After the master, wait for
+             * edge_hash before level/init/fragments as before.
              */
+            if (
+                isManifest &&
+                ALLOHA_NATIVE_HLS.wsExpected &&
+                !ALLOHA_NATIVE_HLS.wsReady
+            ) {
+                var wsStarted = Date.now();
+
+                (function waitWsReady() {
+                    if (self.stats.aborted) return;
+
+                    if (
+                        ALLOHA_NATIVE_HLS.wsReady ||
+                        Date.now() - wsStarted >= 2200
+                    ) {
+                        self.waitTimer = null;
+                        doLoad();
+                        return;
+                    }
+
+                    self.waitTimer = setTimeout(waitWsReady, 25);
+                }());
+
+                return;
+            }
+
             if (
                 !isManifest &&
                 !ALLOHA_NATIVE_HLS.edgeHash
@@ -5646,112 +5702,71 @@
                             }
 
                             /*
-                             * Probe the real master URL before playback.
-                             * A /bnsi quality key is only a candidate, not a
-                             * guarantee that this session may fetch it.
+                             * v4.0.25: no preflight GET. HAR proves that the
+                             * master request is valid only after the Alloha
+                             * WebSocket has opened and playback_start/init were
+                             * sent. Start/configure that session first, then let
+                             * the real Hls.js manifest request run through the
+                             * native loader in the same order as the website.
                              */
-                            allohaProbeHlsVariant(
-                                picked,
-                                qualityLabel,
-                                hlsHeaders,
-                                function (selectedVariant, probeErrors) {
-                                    var requestedVariant =
-                                        picked.selected &&
-                                        picked.selected.label ||
+                            var selectedVariant = picked.selected;
+
+                            var hlsNativeReady =
+                                configureAllohaNativeHls(
+                                    selectedVariant.url,
+                                    hlsHeaders,
+                                    guardId,
+                                    selectedVariant.mirrors
+                                );
+
+                            var edgeSocketStarted =
+                                startAllohaEdgeSocket(
+                                    json,
+                                    selectedVariant.label ||
                                         qualityLabel ||
-                                        'Авто';
+                                        'Авто',
+                                    picked.audioId
+                                );
 
-                                    var fellBack =
-                                        picked.selected &&
-                                        selectedVariant.label !==
-                                            picked.selected.label;
-
-                                    if (fellBack) {
-                                        try {
-                                            notify(
-                                                'A24 QUALITY • ' +
-                                                requestedVariant +
-                                                ' → ' +
-                                                selectedVariant.label
-                                            );
-                                        } catch (eNotifyQuality) {}
-                                    }
-
-                                    allohaPushHistory({
-                                        phase: 'quality-probe-ok',
-                                        requested: requestedVariant,
-                                        selected: selectedVariant.label,
-                                        fallback: !!fellBack,
-                                        probeErrors: probeErrors || [],
-                                        ts: Date.now()
-                                    });
-
-                                    var hlsNativeReady =
-                                        configureAllohaNativeHls(
-                                            selectedVariant.url,
-                                            hlsHeaders,
-                                            guardId,
-                                            selectedVariant.mirrors
-                                        );
-
-                                    var edgeSocketStarted =
-                                        startAllohaEdgeSocket(
-                                            json,
-                                            selectedVariant.label ||
-                                                qualityLabel ||
-                                                'Авто',
-                                            picked.audioId
-                                        );
-
-                                    ok({
-                                        provider: 'Alloha',
-                                        directUrl: selectedVariant.url,
-                                        directHeaders: hlsHeaders,
-                                        relayUrl: '',
-                                        relayReady: false,
-                                        externalDirect: false,
-                                        subtitles: allohaSubs(json.tracks || []),
-                                        tracks: [],
-                                        hlsQualities: picked.variants,
-                                        quality:
-                                            selectedVariant.label ||
-                                            qualityLabel ||
-                                            'Авто',
-                                        resolvedBy:
-                                            'alloha native • bnsi same-origin' +
-                                            ' • media ' + media.id +
-                                            ' • guard ' +
-                                            (streamToken ? 'full' : 'no-auth-token') +
-                                            ' • qprobe ' +
-                                            selectedVariant.label +
-                                            (fellBack ? ' fallback' : '') +
-                                            ' • hls ' +
-                                            (hlsNativeReady ? 'native' : 'stock') +
-                                            ' • edge ' +
-                                            (edgeSocketStarted ? 'ws' : 'no-ws') +
-                                            ' • chunk1m' +
-                                            (
-                                                selectedVariant.mirrors &&
-                                                selectedVariant.mirrors.length > 1
-                                                    ? ' • 2cdn'
-                                                    : ''
-                                            ) +
-                                            ' • ' +
-                                            (
-                                                voiceChoice &&
-                                                voiceChoice.label
-                                                    ? voiceChoice.label
-                                                    : 'Авто'
-                                            )
-                                    });
-                                },
-                                function (eProbe) {
-                                    fail(new Error(
-                                        'Alloha master probe: ' +
-                                        errText(eProbe)
-                                    ));
-                                }
-                            );
+                            ok({
+                                provider: 'Alloha',
+                                directUrl: selectedVariant.url,
+                                directHeaders: hlsHeaders,
+                                relayUrl: '',
+                                relayReady: false,
+                                externalDirect: false,
+                                subtitles: allohaSubs(json.tracks || []),
+                                tracks: [],
+                                hlsQualities: picked.variants,
+                                quality:
+                                    selectedVariant.label ||
+                                    qualityLabel ||
+                                    'Авто',
+                                resolvedBy:
+                                    'alloha native • bnsi same-origin' +
+                                    ' • media ' + media.id +
+                                    ' • guard ' +
+                                    (streamToken ? 'full' : 'no-auth-token') +
+                                    ' • har-order' +
+                                    ' • hls ' +
+                                    (hlsNativeReady ? 'native' : 'stock') +
+                                    ' • edge ' +
+                                    (edgeSocketStarted ? 'ws-wait' : 'no-ws') +
+                                    ' • chunk1m' +
+                                    (
+                                        selectedVariant.mirrors &&
+                                        selectedVariant.mirrors.length > 1
+                                            ? ' • 2cdn'
+                                            : ''
+                                    ) +
+                                    ' • ' +
+                                    (
+                                        voiceChoice &&
+                                        voiceChoice.label
+                                            ? voiceChoice.label
+                                            : 'Авто'
+                                    )
+                            });
                         },
                         function (eApi) {
                             fail(new Error(
