@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.25-native';
+    var VERSION = '4.0.26-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4321,7 +4321,7 @@
 
 
     /*
-     * v4.0.25: HAR-ordered Alloha WS handshake + chunked native transport.
+     * v4.0.26: deterministic master guard + HAR-ordered WS + chunked native transport.
      *
      * HAR proves that /bnsi success is only half of the job:
      *   1) master.m3u8 uses Accepts-Controls = Borth fingerprint (64 hex);
@@ -4603,7 +4603,7 @@
 
             if (!ALLOHA_NATIVE_HLS.wsReadyNotified) {
                 ALLOHA_NATIVE_HLS.wsReadyNotified = true;
-                try { notify('A25 WS READY'); } catch (eNotifyWsReady) {}
+                try { notify('A26 WS READY'); } catch (eNotifyWsReady) {}
             }
 
             allohaPushHistory({
@@ -4640,7 +4640,7 @@
                 if (!ALLOHA_NATIVE_HLS.edgeNotified) {
                     ALLOHA_NATIVE_HLS.edgeNotified = true;
                     try {
-                        notify('A25 EDGE OK • 32');
+                        notify('A26 EDGE OK • 32');
                     } catch (eNotifyEdge) {}
                 }
 
@@ -4693,7 +4693,7 @@
                     if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
                         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
                         try {
-                            notify('A25 EDGE TIMEOUT • guard64');
+                            notify('A26 EDGE TIMEOUT • guard64');
                         } catch (eNotifyEdgeTimeout) {}
                     }
 
@@ -4827,6 +4827,15 @@
                 String(context && context.type || '').toLowerCase();
             var isManifest =
                 contextType === 'manifest';
+            /*
+             * Hls.js on this Android build does not consistently label the
+             * top-level master request as context.type === 'manifest'.
+             * v4.0.25 therefore sometimes treated master.m3u8 as a level
+             * request, waited for edge_hash and sent edge32, which Alloha
+             * rejects with HTTP 403. Identify master by the actual URL.
+             */
+            var requestLeaf = allohaHlsLeaf(requestUrl).toLowerCase();
+            var isMasterManifest = requestLeaf === 'master.m3u8';
             var isBinary =
                 String(
                     context && context.responseType || ''
@@ -4849,11 +4858,23 @@
                  * - level/fragment -> WS config_update.edge_hash
                  */
                 headers['Accepts-Controls'] =
-                    isManifest
+                    isMasterManifest
                         ? ALLOHA_NATIVE_HLS.guardId
                         : (
                             ALLOHA_NATIVE_HLS.edgeHash ||
                             ALLOHA_NATIVE_HLS.guardId
+                        );
+
+                var acceptsControlsLength = String(
+                    headers['Accepts-Controls'] || ''
+                ).length;
+                var acceptsControlsKind =
+                    isMasterManifest
+                        ? 'guard'
+                        : (
+                            ALLOHA_NATIVE_HLS.edgeHash
+                                ? 'edge'
+                                : 'guard-fallback'
                         );
 
                 /*
@@ -4933,6 +4954,9 @@
                     activeBase: ALLOHA_NATIVE_HLS.activeBase,
                     acceptsControls:
                         headers['Accepts-Controls'],
+                    acceptsControlsKind: acceptsControlsKind,
+                    acceptsControlsLength: acceptsControlsLength,
+                    isMasterManifest: isMasterManifest,
                     hasAuth:
                         !!headers.Authorizations
                 };
@@ -4980,11 +5004,8 @@
                         leaf: successLeaf,
                         bytes: self.stats.loaded || 0,
                         chunks: self.stats.chunkCount,
-                        edgeLength: String(
-                            ALLOHA_NATIVE_HLS.edgeHash ||
-                            ALLOHA_NATIVE_HLS.guardId ||
-                            ''
-                        ).length,
+                        edgeLength: acceptsControlsLength,
+                        tokenKind: acceptsControlsKind,
                         mirror: allohaActiveMirrorNumber(),
                         ts: Date.now()
                     };
@@ -5002,10 +5023,11 @@
                         if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 1) {
                             try {
                                 notify(
-                                    'A25 OK ' + successLeaf +
+                                    'A26 OK ' + successLeaf +
                                     ' • ' + allohaHumanBytes(self.stats.loaded) +
                                     ' • C' + self.stats.chunkCount +
-                                    ' • edge' + successInfo.edgeLength +
+                                    ' • ' + successInfo.tokenKind +
+                                    successInfo.edgeLength +
                                     ' • M' + (successInfo.mirror || '?')
                                 );
                             } catch (eNotifyOk) {}
@@ -5048,24 +5070,17 @@
                     allohaPushHistory({
                         phase: ALLOHA_NATIVE_HLS.lastError.phase,
                         leaf: allohaHlsLeaf(requestUrl),
-                        edgeLength: String(
-                            ALLOHA_NATIVE_HLS.edgeHash ||
-                            ALLOHA_NATIVE_HLS.guardId ||
-                            ''
-                        ).length,
+                        edgeLength: acceptsControlsLength,
+                        tokenKind: acceptsControlsKind,
                         mirror: allohaActiveMirrorNumber(),
                         ts: Date.now()
                     });
 
                     try {
                         notify(
-                            'A25 DECODE ' + allohaHlsLeaf(requestUrl) +
+                            'A26 DECODE ' + allohaHlsLeaf(requestUrl) +
                             ' • edge' +
-                            String(
-                                ALLOHA_NATIVE_HLS.edgeHash ||
-                                ALLOHA_NATIVE_HLS.guardId ||
-                                ''
-                            ).length +
+                            acceptsControlsLength +
                             ' • M' + (allohaActiveMirrorNumber() || '?')
                         );
                     } catch (eNotifyDecode) {}
@@ -5143,11 +5158,7 @@
                     );
 
                     var failedLeaf = allohaHlsLeaf(requestUrl);
-                    var edgeLen = String(
-                        ALLOHA_NATIVE_HLS.edgeHash ||
-                        ALLOHA_NATIVE_HLS.guardId ||
-                        ''
-                    ).length;
+                    var edgeLen = acceptsControlsLength;
                     var previousOk = ALLOHA_NATIVE_HLS.lastSuccess;
 
                     allohaPushHistory({
@@ -5155,6 +5166,7 @@
                         leaf: failedLeaf,
                         status: status || 0,
                         edgeLength: edgeLen,
+                        tokenKind: acceptsControlsKind,
                         mirror: allohaActiveMirrorNumber(),
                         mirrorSwitched: mirrorSwitched,
                         previous: previousOk && previousOk.leaf || '',
@@ -5163,9 +5175,9 @@
 
                     try {
                         notify(
-                            'A25 FAIL ' + failedLeaf +
+                            'A26 FAIL ' + failedLeaf +
                             ' • H' + (status || 0) +
-                            ' • edge' + edgeLen +
+                            ' • ' + acceptsControlsKind + edgeLen +
                             ' • M' + (allohaActiveMirrorNumber() || '?') +
                             (
                                 previousOk && previousOk.leaf
@@ -5481,7 +5493,7 @@
              * edge_hash before level/init/fragments as before.
              */
             if (
-                isManifest &&
+                isMasterManifest &&
                 ALLOHA_NATIVE_HLS.wsExpected &&
                 !ALLOHA_NATIVE_HLS.wsReady
             ) {
@@ -5506,7 +5518,7 @@
             }
 
             if (
-                !isManifest &&
+                !isMasterManifest &&
                 !ALLOHA_NATIVE_HLS.edgeHash
             ) {
                 var started = Date.now();
@@ -5702,7 +5714,7 @@
                             }
 
                             /*
-                             * v4.0.25: no preflight GET. HAR proves that the
+                             * v4.0.26: no preflight GET. HAR proves that the
                              * master request is valid only after the Alloha
                              * WebSocket has opened and playback_start/init were
                              * sent. Start/configure that session first, then let
@@ -5747,6 +5759,7 @@
                                     ' • media ' + media.id +
                                     ' • guard ' +
                                     (streamToken ? 'full' : 'no-auth-token') +
+                                    ' • guard-split' +
                                     ' • har-order' +
                                     ' • hls ' +
                                     (hlsNativeReady ? 'native' : 'stock') +
