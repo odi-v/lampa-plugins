@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.1.2-isolated-quality-auto';
+    var VERSION = '4.1.3-isolated-auto-voice';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -760,6 +760,90 @@
     }
 
     /*
+     * Lampa applies its global video_quality_default to numeric quality keys.
+     * MnogoTV deliberately starts every provider in AUTO, so keep the visible
+     * label but prefix manual keys with an invisible WORD JOINER. parseInt()
+     * then cannot silently force 1080/720 on startup, while the UI still shows
+     * the ordinary "1080p" text.
+     */
+    function playerQualityKey(label) {
+        return '\u2060' + String(label || '');
+    }
+
+    function autoPlaybackUrl(url) {
+        url = String(url || '');
+        if (!url) return '';
+        return url + (url.indexOf('#') >= 0 ? '&' : '#') + 'mnogotv-auto';
+    }
+
+    function clonePlayerTracks(list) {
+        if (!Array.isArray(list)) return [];
+
+        return list.map(function (track, index) {
+            track = track || {};
+
+            var language = String(
+                track.language ||
+                track.lang ||
+                track.name ||
+                ''
+            ).trim();
+
+            var name = String(
+                track.name ||
+                track.label ||
+                language ||
+                ''
+            ).trim();
+
+            var label = String(
+                track.label ||
+                name ||
+                language ||
+                ''
+            ).trim();
+
+            return {
+                index:
+                    track.index !== undefined
+                        ? track.index
+                        : index,
+                language:
+                    language ||
+                    label ||
+                    ('Дорожка ' + (index + 1)),
+                name:
+                    name ||
+                    label ||
+                    language ||
+                    ('Дорожка ' + (index + 1)),
+                label:
+                    label ||
+                    name ||
+                    language ||
+                    ('Дорожка ' + (index + 1)),
+                default: !!track.default
+            };
+        });
+    }
+
+    function defaultTrackLabel(list) {
+        var tracks = clonePlayerTracks(list);
+        if (!tracks.length) return '';
+
+        var chosen = tracks.filter(function (track) {
+            return !!track.default;
+        })[0] || tracks[0];
+
+        return String(
+            chosen.label ||
+            chosen.name ||
+            chosen.language ||
+            ''
+        ).trim();
+    }
+
+    /*
      * v4.1.2: AUTO is intentionally conservative. The UI still shows AUTO,
      * but a provider that exposes separate renditions starts around 480p.
      * This gives the TV a fast first frame and avoids immediately pulling a
@@ -1446,8 +1530,18 @@
         }
 
         function entryFor(variant, mode) {
+            var initialUrl =
+                normalizeDirectUrl(
+                    variant &&
+                    variant.filepath ||
+                    ''
+                );
+
             return {
-                url: normalizeDirectUrl(variant && variant.filepath || ''),
+                url:
+                    mode === 'auto'
+                        ? autoPlaybackUrl(initialUrl)
+                        : initialUrl,
                 label: mode === 'auto' ? 'MnogoTV' : '',
                 __variant: variant,
                 __mode: mode,
@@ -1458,7 +1552,13 @@
                             : variant;
 
                     resolveVariant(target, function (stream) {
-                        if (stream) done(stream);
+                        if (!stream) return;
+
+                        done(
+                            (instance && instance.__mode || mode) === 'auto'
+                                ? autoPlaybackUrl(stream)
+                                : stream
+                        );
                     });
                 }
             };
@@ -1479,10 +1579,31 @@
             var label = veoVariantLabel(variant);
             if (!label || label === 'Вариант' || seen[label]) return;
             seen[label] = true;
-            result[label] = entryFor(variant, 'manual');
+            result[playerQualityKey(label)] =
+                entryFor(variant, 'manual');
         });
 
         return result;
+    }
+
+    function veoResolvedPlayerQualityMap(
+        item,
+        stream,
+        nativeQualityCount
+    ) {
+        if (Number(nativeQualityCount || 0) > 1) {
+            return {};
+        }
+
+        var map =
+            veoPlayerQualityMap(item);
+
+        if (map.auto) {
+            map.auto.url =
+                autoPlaybackUrl(stream);
+        }
+
+        return map;
     }
 
 
@@ -1554,7 +1675,10 @@
                         function (probe) {
                             ok({
                                 provider: 'VeoVeo',
-                                directUrl: stream,
+                                directUrl:
+                                    String(qualityLabel || 'Авто') === 'Авто'
+                                        ? autoPlaybackUrl(stream)
+                                        : stream,
                                 directHeaders:
                                     probe.plainOk
                                         ? {}
@@ -1563,12 +1687,22 @@
                                 relayReady: false,
                                 externalDirect: probe.plainOk,
                                 subtitles: [],
-                                tracks: probe.tracks || [],
+                                tracks:
+                                    clonePlayerTracks(
+                                        probe.tracks || []
+                                    ),
+                                voiceLabel:
+                                    defaultTrackLabel(
+                                        probe.tracks || []
+                                    ),
                                 hlsQualities: probe.qualities || [],
                                 playerQualities:
-                                    probe.qualities && probe.qualities.length > 1
-                                        ? {}
-                                        : veoPlayerQualityMap(item),
+                                    veoResolvedPlayerQualityMap(
+                                        item,
+                                        stream,
+                                        probe.qualities &&
+                                        probe.qualities.length
+                                    ),
                                 selectedQuality:
                                     numericQuality(selectedQuality)
                                         ? selectedQuality
@@ -2612,6 +2746,25 @@
         var names = audio && Array.isArray(audio.names) ? audio.names : [];
         var order = audio && Array.isArray(audio.order) ? audio.order : [];
 
+        var activeValue =
+            audio && (
+                audio.active !== undefined
+                    ? audio.active
+                    : (
+                        audio.default !== undefined
+                            ? audio.default
+                            : (
+                                audio.current !== undefined
+                                    ? audio.current
+                                    : (
+                                        audio.selected !== undefined
+                                            ? audio.selected
+                                            : ''
+                                    )
+                            )
+                    )
+            );
+
         /*
          * Collaps audio.names contains the human-readable dubbing names.
          * audio.order maps each name to the REAL media-track number.
@@ -2631,11 +2784,23 @@
 
             if (!label || label === 'delete') return null;
 
+            var actualIndex =
+                isNaN(mapped)
+                    ? sourceIndex
+                    : mapped;
+
+            var isDefault =
+                String(activeValue) === String(sourceIndex) ||
+                String(activeValue) === String(actualIndex) ||
+                String(activeValue).toLowerCase() === label.toLowerCase();
+
             return {
                 language: label,
+                name: label,
                 label: label,
-                index: isNaN(mapped) ? sourceIndex : mapped,
-                sourceIndex: sourceIndex
+                index: actualIndex,
+                sourceIndex: sourceIndex,
+                default: isDefault
             };
         }).filter(Boolean);
     }
@@ -3913,6 +4078,11 @@
                                 return;
                             }
 
+                            var dashTracks =
+                                normalizeTracks(
+                                    item.audio || {}
+                                );
+
                             ok({
                                 provider: 'Collaps',
                                 directUrl: stripHash(clientDashUrl) + '#manifest.mpd',
@@ -3921,7 +4091,14 @@
                                 relayReady: false,
                                 externalDirect: false,
                                 subtitles: normalizeSubs(item.cc || item.subtitles || []),
-                                tracks: normalizeTracks(item.audio || {}),
+                                tracks:
+                                    clonePlayerTracks(
+                                        dashTracks
+                                    ),
+                                voiceLabel:
+                                    defaultTrackLabel(
+                                        dashTracks
+                                    ),
                                 quality: 'Авто',
                                 selectedQuality: selectedDashLabel,
                                 resolvedBy:
@@ -3956,15 +4133,31 @@
                                 hlsHeaders
                             );
 
+                            var hlsTracks =
+                                normalizeTracks(
+                                    item.audio || {}
+                                );
+
                             ok({
                                 provider: 'Collaps',
-                                directUrl: stripHash(clientHlsUrl) + '#master.m3u8',
+                                directUrl:
+                                    autoPlaybackUrl(
+                                        stripHash(clientHlsUrl) +
+                                        '#master.m3u8'
+                                    ),
                                 directHeaders: hlsHeaders,
                                 relayUrl: '',
                                 relayReady: false,
                                 externalDirect: false,
                                 subtitles: normalizeSubs(item.cc || item.subtitles || []),
-                                tracks: normalizeTracks(item.audio || {}),
+                                tracks:
+                                    clonePlayerTracks(
+                                        hlsTracks
+                                    ),
+                                voiceLabel:
+                                    defaultTrackLabel(
+                                        hlsTracks
+                                    ),
                                 quality: 'Авто',
                                 selectedQuality: 'низкое → ABR',
                                 resolvedBy:
@@ -4591,7 +4784,10 @@
 
         function entryFor(variant, mode) {
             return {
-                url: variant.url,
+                url:
+                    mode === 'auto'
+                        ? autoPlaybackUrl(variant.url)
+                        : variant.url,
                 label: mode === 'auto' ? 'MnogoTV' : '',
                 __variant: variant,
                 __mode: mode,
@@ -4624,7 +4820,11 @@
                         log('Alloha player quality switch prepare failed', e0);
                     }
 
-                    done(target.url);
+                    done(
+                        (instance && instance.__mode || mode) === 'auto'
+                            ? autoPlaybackUrl(target.url)
+                            : target.url
+                    );
                 }
             };
         }
@@ -4635,7 +4835,8 @@
         variants.forEach(function (variant) {
             var key = String(variant.label || (variant.quality + 'p'));
             if (!key) return;
-            result[key] = entryFor(variant, 'manual');
+            result[playerQualityKey(key)] =
+                entryFor(variant, 'manual');
         });
 
         return result;
@@ -4891,6 +5092,9 @@
         ws: null,
         wsTimer: null,
         heartbeatTimer: null,
+        edgeRefreshTimer: null,
+        edgeTtl: 0,
+        reconnectTimer: null,
         lastRequest: null,
         lastMirrorSwitch: null,
         lastError: null,
@@ -5026,10 +5230,29 @@
         return true;
     }
 
+    function allohaCurrentTime() {
+        try {
+            var video =
+                document.querySelector('video');
+
+            if (
+                video &&
+                isFinite(video.currentTime)
+            ) {
+                return Math.max(
+                    0,
+                    Math.floor(video.currentTime)
+                );
+            }
+        } catch (e0) {}
+
+        return 0;
+    }
+
     function allohaEdgePayload(type, quality, audioId) {
         return {
             type: type,
-            current_time: 0,
+            current_time: allohaCurrentTime(),
             resolution: String(
                 parseInt(String(quality || '').replace(/[^\d]/g, ''), 10) || 480
             ),
@@ -5053,15 +5276,30 @@
             }
         } catch (e1) {}
 
+        try {
+            if (ALLOHA_NATIVE_HLS.edgeRefreshTimer) {
+                clearTimeout(
+                    ALLOHA_NATIVE_HLS.edgeRefreshTimer
+                );
+            }
+        } catch (eRefresh) {}
+
+        try {
+            if (ALLOHA_NATIVE_HLS.reconnectTimer) {
+                clearTimeout(
+                    ALLOHA_NATIVE_HLS.reconnectTimer
+                );
+            }
+        } catch (eReconnect) {}
+
         ALLOHA_NATIVE_HLS.wsTimer = null;
         ALLOHA_NATIVE_HLS.heartbeatTimer = null;
+        ALLOHA_NATIVE_HLS.edgeRefreshTimer = null;
+        ALLOHA_NATIVE_HLS.reconnectTimer = null;
 
         try {
             if (ALLOHA_NATIVE_HLS.ws) {
-                ALLOHA_NATIVE_HLS.ws.onopen = null;
-                ALLOHA_NATIVE_HLS.ws.onmessage = null;
-                ALLOHA_NATIVE_HLS.ws.onerror = null;
-                ALLOHA_NATIVE_HLS.ws.onclose = null;
+                ALLOHA_NATIVE_HLS.ws.__mnogotvIntentionalClose = true;
                 ALLOHA_NATIVE_HLS.ws.close();
             }
         } catch (e2) {}
@@ -5071,10 +5309,28 @@
         ALLOHA_NATIVE_HLS.wsReadyAt = 0;
     }
 
-    function startAllohaEdgeSocket(json, quality, audioId) {
+    function startAllohaEdgeSocket(
+        json,
+        quality,
+        audioId,
+        options
+    ) {
+        options = options || {};
+
+        var previousEdge =
+            ALLOHA_NATIVE_HLS.edgeHash;
+
         closeAllohaEdgeSocket();
-        ALLOHA_NATIVE_HLS.edgeHash = '';
-        ALLOHA_NATIVE_HLS.edgeReceivedAt = 0;
+
+        ALLOHA_NATIVE_HLS.edgeHash =
+            options.preserveEdge
+                ? previousEdge
+                : '';
+        ALLOHA_NATIVE_HLS.edgeReceivedAt =
+            options.preserveEdge &&
+            previousEdge
+                ? Date.now()
+                : 0;
         ALLOHA_NATIVE_HLS.wsExpected = false;
         ALLOHA_NATIVE_HLS.wsReady = false;
         ALLOHA_NATIVE_HLS.wsReadyAt = 0;
@@ -5147,7 +5403,7 @@
 
             if (!ALLOHA_NATIVE_HLS.wsReadyNotified) {
                 ALLOHA_NATIVE_HLS.wsReadyNotified = true;
-                try { notify('A41 WS READY'); } catch (eNotifyWsReady) {}
+                try { notify('A413 WS READY'); } catch (eNotifyWsReady) {}
             }
 
             allohaPushHistory({
@@ -5158,7 +5414,7 @@
             try {
                 ALLOHA_NATIVE_HLS.heartbeatTimer = setInterval(function () {
                     send('playing');
-                }, 30000);
+                }, 15000);
             } catch (eTimer) {}
         };
 
@@ -5184,7 +5440,7 @@
                 if (!ALLOHA_NATIVE_HLS.edgeNotified) {
                     ALLOHA_NATIVE_HLS.edgeNotified = true;
                     try {
-                        notify('A41 EDGE OK • 32');
+                        notify('A413 EDGE OK • 32');
                     } catch (eNotifyEdge) {}
                 }
 
@@ -5194,9 +5450,62 @@
                     ts: Date.now()
                 });
 
+                var ttl =
+                    parseInt(
+                        data.ttl,
+                        10
+                    ) ||
+                    120;
+
+                if (ttl > 3600) {
+                    ttl =
+                        Math.ceil(
+                            ttl / 1000
+                        );
+                }
+
+                ALLOHA_NATIVE_HLS.edgeTtl = ttl;
+
+                /*
+                 * Real HAR config_update carries ttl=120. Do not wait until
+                 * the edge hash expires mid-film. Re-announce playback on the
+                 * same socket at ~75% TTL; Alloha answers with a fresh
+                 * config_update/edge_hash without reloading HLS.
+                 */
+                try {
+                    if (ALLOHA_NATIVE_HLS.edgeRefreshTimer) {
+                        clearTimeout(
+                            ALLOHA_NATIVE_HLS.edgeRefreshTimer
+                        );
+                    }
+
+                    ALLOHA_NATIVE_HLS.edgeRefreshTimer =
+                        setTimeout(function () {
+                            ALLOHA_NATIVE_HLS.edgeRefreshTimer = null;
+
+                            if (
+                                ALLOHA_NATIVE_HLS.ws === ws &&
+                                ws.readyState === 1
+                            ) {
+                                send('playback_start');
+                                send('playing');
+
+                                allohaPushHistory({
+                                    phase: 'edge-refresh-request',
+                                    currentTime: allohaCurrentTime(),
+                                    ttl: ttl,
+                                    ts: Date.now()
+                                });
+                            }
+                        }, Math.max(
+                            30000,
+                            Math.floor(ttl * 750)
+                        ));
+                } catch (eRefreshTimer) {}
+
                 log('Alloha edge hash updated', {
                     edgeHash: ALLOHA_NATIVE_HLS.edgeHash,
-                    ttl: data.ttl,
+                    ttl: ttl,
                     priority: data.edge_priority
                 });
             }
@@ -5215,6 +5524,42 @@
 
         ws.onclose = function () {
             log('Alloha edge WebSocket closed');
+
+            if (
+                ws.__mnogotvIntentionalClose ||
+                (
+                    MNOGOTV_HLS_RUNTIME &&
+                    MNOGOTV_HLS_RUNTIME.activeProvider !== 'alloha'
+                )
+            ) {
+                return;
+            }
+
+            /*
+             * Mobile/TV WebViews occasionally drop idle WebSockets. Keep the
+             * last valid edge hash while a new socket is negotiated so HLS
+             * fragments do not fall back to guard64 during reconnect.
+             */
+            try {
+                if (ALLOHA_NATIVE_HLS.reconnectTimer) {
+                    clearTimeout(
+                        ALLOHA_NATIVE_HLS.reconnectTimer
+                    );
+                }
+
+                ALLOHA_NATIVE_HLS.reconnectTimer =
+                    setTimeout(function () {
+                        ALLOHA_NATIVE_HLS.reconnectTimer = null;
+                        startAllohaEdgeSocket(
+                            json,
+                            quality,
+                            audioId,
+                            {
+                                preserveEdge: true
+                            }
+                        );
+                    }, 800);
+            } catch (eReconnectWs) {}
         };
 
         /*
@@ -5237,7 +5582,7 @@
                     if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
                         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
                         try {
-                            notify('A41 EDGE TIMEOUT • guard64');
+                            notify('A413 EDGE TIMEOUT • guard64');
                         } catch (eNotifyEdgeTimeout) {}
                     }
 
@@ -5569,7 +5914,7 @@
                         if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 1) {
                             try {
                                 notify(
-                                    'A41 OK ' + successLeaf +
+                                    'A413 OK ' + successLeaf +
                                     ' • ' + allohaHumanBytes(self.stats.loaded) +
                                     ' • C' + self.stats.chunkCount +
                                     ' • ' + successInfo.tokenKind +
@@ -5721,7 +6066,7 @@
 
                     try {
                         notify(
-                            'A41 FAIL ' + failedLeaf +
+                            'A413 FAIL ' + failedLeaf +
                             ' • H' + (status || 0) +
                             ' • ' + acceptsControlsKind + edgeLen +
                             ' • M' + (allohaActiveMirrorNumber() || '?') +
@@ -6214,6 +6559,76 @@
     }
 
 
+    function allohaResolvedVoiceLabel(
+        source,
+        media,
+        voiceChoice
+    ) {
+        if (
+            voiceChoice &&
+            voiceChoice.label &&
+            voiceChoice.label !== 'Авто'
+        ) {
+            return String(
+                voiceChoice.label
+            ).trim();
+        }
+
+        var translationId = String(
+            media && (
+                media.id_translation ||
+                media.translation_id ||
+                media.translationId ||
+                media.translation
+            ) ||
+            ''
+        );
+
+        var translations =
+            source &&
+            Array.isArray(source.translations)
+                ? source.translations
+                : [];
+
+        if (translationId) {
+            for (
+                var i = 0;
+                i < translations.length;
+                i++
+            ) {
+                var tr =
+                    translations[i] ||
+                    {};
+
+                if (
+                    String(
+                        tr.id !== undefined
+                            ? tr.id
+                            : ''
+                    ) === translationId
+                ) {
+                    return String(
+                        tr.name ||
+                        tr.title ||
+                        ('Озвучка ' + translationId)
+                    ).trim();
+                }
+            }
+        }
+
+        if (translations.length === 1) {
+            return String(
+                translations[0].name ||
+                translations[0].title ||
+                ''
+            ).trim();
+        }
+
+        return '';
+    }
+
+
+
     function resolveAlloha(
         source,
         imdb,
@@ -6385,13 +6800,24 @@
 
                             ok({
                                 provider: 'Alloha',
-                                directUrl: selectedVariant.url,
+                                directUrl:
+                                    String(qualityLabel || 'Авто') === 'Авто'
+                                        ? autoPlaybackUrl(
+                                            selectedVariant.url
+                                        )
+                                        : selectedVariant.url,
                                 directHeaders: hlsHeaders,
                                 relayUrl: '',
                                 relayReady: false,
                                 externalDirect: false,
                                 subtitles: allohaSubs(json.tracks || []),
                                 tracks: [],
+                                voiceLabel:
+                                    allohaResolvedVoiceLabel(
+                                        source,
+                                        media,
+                                        voiceChoice
+                                    ),
                                 hlsQualities: picked.variants,
                                 playerQualities:
                                     allohaPlayerQualityMap(
@@ -6419,7 +6845,8 @@
                                     ' • edge ' +
                                     (edgeSocketStarted ? 'ws-wait' : 'no-ws') +
                                     ' • player-quality' +
-                                    (String(qualityLabel || 'Авто') === 'Авто' ? ' • auto-480-start' : '') +
+                                    ' • edge-refresh' +
+                                    (String(qualityLabel || 'Авто') === 'Авто' ? ' • auto-real-480-start' : '') +
                                     ' • chunk1m' +
                                     (
                                         selectedVariant.mirrors &&
@@ -6429,10 +6856,12 @@
                                     ) +
                                     ' • ' +
                                     (
-                                        voiceChoice &&
-                                        voiceChoice.label
-                                            ? voiceChoice.label
-                                            : 'Авто'
+                                        allohaResolvedVoiceLabel(
+                                            source,
+                                            media,
+                                            voiceChoice
+                                        ) ||
+                                        'Авто'
                                     )
                             });
                         },
@@ -6638,15 +7067,49 @@
             if (epMeta && epMeta.name) title += ' • ' + epMeta.name;
         }
 
+        var playbackTracks =
+            clonePlayerTracks(
+                resolved.tracks || []
+            );
+
+        var playbackVoiceLabel =
+            String(
+                resolved.voiceLabel ||
+                (
+                    voiceChoice &&
+                    voiceChoice.label !== 'Авто'
+                        ? voiceChoice.label
+                        : ''
+                ) ||
+                ''
+            ).trim();
+
         var first = {
             url: resolved.directUrl,
             title: title,
             subtitles: resolved.subtitles || [],
-            translate: { tracks: resolved.tracks || [] },
             timeline: timeline(movie, season, episode),
             headers: resolved.directHeaders || {},
-            isonline: true
+            isonline: true,
+            voice_name:
+                playbackVoiceLabel ||
+                'Авто',
+            translate_voice:
+                playbackVoiceLabel ||
+                'Авто'
         };
+
+        if (playbackTracks.length) {
+            /*
+             * Give Lampa fresh track objects for every playback. Lampa mutates
+             * them with Object.defineProperty(enabled); reusing old objects
+             * across a quality reload caused "Cannot redefine property:
+             * enabled" on some TVs.
+             */
+            first.translate = {
+                tracks: playbackTracks
+            };
+        }
 
         /*
          * Lampa's native player panel reads play.quality and renders its own
@@ -7127,6 +7590,7 @@
 
         // "Авто" сохраняет рабочее поведение VeoVeo.
         var qualityLabel = 'Авто';
+        var resolvedVoiceLabel = '';
         var voiceChoice = { index: -1, label: 'Авто', translationId: '', iframeUrl: '', quality: '' };
         var playerMode = 'lampa';
 
@@ -7809,9 +8273,26 @@
 
 
         function setVoiceLabel() {
-            voiceButton.find('.mnogotv-v318__pill-value').text(
-                voiceChoice && voiceChoice.label ? voiceChoice.label : 'Авто'
-            );
+            var value =
+                voiceChoice &&
+                voiceChoice.label
+                    ? voiceChoice.label
+                    : 'Авто';
+
+            if (
+                value === 'Авто' &&
+                resolvedVoiceLabel
+            ) {
+                value =
+                    'Авто • ' +
+                    resolvedVoiceLabel;
+            }
+
+            voiceButton
+                .find(
+                    '.mnogotv-v318__pill-value'
+                )
+                .text(value);
         }
 
         function setPlayerLabel() {
@@ -7824,6 +8305,8 @@
         }
 
         function resetVoice() {
+            resolvedVoiceLabel = '';
+
             voiceChoice = {
                 index: -1,
                 label: 'Авто',
@@ -7957,6 +8440,8 @@
 
                         if (item.disabled) return;
 
+                        resolvedVoiceLabel = '';
+
                         voiceChoice = {
                             index: -1,
                             label:
@@ -8032,6 +8517,8 @@
                                 return;
                             }
                             if (item.disabled) return;
+
+                            resolvedVoiceLabel = '';
 
                             voiceChoice = {
                                 index: item.index,
@@ -8189,6 +8676,15 @@
                 voiceChoice,
                 function (resolved) {
                 var actualRunas = 'lampa';
+
+                resolvedVoiceLabel =
+                    String(
+                        resolved &&
+                        resolved.voiceLabel ||
+                        ''
+                    ).trim();
+
+                setVoiceLabel();
 
                 if (
                     qualityLabel !== 'Авто' &&
