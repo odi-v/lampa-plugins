@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.26-native';
+    var VERSION = '4.0.27-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -1853,6 +1853,72 @@
 
 
     /*
+     * Provider-scoped HLS loader routing.
+     *
+     * Older native builds replaced Hls.DefaultConfig.loader globally and then
+     * wrapped whatever loader happened to be installed at that moment. After
+     * switching between Alloha/Collaps/VeoVeo this could create a wrapper
+     * chain (Collaps -> Alloha -> stock, or the reverse), so unrelated VeoVeo
+     * playback inherited native-provider loader overhead/state.
+     *
+     * Capture the pristine Hls.js loader once and explicitly activate only the
+     * loader required by the source that is about to play.
+     */
+    var MNOGOTV_HLS_STOCK_LOADER = null;
+
+    function captureHlsStockLoader() {
+        if (
+            !MNOGOTV_HLS_STOCK_LOADER &&
+            typeof Hls !== 'undefined' &&
+            Hls.DefaultConfig &&
+            Hls.DefaultConfig.loader
+        ) {
+            MNOGOTV_HLS_STOCK_LOADER = Hls.DefaultConfig.loader;
+        }
+
+        return MNOGOTV_HLS_STOCK_LOADER;
+    }
+
+    function activateProviderHlsLoader(type) {
+        if (
+            typeof Hls === 'undefined' ||
+            !Hls.DefaultConfig
+        ) {
+            return false;
+        }
+
+        type = String(type || '').toLowerCase();
+
+        var stock = captureHlsStockLoader();
+
+        if (
+            type === 'alloha' &&
+            ALLOHA_NATIVE_HLS &&
+            ALLOHA_NATIVE_HLS.loaderCtor
+        ) {
+            Hls.DefaultConfig.loader = ALLOHA_NATIVE_HLS.loaderCtor;
+            return true;
+        }
+
+        if (
+            type === 'collaps' &&
+            COLLAPS_NATIVE_HLS &&
+            COLLAPS_NATIVE_HLS.loaderCtor
+        ) {
+            Hls.DefaultConfig.loader = COLLAPS_NATIVE_HLS.loaderCtor;
+            return true;
+        }
+
+        if (stock) {
+            Hls.DefaultConfig.loader = stock;
+            return true;
+        }
+
+        return false;
+    }
+
+
+    /*
      * v4.0.7: Android native HLS loader for Collaps.
      *
      * v4.0.6 proved that Lampa.Reguest.native can fetch the signed Collaps
@@ -1865,6 +1931,7 @@
     var COLLAPS_NATIVE_HLS = {
         installed: false,
         originalLoader: null,
+        loaderCtor: null,
         unixTime: 0,
         key: '',
         headers: {},
@@ -1961,7 +2028,9 @@
         if (COLLAPS_NATIVE_HLS.installed) return true;
         if (typeof Hls === 'undefined' || !Hls.DefaultConfig || !Hls.DefaultConfig.loader) return false;
 
-        var OriginalLoader = Hls.DefaultConfig.loader;
+        var OriginalLoader =
+            captureHlsStockLoader() ||
+            Hls.DefaultConfig.loader;
         COLLAPS_NATIVE_HLS.originalLoader = OriginalLoader;
 
         function CollapsNativeLoader(config) {
@@ -2154,6 +2223,7 @@
         };
 
         try {
+            COLLAPS_NATIVE_HLS.loaderCtor = CollapsNativeLoader;
             Hls.DefaultConfig.loader = CollapsNativeLoader;
             COLLAPS_NATIVE_HLS.installed = true;
             log('Collaps native Hls loader installed');
@@ -4336,6 +4406,7 @@
     var ALLOHA_NATIVE_HLS = {
         installed: false,
         originalLoader: null,
+        loaderCtor: null,
         headers: {},
         guardId: '',
         edgeHash: '',
@@ -4756,7 +4827,9 @@
             return false;
         }
 
-        var OriginalLoader = Hls.DefaultConfig.loader;
+        var OriginalLoader =
+            captureHlsStockLoader() ||
+            Hls.DefaultConfig.loader;
         ALLOHA_NATIVE_HLS.originalLoader = OriginalLoader;
 
         function AllohaNativeLoader(config) {
@@ -5546,6 +5619,8 @@
         };
 
         try {
+            ALLOHA_NATIVE_HLS.loaderCtor =
+                AllohaNativeLoader;
             Hls.DefaultConfig.loader =
                 AllohaNativeLoader;
             ALLOHA_NATIVE_HLS.installed = true;
@@ -5566,6 +5641,107 @@
     }
 
 
+    function allohaIframeFromSource(source, voiceChoice) {
+        var candidates = [];
+
+        function add(value) {
+            value = normalizeDirectUrl(value);
+            if (
+                value &&
+                candidates.indexOf(value) < 0
+            ) {
+                candidates.push(value);
+            }
+        }
+
+        if (voiceChoice) {
+            add(voiceChoice.iframeUrl);
+        }
+
+        if (source) {
+            add(source.iframeUrl);
+            add(source.iframe);
+
+            var translations =
+                Array.isArray(source.translations)
+                    ? source.translations
+                    : [];
+
+            var wantedId =
+                voiceChoice &&
+                voiceChoice.translationId
+                    ? String(voiceChoice.translationId)
+                    : '';
+
+            if (wantedId) {
+                translations.forEach(function (tr) {
+                    if (
+                        tr &&
+                        String(
+                            tr.id !== undefined
+                                ? tr.id
+                                : ''
+                        ) === wantedId
+                    ) {
+                        add(tr.iframeUrl);
+                        add(tr.iframe);
+                    }
+                });
+            }
+
+            translations.forEach(function (tr) {
+                if (!tr) return;
+                add(tr.iframeUrl);
+                add(tr.iframe);
+            });
+
+            /*
+             * A few MnogoTV responses place provider data one level deeper
+             * instead of exposing source.iframeUrl. Search only this source
+             * object, bounded, and only accept URL values whose field name
+             * explicitly looks like an iframe field.
+             */
+            var queue = [source];
+            var seen = [];
+            var scanned = 0;
+
+            while (queue.length && scanned < 80) {
+                var node = queue.shift();
+                scanned++;
+
+                if (
+                    !node ||
+                    typeof node !== 'object' ||
+                    seen.indexOf(node) >= 0
+                ) {
+                    continue;
+                }
+
+                seen.push(node);
+
+                Object.keys(node).forEach(function (key) {
+                    var value = node[key];
+
+                    if (
+                        typeof value === 'string' &&
+                        /iframe/i.test(key)
+                    ) {
+                        add(value);
+                    }
+                    else if (
+                        value &&
+                        typeof value === 'object'
+                    ) {
+                        queue.push(value);
+                    }
+                });
+            }
+        }
+
+        return candidates[0] || '';
+    }
+
+
     function resolveAlloha(
         source,
         imdb,
@@ -5577,14 +5753,9 @@
         fail
     ) {
         var iframe =
-            normalizeDirectUrl(
-                voiceChoice &&
-                voiceChoice.iframeUrl
-                    ? voiceChoice.iframeUrl
-                    : (
-                        source &&
-                        source.iframeUrl
-                    )
+            allohaIframeFromSource(
+                source,
+                voiceChoice
             );
 
         if (!iframe) {
@@ -6030,6 +6201,15 @@
                 }
             } catch (e0) {}
         }
+
+        /*
+         * Do not leak Alloha/Collaps HLS loaders into VeoVeo or other
+         * providers. This is especially important after several source
+         * switches in one Lampa session.
+         */
+        activateProviderHlsLoader(
+            source && source.type
+        );
 
         log('play', {
             source: source && source.type,
