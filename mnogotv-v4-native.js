@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.19-native';
+    var VERSION = '4.0.20-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3529,7 +3529,7 @@
 
 
     /*
-     * Alloha native adapter v4.0.19
+     * Alloha native adapter v4.0.20
      *
      * Real chain captured in mnogotv.com2.har (2026-09-07):
      *
@@ -4166,7 +4166,8 @@
 
         return {
             selected: selected,
-            variants: variants
+            variants: variants,
+            audioId: String(source.audioId || '1')
         };
     }
 
@@ -4194,6 +4195,642 @@
             };
         }).filter(Boolean);
     }
+
+
+    /*
+     * v4.0.20: Alloha HLS transport.
+     *
+     * HAR proves that /bnsi success is only half of the job:
+     *   1) master.m3u8 uses Accepts-Controls = Borth fingerprint (64 hex);
+     *   2) the player opens pnr/pnk WebSocket and receives config_update.edge_hash;
+     *   3) level playlist + init/segments use that edge_hash (32 hex);
+     *   4) every HLS request also carries Authorizations + Origin + Referer.
+     *
+     * Stock Lampa Hls.js does not reliably apply source.headers on Android TV,
+     * exactly the same class of failure we already fixed for Collaps. So this
+     * loader performs vkvideo.cloud requests through Lampa.Reguest.native.
+     */
+    var ALLOHA_NATIVE_HLS = {
+        installed: false,
+        originalLoader: null,
+        headers: {},
+        guardId: '',
+        edgeHash: '',
+        baseHost: '',
+        ws: null,
+        wsTimer: null,
+        heartbeatTimer: null,
+        lastRequest: null,
+        lastError: null
+    };
+
+    function isAllohaCdnUrl(url) {
+        try {
+            var host = new URL(stripHash(url)).hostname.toLowerCase();
+            return host === 'vkvideo.cloud' ||
+                host.slice(-14) === '.vkvideo.cloud';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function allohaEdgePayload(type, quality, audioId) {
+        return {
+            type: type,
+            current_time: 0,
+            resolution: String(
+                parseInt(String(quality || '').replace(/[^\d]/g, ''), 10) || 480
+            ),
+            track_id: String(audioId || '1'),
+            speed: 1,
+            subtitle: -1,
+            ts: Date.now()
+        };
+    }
+
+    function closeAllohaEdgeSocket() {
+        try {
+            if (ALLOHA_NATIVE_HLS.wsTimer) {
+                clearTimeout(ALLOHA_NATIVE_HLS.wsTimer);
+            }
+        } catch (e0) {}
+
+        try {
+            if (ALLOHA_NATIVE_HLS.heartbeatTimer) {
+                clearInterval(ALLOHA_NATIVE_HLS.heartbeatTimer);
+            }
+        } catch (e1) {}
+
+        ALLOHA_NATIVE_HLS.wsTimer = null;
+        ALLOHA_NATIVE_HLS.heartbeatTimer = null;
+
+        try {
+            if (ALLOHA_NATIVE_HLS.ws) {
+                ALLOHA_NATIVE_HLS.ws.onopen = null;
+                ALLOHA_NATIVE_HLS.ws.onmessage = null;
+                ALLOHA_NATIVE_HLS.ws.onerror = null;
+                ALLOHA_NATIVE_HLS.ws.onclose = null;
+                ALLOHA_NATIVE_HLS.ws.close();
+            }
+        } catch (e2) {}
+
+        ALLOHA_NATIVE_HLS.ws = null;
+    }
+
+    function startAllohaEdgeSocket(json, quality, audioId) {
+        closeAllohaEdgeSocket();
+        ALLOHA_NATIVE_HLS.edgeHash = '';
+
+        if (
+            !json ||
+            !json.pnr ||
+            !json.pnk ||
+            typeof WebSocket === 'undefined'
+        ) {
+            log('Alloha edge WebSocket unavailable');
+            return false;
+        }
+
+        var wsUrl = String(json.pnr || '');
+
+        try {
+            wsUrl +=
+                (wsUrl.indexOf('?') >= 0 ? '&' : '?') +
+                'sid=' + encodeURIComponent(String(json.pnk)) +
+                '&v=2.1' +
+                '&t=' + Date.now();
+        } catch (eUrl) {
+            return false;
+        }
+
+        var ws = null;
+
+        try {
+            ws = new WebSocket(wsUrl);
+            ALLOHA_NATIVE_HLS.ws = ws;
+        } catch (eOpen) {
+            ALLOHA_NATIVE_HLS.lastError = {
+                phase: 'edge-ws-open',
+                text: errText(eOpen)
+            };
+            log('Alloha edge WebSocket open failed', eOpen);
+            return false;
+        }
+
+        function send(type) {
+            try {
+                if (ws.readyState !== 1) return;
+                ws.send(JSON.stringify(
+                    allohaEdgePayload(type, quality, audioId)
+                ));
+            } catch (eSend) {}
+        }
+
+        ws.onopen = function () {
+            log('Alloha edge WebSocket connected', wsUrl);
+
+            /*
+             * This is the exact startup sequence captured in HAR.
+             * The server then answers with config_update.edge_hash.
+             */
+            send('playback_start');
+            send('init');
+
+            try {
+                ALLOHA_NATIVE_HLS.heartbeatTimer = setInterval(function () {
+                    send('playing');
+                }, 30000);
+            } catch (eTimer) {}
+        };
+
+        ws.onmessage = function (event) {
+            var data = null;
+
+            try {
+                data = JSON.parse(String(event && event.data || ''));
+            } catch (eParse) {
+                return;
+            }
+
+            if (
+                data &&
+                data.type === 'config_update' &&
+                /^[a-f0-9]{32}$/i.test(String(data.edge_hash || ''))
+            ) {
+                ALLOHA_NATIVE_HLS.edgeHash =
+                    String(data.edge_hash).toLowerCase();
+                ALLOHA_NATIVE_HLS.lastError = null;
+
+                try {
+                    window.__mnogotv_alloha_debug = ALLOHA_NATIVE_HLS;
+                } catch (eDbg0) {}
+
+                log('Alloha edge hash updated', {
+                    edgeHash: ALLOHA_NATIVE_HLS.edgeHash,
+                    ttl: data.ttl,
+                    priority: data.edge_priority
+                });
+            }
+        };
+
+        ws.onerror = function () {
+            ALLOHA_NATIVE_HLS.lastError = {
+                phase: 'edge-ws-error',
+                text: 'WebSocket error'
+            };
+            try {
+                window.__mnogotv_alloha_debug = ALLOHA_NATIVE_HLS;
+            } catch (eDbg1) {}
+            log('Alloha edge WebSocket error');
+        };
+
+        ws.onclose = function () {
+            log('Alloha edge WebSocket closed');
+        };
+
+        /*
+         * Do not abort playback if the socket is slow. The master request only
+         * needs guardId. Non-master loader requests below wait briefly for the
+         * edge hash before falling back.
+         */
+        try {
+            ALLOHA_NATIVE_HLS.wsTimer = setTimeout(function () {
+                ALLOHA_NATIVE_HLS.wsTimer = null;
+
+                if (!ALLOHA_NATIVE_HLS.edgeHash) {
+                    ALLOHA_NATIVE_HLS.lastError = {
+                        phase: 'edge-ws-timeout',
+                        text: 'config_update.edge_hash not received'
+                    };
+                    try {
+                        window.__mnogotv_alloha_debug = ALLOHA_NATIVE_HLS;
+                    } catch (eDbg2) {}
+                    log('Alloha edge WebSocket timeout');
+                }
+            }, 3500);
+        } catch (eTimeout) {}
+
+        return true;
+    }
+
+    function configureAllohaNativeHls(url, headers, guardId) {
+        ALLOHA_NATIVE_HLS.headers = headers || {};
+        ALLOHA_NATIVE_HLS.guardId = String(guardId || '');
+        ALLOHA_NATIVE_HLS.edgeHash = '';
+        ALLOHA_NATIVE_HLS.baseHost = '';
+
+        try {
+            ALLOHA_NATIVE_HLS.baseHost =
+                new URL(stripHash(url)).hostname.toLowerCase();
+        } catch (e0) {}
+
+        if (ALLOHA_NATIVE_HLS.installed) return true;
+
+        if (
+            typeof Hls === 'undefined' ||
+            !Hls.DefaultConfig ||
+            !Hls.DefaultConfig.loader
+        ) {
+            return false;
+        }
+
+        var OriginalLoader = Hls.DefaultConfig.loader;
+        ALLOHA_NATIVE_HLS.originalLoader = OriginalLoader;
+
+        function AllohaNativeLoader(config) {
+            this.config = config;
+            this.context = null;
+            this.stats = hlsNativeStats();
+            this.network = null;
+            this.fallback = null;
+            this.waitTimer = null;
+        }
+
+        AllohaNativeLoader.prototype.destroy = function () {
+            this.abort();
+            this.context = null;
+            this.config = null;
+        };
+
+        AllohaNativeLoader.prototype.abort = function () {
+            this.stats.aborted = true;
+            try {
+                if (this.waitTimer) clearTimeout(this.waitTimer);
+            } catch (e0) {}
+            this.waitTimer = null;
+
+            try {
+                if (this.network && this.network.clear) {
+                    this.network.clear();
+                }
+            } catch (e1) {}
+
+            try {
+                if (this.fallback && this.fallback.abort) {
+                    this.fallback.abort();
+                }
+            } catch (e2) {}
+        };
+
+        AllohaNativeLoader.prototype.getCacheAge = function () {
+            return null;
+        };
+
+        AllohaNativeLoader.prototype.getResponseHeader = function () {
+            return null;
+        };
+
+        AllohaNativeLoader.prototype.load = function (
+            context,
+            config,
+            callbacks
+        ) {
+            this.context = context;
+            this.stats = hlsNativeStats();
+
+            var requestUrl =
+                stripHash(context && context.url || '');
+
+            if (!isAllohaCdnUrl(requestUrl)) {
+                this.fallback = new OriginalLoader(this.config);
+                this.fallback.load(context, config, callbacks);
+                this.stats = this.fallback.stats || this.stats;
+                return;
+            }
+
+            var self = this;
+            var contextType =
+                String(context && context.type || '').toLowerCase();
+            var isManifest =
+                contextType === 'manifest';
+            var isBinary =
+                String(
+                    context && context.responseType || ''
+                ).toLowerCase() === 'arraybuffer';
+
+            function doLoad() {
+                if (self.stats.aborted) return;
+
+                var headers = {};
+                var baseHeaders =
+                    ALLOHA_NATIVE_HLS.headers || {};
+
+                Object.keys(baseHeaders).forEach(function (k) {
+                    headers[k] = baseHeaders[k];
+                });
+
+                /*
+                 * HAR:
+                 * - master.m3u8 -> 64-char Borth fingerprint
+                 * - level/fragment -> WS config_update.edge_hash
+                 */
+                headers['Accepts-Controls'] =
+                    isManifest
+                        ? ALLOHA_NATIVE_HLS.guardId
+                        : (
+                            ALLOHA_NATIVE_HLS.edgeHash ||
+                            ALLOHA_NATIVE_HLS.guardId
+                        );
+
+                headers.Accept =
+                    isBinary
+                        ? '*/*'
+                        : 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*;q=0.8';
+
+                if (
+                    context &&
+                    Number(context.rangeEnd) > Number(context.rangeStart) &&
+                    Number(context.rangeEnd) > 0
+                ) {
+                    headers.Range =
+                        'bytes=' +
+                        Number(context.rangeStart || 0) +
+                        '-' +
+                        (Number(context.rangeEnd) - 1);
+                }
+
+                var network = null;
+
+                try {
+                    network = new Lampa.Reguest();
+                } catch (e3) {
+                    try {
+                        network = new Lampa.Request();
+                    } catch (e4) {}
+                }
+
+                if (
+                    !network ||
+                    typeof network.native !== 'function'
+                ) {
+                    callbacks.onError(
+                        {
+                            code: 0,
+                            text: 'Lampa.Reguest.native unavailable'
+                        },
+                        context,
+                        null,
+                        self.stats
+                    );
+                    return;
+                }
+
+                self.network = network;
+
+                var timeout =
+                    (
+                        config &&
+                        (
+                            config.timeout ||
+                            config.maxLoadTimeMs
+                        )
+                    ) ||
+                    20000;
+
+                try {
+                    if (network.timeout) {
+                        network.timeout(
+                            Math.max(5000, timeout)
+                        );
+                    }
+                } catch (e5) {}
+
+                ALLOHA_NATIVE_HLS.lastRequest = {
+                    type: contextType,
+                    responseType:
+                        String(
+                            context &&
+                            context.responseType ||
+                            ''
+                        ),
+                    requestUrl: requestUrl,
+                    acceptsControls:
+                        headers['Accepts-Controls'],
+                    hasAuth:
+                        !!headers.Authorizations
+                };
+
+                try {
+                    window.__mnogotv_alloha_debug =
+                        ALLOHA_NATIVE_HLS;
+                } catch (eDbg3) {}
+
+                log(
+                    'Alloha native loader request',
+                    ALLOHA_NATIVE_HLS.lastRequest
+                );
+
+                try {
+                    network.native(
+                        requestUrl,
+                        function (response) {
+                            if (self.stats.aborted) return;
+
+                            var now =
+                                (
+                                    window.performance &&
+                                    performance.now
+                                )
+                                    ? performance.now()
+                                    : Date.now();
+
+                            self.stats.loading.first =
+                                self.stats.loading.first || now;
+                            self.stats.loading.end = now;
+
+                            try {
+                                var data;
+
+                                if (isBinary) {
+                                    data =
+                                        base64ToArrayBuffer(response);
+                                    self.stats.loaded =
+                                        self.stats.total =
+                                            data.byteLength || 0;
+                                }
+                                else {
+                                    data =
+                                        typeof response === 'string'
+                                            ? response
+                                            : String(response || '');
+                                    self.stats.loaded =
+                                        self.stats.total =
+                                            data.length || 0;
+                                }
+
+                                self.stats.chunkCount = 1;
+                                ALLOHA_NATIVE_HLS.lastError = null;
+
+                                callbacks.onSuccess(
+                                    {
+                                        url: context.url,
+                                        data: data
+                                    },
+                                    self.stats,
+                                    context,
+                                    null
+                                );
+                            }
+                            catch (decodeError) {
+                                ALLOHA_NATIVE_HLS.lastError = {
+                                    phase:
+                                        isBinary
+                                            ? 'fragment-decode'
+                                            : contextType + '-decode',
+                                    code: 0,
+                                    text: errText(decodeError),
+                                    requestUrl: requestUrl
+                                };
+
+                                try {
+                                    window.__mnogotv_alloha_debug =
+                                        ALLOHA_NATIVE_HLS;
+                                } catch (eDbg4) {}
+
+                                callbacks.onError(
+                                    {
+                                        code: 0,
+                                        text:
+                                            errText(decodeError)
+                                    },
+                                    context,
+                                    null,
+                                    self.stats
+                                );
+                            }
+                        },
+                        function (a, c) {
+                            if (self.stats.aborted) return;
+
+                            var status =
+                                a &&
+                                a.status !== undefined
+                                    ? Number(a.status)
+                                    : 0;
+
+                            var nativeError =
+                                errText(
+                                    a ||
+                                    c ||
+                                    'native network error'
+                                );
+
+                            ALLOHA_NATIVE_HLS.lastError = {
+                                phase:
+                                    isBinary
+                                        ? 'fragment-network'
+                                        : contextType + '-network',
+                                code: status || 0,
+                                text: nativeError,
+                                requestUrl: requestUrl,
+                                acceptsControls:
+                                    headers['Accepts-Controls']
+                            };
+
+                            try {
+                                window.__mnogotv_alloha_debug =
+                                    ALLOHA_NATIVE_HLS;
+                            } catch (eDbg5) {}
+
+                            log(
+                                'Alloha native loader network error',
+                                ALLOHA_NATIVE_HLS.lastError
+                            );
+
+                            try {
+                                notify(
+                                    'Alloha HLS DEBUG: ' +
+                                    ALLOHA_NATIVE_HLS.lastError.phase +
+                                    ' HTTP ' +
+                                    (status || 0)
+                                );
+                            } catch (eNoty) {}
+
+                            callbacks.onError(
+                                {
+                                    code: status || 0,
+                                    text: nativeError
+                                },
+                                context,
+                                a || null,
+                                self.stats
+                            );
+                        },
+                        false,
+                        {
+                            dataType:
+                                isBinary
+                                    ? 'base64'
+                                    : 'text',
+                            headers: headers
+                        }
+                    );
+                }
+                catch (e6) {
+                    callbacks.onError(
+                        {
+                            code: 0,
+                            text: errText(e6)
+                        },
+                        context,
+                        null,
+                        self.stats
+                    );
+                }
+            }
+
+            /*
+             * A level request can start almost immediately after the master.
+             * Give the WS config_update a short window to deliver edge_hash.
+             */
+            if (
+                !isManifest &&
+                !ALLOHA_NATIVE_HLS.edgeHash
+            ) {
+                var started = Date.now();
+
+                (function waitEdge() {
+                    if (self.stats.aborted) return;
+
+                    if (
+                        ALLOHA_NATIVE_HLS.edgeHash ||
+                        Date.now() - started >= 2200
+                    ) {
+                        self.waitTimer = null;
+                        doLoad();
+                        return;
+                    }
+
+                    self.waitTimer =
+                        setTimeout(waitEdge, 60);
+                }());
+
+                return;
+            }
+
+            doLoad();
+        };
+
+        try {
+            Hls.DefaultConfig.loader =
+                AllohaNativeLoader;
+            ALLOHA_NATIVE_HLS.installed = true;
+
+            log(
+                'Alloha native Hls loader installed'
+            );
+
+            return true;
+        }
+        catch (e7) {
+            log(
+                'Alloha native Hls loader install failed',
+                e7
+            );
+            return false;
+        }
+    }
+
 
     function resolveAlloha(
         source,
@@ -4334,6 +4971,22 @@
                                     'Bearer ' + streamToken;
                             }
 
+                            var hlsNativeReady =
+                                configureAllohaNativeHls(
+                                    picked.selected.url,
+                                    hlsHeaders,
+                                    guardId
+                                );
+
+                            var edgeSocketStarted =
+                                startAllohaEdgeSocket(
+                                    json,
+                                    picked.selected.label ||
+                                        qualityLabel ||
+                                        '480p',
+                                    picked.audioId
+                                );
+
                             ok({
                                 provider: 'Alloha',
                                 directUrl: picked.selected.url,
@@ -4353,6 +5006,10 @@
                                     ' • media ' + media.id +
                                     ' • guard ' +
                                     (streamToken ? 'full' : 'no-auth-token') +
+                                    ' • hls ' +
+                                    (hlsNativeReady ? 'native' : 'stock') +
+                                    ' • edge ' +
+                                    (edgeSocketStarted ? 'ws' : 'no-ws') +
                                     ' • ' +
                                     (
                                         voiceChoice &&
