@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.1-collaps | CollapsAdapter SHA-256: 12b00c34ff0693e3e853c59aeb228515c54b52e9f07e6a455f21fcf99ea19d94 */
+/* MnogoTV/Lampa 5.0.2-collaps | CollapsAdapter SHA-256: 9226be608c33284ae6af5e4f16d0638080355bc0df93a00d0d3ec40999ca11b7 */
 (function (global) {
     'use strict';
 
@@ -273,7 +273,11 @@
          */
         var unixMatch = html.match(/unixTime\s*=\s*(\d+)/i);
         var keyMatch = null;
-        var keyRe = /fa4cdd5c\s*=\s*["']([0-9a-f]+)["']/ig;
+        // The variable name changes. Follow the source-URL append expression.
+        var tokenUse = html.match(/\[[^\]\r\n]+\]\s*\+=\s*["']&["']\s*\+\s*([A-Za-z_$][\w$]*)/);
+        var tokenName = tokenUse ? tokenUse[1] : 'fa4cdd5c';
+        var escapedTokenName = tokenName.replace(/[$]/g, '\\$&');
+        var keyRe = new RegExp('\\b' + escapedTokenName + '\\s*=\\s*["\']([0-9a-f]+)["\']', 'ig');
         var km;
         while ((km = keyRe.exec(html))) keyMatch = km[1];
 
@@ -1024,7 +1028,8 @@
             return !!(
                 window.MediaSource &&
                 typeof MediaSource.isTypeSupported === 'function' &&
-                MediaSource.isTypeSupported('video/webm; codecs="av01.0.05M.08"')
+                MediaSource.isTypeSupported('video/webm; codecs="av01.0.08M.08"') &&
+                MediaSource.isTypeSupported('audio/webm; codecs="opus"')
             );
         } catch (e) {}
         return false;
@@ -1964,10 +1969,10 @@
                         var selectedDashLabel = '';
 
                         /*
-                         * HLS master is preferred when present: it exposes
-                         * every rendition to the stock Lampa quality menu and
-                         * leaves AUTO under native ABR control. DASH remains
-                         * the compatibility fallback for DASH-only titles.
+                         * HAR mnogotv.com5-2: S1E1 uses DASHA/AV1 with
+                         * 486/720/1080 renditions. Prefer the provider DASH
+                         * path; HLS may expose a different rendition ladder.
+                         * AUTO remains under the stock player's ABR control.
                          */
                         if (dashaStream && av1) {
                             selectedDash = dashaStream;
@@ -1978,7 +1983,7 @@
                             selectedDashLabel = 'DASH';
                         }
 
-                        if (selectedDash && !hlsStream) {
+                        if (selectedDash) {
                             var clientDashUrl = collapsClientCdnUrl(
                                 selectedDash,
                                 cdnUnix,
@@ -2122,7 +2127,7 @@
                     subtitles: result.subtitles || [],
                     tracks: result.tracks || [],
                     qualityMode: 'native-auto',
-                    qualities: 'hls-master',
+                    qualities: String(result.quality || '').indexOf('DASH') >= 0 ? 'dash-manifest' : 'hls-master',
                     transport: String(result.quality || '').indexOf('DASH') >= 0 ? 'DASH' : 'HLS',
                     resolvedBy: result.resolvedBy || ''
                 });
@@ -2160,7 +2165,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.1-collaps';
+    var VERSION = '5.0.2-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
