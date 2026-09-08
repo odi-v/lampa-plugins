@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.0-collaps | CollapsAdapter SHA-256: 1827c63dcacdaf8a52a0445a9aa12ce87b1227a6a8a20a18b17dedef7457faf5 */
+/* MnogoTV/Lampa 5.0.1-collaps | CollapsAdapter SHA-256: 12b00c34ff0693e3e853c59aeb228515c54b52e9f07e6a455f21fcf99ea19d94 */
 (function (global) {
     'use strict';
 
@@ -513,13 +513,15 @@
 
         CollapsNativeLoader.prototype.load = function (context, config, callbacks) {
             this.context = context;
-            this.stats = hlsNativeStats();
+            var initialStats = hlsNativeStats();
+            var stats = this.stats;
+            Object.keys(initialStats).forEach(function (key) { stats[key] = initialStats[key]; });
 
             var visibleUrl = stripHash(context && context.url || '');
             if (!isCollapsCdnUrl(visibleUrl)) {
                 this.fallback = new OriginalLoader(this.config);
+                this.fallback.stats = this.stats;
                 this.fallback.load(context, config, callbacks);
-                this.stats = this.fallback.stats || this.stats;
                 return;
             }
 
@@ -2158,7 +2160,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.0-collaps';
+    var VERSION = '5.0.1-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -2257,7 +2259,14 @@
             function RouterLoader(loaderConfig) {
                 this.config = loaderConfig;
                 this.delegate = null;
-                this.stats = {};
+                // Hls.js can retain this object before load(); never replace it.
+                this.stats = {
+                    aborted: false, loaded: 0, retry: 0, total: 0,
+                    chunkCount: 0, bwEstimate: 0,
+                    loading: { start: 0, first: 0, end: 0 },
+                    parsing: { start: 0, end: 0 },
+                    buffering: { start: 0, first: 0, end: 0 }
+                };
             }
             RouterLoader.prototype._delegate = function (context) {
                 if (this.delegate) return this.delegate;
@@ -2271,13 +2280,17 @@
                     return false;
                 });
                 this.delegate = new Ctor(this.config);
-                this.stats = this.delegate.stats || this.stats;
+                var stats = this.stats;
+                Object.keys(this.delegate.stats || {}).forEach(function (key) {
+                    stats[key] = this.delegate.stats[key];
+                }, this);
+                this.delegate.stats = stats;
                 return this.delegate;
             };
             RouterLoader.prototype.load = function (context, loaderConfig, callbacks) {
                 var delegate = this._delegate(context);
                 delegate.load(context, loaderConfig, callbacks);
-                this.stats = delegate.stats || this.stats;
+                // The delegate updates the same stats object held by Hls.js.
             };
             RouterLoader.prototype.abort = function () { try { if (this.delegate && this.delegate.abort) this.delegate.abort(); } catch (e) {} };
             RouterLoader.prototype.destroy = function () { try { if (this.delegate && this.delegate.destroy) this.delegate.destroy(); } catch (e) {} this.delegate = null; };
