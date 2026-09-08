@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.1.3-isolated-auto-voice';
-    var PLUGIN_ID = 'mnogotv_v412_native';
+    var VERSION = '4.1.4-isolated-auto-fallback';
+    var PLUGIN_ID = 'mnogotv_v414_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -4060,7 +4060,15 @@
                             selectedDashLabel = 'DASH';
                         }
 
-                        if (selectedDash && !hlsStream) {
+                        /*
+                         * v4.1.4: prefer DASH/DASHA again when it exists.
+                         * Collaps' HLS ladder is capped at 720p on a number of
+                         * titles, while DASH exposes the full FHD ladder.
+                         * The old quality-switch crash came from reusing
+                         * mutated audio-track objects; v4.1.3 now clones them
+                         * per playback, so DASH can safely be the primary path.
+                         */
+                        if (selectedDash) {
                             var clientDashUrl = collapsClientCdnUrl(
                                 selectedDash,
                                 cdnUnix,
@@ -4105,12 +4113,16 @@
                                     response.label +
                                     (kp ? (' • KP ' + kp) : '') +
                                     ' • ' + selectedDashLabel + '/NATIVE-XHR' +
+                                    ' • full-ladder' +
                                     ' • auto-low-start'
                             });
                             return;
                         }
 
-                        /* v4.1.2: prefer HLS when present so Lampa can expose stable AUTO/manual quality levels. DASH remains the fallback for DASH-only titles. */
+                        /*
+                         * HLS remains the compatibility fallback when this
+                         * title does not expose a usable DASH path.
+                         */
                         if (hlsStream) {
                             var hlsHeaders = collapsPlaybackHeaders('hls');
                             var clientHlsUrl = collapsClientCdnUrl(
@@ -4802,7 +4814,15 @@
                             target.url,
                             hlsHeaders,
                             guardId,
-                            target.mirrors || [target.url]
+                            target.mirrors || [target.url],
+                            {
+                                autoMode:
+                                    (instance && instance.__mode || mode) === 'auto',
+                                qualityVariants:
+                                    picked.variants || [],
+                                currentQuality:
+                                    target.label || ''
+                            }
                         );
 
                         startAllohaEdgeSocket(
@@ -5095,6 +5115,13 @@
         edgeRefreshTimer: null,
         edgeTtl: 0,
         reconnectTimer: null,
+        autoMode: false,
+        qualityVariants: [],
+        currentQuality: '',
+        autoTriedQualities: {},
+        socketJson: null,
+        socketAudioId: '',
+        socketQuality: '',
         lastRequest: null,
         lastMirrorSwitch: null,
         lastError: null,
@@ -5230,6 +5257,238 @@
         return true;
     }
 
+
+    function allohaFindSocketConfig(root) {
+        var found = null;
+        var seen = [];
+
+        function walk(value, depth) {
+            if (
+                found ||
+                !value ||
+                typeof value !== 'object' ||
+                depth > 6
+            ) {
+                return;
+            }
+
+            if (seen.indexOf(value) >= 0) return;
+            seen.push(value);
+
+            if (
+                typeof value.pnr === 'string' &&
+                value.pnr &&
+                value.pnk !== undefined &&
+                value.pnk !== null &&
+                String(value.pnk) !== ''
+            ) {
+                found = {
+                    pnr: String(value.pnr),
+                    pnk: String(value.pnk)
+                };
+                return;
+            }
+
+            Object.keys(value).some(function (key) {
+                var child = value[key];
+                if (child && typeof child === 'object') {
+                    walk(child, depth + 1);
+                }
+                return !!found;
+            });
+        }
+
+        walk(root, 0);
+        return found;
+    }
+
+    function allohaAutoVariantOrder(variants, currentQuality) {
+        var list = Array.isArray(variants) ? variants.slice() : [];
+
+        list = list.filter(function (v) {
+            return v && v.url;
+        });
+
+        list.sort(function (a, b) {
+            var aq = Number(a.quality || numericQuality(a.label || '') || 0);
+            var bq = Number(b.quality || numericQuality(b.label || '') || 0);
+            var ad = Math.abs(aq - 480);
+            var bd = Math.abs(bq - 480);
+
+            if (ad !== bd) return ad - bd;
+
+            /*
+             * Around the same distance prefer the lower rendition first.
+             * AUTO should start conservatively, not celebrate by choosing 4K.
+             */
+            return aq - bq;
+        });
+
+        if (currentQuality) {
+            list.sort(function (a, b) {
+                var aCurrent = String(a.label || '') === String(currentQuality);
+                var bCurrent = String(b.label || '') === String(currentQuality);
+                if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
+                return 0;
+            });
+        }
+
+        return list;
+    }
+
+    function allohaApplyVariantRuntime(variant) {
+        if (!variant || !variant.url) return false;
+
+        var mirrors =
+            Array.isArray(variant.mirrors) && variant.mirrors.length
+                ? variant.mirrors.slice()
+                : [variant.url];
+
+        ALLOHA_NATIVE_HLS.primaryBase =
+            allohaHlsBase(variant.url);
+        ALLOHA_NATIVE_HLS.mirrorBases =
+            allohaUniqueBases(mirrors);
+
+        if (
+            ALLOHA_NATIVE_HLS.primaryBase &&
+            ALLOHA_NATIVE_HLS.mirrorBases.indexOf(
+                ALLOHA_NATIVE_HLS.primaryBase
+            ) < 0
+        ) {
+            ALLOHA_NATIVE_HLS.mirrorBases.unshift(
+                ALLOHA_NATIVE_HLS.primaryBase
+            );
+        }
+
+        ALLOHA_NATIVE_HLS.activeBase =
+            ALLOHA_NATIVE_HLS.primaryBase ||
+            ALLOHA_NATIVE_HLS.mirrorBases[0] ||
+            '';
+
+        ALLOHA_NATIVE_HLS.currentQuality =
+            String(
+                variant.label ||
+                (
+                    variant.quality
+                        ? (variant.quality + 'p')
+                        : ''
+                )
+            );
+
+        try {
+            ALLOHA_NATIVE_HLS.baseHost =
+                new URL(stripHash(variant.url)).hostname.toLowerCase();
+        } catch (e0) {
+            ALLOHA_NATIVE_HLS.baseHost = '';
+        }
+
+        return true;
+    }
+
+    function allohaSwitchAutoVariant() {
+        if (
+            !ALLOHA_NATIVE_HLS.autoMode ||
+            !Array.isArray(ALLOHA_NATIVE_HLS.qualityVariants) ||
+            !ALLOHA_NATIVE_HLS.qualityVariants.length
+        ) {
+            return null;
+        }
+
+        var ordered =
+            allohaAutoVariantOrder(
+                ALLOHA_NATIVE_HLS.qualityVariants,
+                ALLOHA_NATIVE_HLS.currentQuality
+            );
+
+        for (var i = 0; i < ordered.length; i++) {
+            var variant = ordered[i];
+            var label =
+                String(
+                    variant.label ||
+                    (
+                        variant.quality
+                            ? (variant.quality + 'p')
+                            : ''
+                    )
+                );
+
+            if (!label) continue;
+
+            if (
+                label === ALLOHA_NATIVE_HLS.currentQuality ||
+                ALLOHA_NATIVE_HLS.autoTriedQualities[label]
+            ) {
+                continue;
+            }
+
+            ALLOHA_NATIVE_HLS.autoTriedQualities[label] = true;
+
+            if (!allohaApplyVariantRuntime(variant)) {
+                continue;
+            }
+
+            var socketStarted = false;
+
+            if (ALLOHA_NATIVE_HLS.socketJson) {
+                socketStarted =
+                    startAllohaEdgeSocket(
+                        ALLOHA_NATIVE_HLS.socketJson,
+                        label,
+                        ALLOHA_NATIVE_HLS.socketAudioId,
+                        {
+                            preserveEdge: false
+                        }
+                    );
+            }
+
+            try {
+                notify(
+                    'A414 AUTO → ' +
+                    label +
+                    (
+                        socketStarted
+                            ? ' • WS'
+                            : ' • no-WS'
+                    )
+                );
+            } catch (eNotifyAutoFallback) {}
+
+            allohaPushHistory({
+                phase: 'auto-quality-fallback',
+                quality: label,
+                socketStarted: socketStarted,
+                ts: Date.now()
+            });
+
+            return {
+                variant: variant,
+                socketStarted: socketStarted
+            };
+        }
+
+        return null;
+    }
+
+    function allohaWaitForWsReady(done, maxMs) {
+        var started = Date.now();
+        maxMs = Number(maxMs || 1200);
+
+        function next() {
+            if (
+                !ALLOHA_NATIVE_HLS.wsExpected ||
+                ALLOHA_NATIVE_HLS.wsReady ||
+                Date.now() - started >= maxMs
+            ) {
+                done();
+                return;
+            }
+
+            setTimeout(next, 40);
+        }
+
+        next();
+    }
+
     function allohaCurrentTime() {
         try {
             var video =
@@ -5338,24 +5597,36 @@
         ALLOHA_NATIVE_HLS.edgeNotified = false;
         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = false;
 
+        var socketConfig =
+            allohaFindSocketConfig(json);
+
+        ALLOHA_NATIVE_HLS.socketJson = json || null;
+        ALLOHA_NATIVE_HLS.socketAudioId =
+            String(audioId || '');
+        ALLOHA_NATIVE_HLS.socketQuality =
+            String(quality || '');
+
         if (
-            !json ||
-            !json.pnr ||
-            !json.pnk ||
+            !socketConfig ||
             typeof WebSocket === 'undefined'
         ) {
-            log('Alloha edge WebSocket unavailable');
+            log(
+                'Alloha edge WebSocket unavailable',
+                {
+                    nestedPairFound: !!socketConfig
+                }
+            );
             return false;
         }
 
         ALLOHA_NATIVE_HLS.wsExpected = true;
 
-        var wsUrl = String(json.pnr || '');
+        var wsUrl = String(socketConfig.pnr || '');
 
         try {
             wsUrl +=
                 (wsUrl.indexOf('?') >= 0 ? '&' : '?') +
-                'sid=' + encodeURIComponent(String(json.pnk)) +
+                'sid=' + encodeURIComponent(String(socketConfig.pnk)) +
                 '&v=2.1' +
                 '&t=' + Date.now();
         } catch (eUrl) {
@@ -5403,7 +5674,7 @@
 
             if (!ALLOHA_NATIVE_HLS.wsReadyNotified) {
                 ALLOHA_NATIVE_HLS.wsReadyNotified = true;
-                try { notify('A413 WS READY'); } catch (eNotifyWsReady) {}
+                try { notify('A414 WS READY'); } catch (eNotifyWsReady) {}
             }
 
             allohaPushHistory({
@@ -5440,7 +5711,7 @@
                 if (!ALLOHA_NATIVE_HLS.edgeNotified) {
                     ALLOHA_NATIVE_HLS.edgeNotified = true;
                     try {
-                        notify('A413 EDGE OK • 32');
+                        notify('A414 EDGE OK • 32');
                     } catch (eNotifyEdge) {}
                 }
 
@@ -5582,7 +5853,7 @@
                     if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
                         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
                         try {
-                            notify('A413 EDGE TIMEOUT • guard64');
+                            notify('A414 EDGE TIMEOUT • guard64');
                         } catch (eNotifyEdgeTimeout) {}
                     }
 
@@ -5600,7 +5871,15 @@
         return true;
     }
 
-    function configureAllohaNativeHls(url, headers, guardId, mirrors) {
+    function configureAllohaNativeHls(
+        url,
+        headers,
+        guardId,
+        mirrors,
+        options
+    ) {
+        options = options || {};
+
         ALLOHA_NATIVE_HLS.headers = headers || {};
         ALLOHA_NATIVE_HLS.guardId = String(guardId || '');
         ALLOHA_NATIVE_HLS.edgeHash = '';
@@ -5624,6 +5903,20 @@
             ALLOHA_NATIVE_HLS.mirrorBases[0] ||
             '';
         ALLOHA_NATIVE_HLS.failedUrls = {};
+        ALLOHA_NATIVE_HLS.autoMode =
+            !!options.autoMode;
+        ALLOHA_NATIVE_HLS.qualityVariants =
+            Array.isArray(options.qualityVariants)
+                ? options.qualityVariants.slice()
+                : [];
+        ALLOHA_NATIVE_HLS.currentQuality =
+            String(options.currentQuality || '');
+        ALLOHA_NATIVE_HLS.autoTriedQualities = {};
+        if (ALLOHA_NATIVE_HLS.currentQuality) {
+            ALLOHA_NATIVE_HLS.autoTriedQualities[
+                ALLOHA_NATIVE_HLS.currentQuality
+            ] = true;
+        }
         ALLOHA_NATIVE_HLS.lastMirrorSwitch = null;
         ALLOHA_NATIVE_HLS.fragmentSuccessCount = 0;
         ALLOHA_NATIVE_HLS.lastSuccess = null;
@@ -5914,7 +6207,7 @@
                         if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 1) {
                             try {
                                 notify(
-                                    'A413 OK ' + successLeaf +
+                                    'A414 OK ' + successLeaf +
                                     ' • ' + allohaHumanBytes(self.stats.loaded) +
                                     ' • C' + self.stats.chunkCount +
                                     ' • ' + successInfo.tokenKind +
@@ -5933,7 +6226,14 @@
 
                     callbacks.onSuccess(
                         {
-                            url: context.url,
+                            /*
+                             * Use the actual CDN URL that produced the
+                             * manifest. AUTO may transparently fall back from
+                             * 480p to another Alloha rendition; Hls.js must
+                             * resolve relative level/fragment paths against
+                             * that real base, not the original failed URL.
+                             */
+                            url: requestUrl,
                             data: data
                         },
                         self.stats,
@@ -6020,8 +6320,33 @@
                         ] || 0
                     ) + 1;
 
-                    var mirrorSwitched =
-                        allohaSwitchMirror(requestUrl);
+                    var failureCount =
+                        ALLOHA_NATIVE_HLS.failedUrls[
+                            originalRequestUrl
+                        ] || 0;
+
+                    var mirrorCount =
+                        (
+                            ALLOHA_NATIVE_HLS.mirrorBases &&
+                            ALLOHA_NATIVE_HLS.mirrorBases.length
+                        ) || 1;
+
+                    var mirrorSwitched = false;
+
+                    /*
+                     * Master fallback is handled inside one loader request.
+                     * Previously the first CDN failure was handed back to
+                     * Hls.js, which could promote it to fatal before mirror 2
+                     * or the next AUTO rendition was actually tried.
+                     */
+                    if (
+                        isMasterManifest &&
+                        !isBinary &&
+                        failureCount < mirrorCount
+                    ) {
+                        mirrorSwitched =
+                            allohaSwitchMirror(requestUrl);
+                    }
 
                     ALLOHA_NATIVE_HLS.lastError = {
                         phase:
@@ -6064,9 +6389,62 @@
                         ts: Date.now()
                     });
 
+                    if (
+                        isMasterManifest &&
+                        !isBinary &&
+                        mirrorSwitched
+                    ) {
+                        requestUrl =
+                            allohaRewriteToActiveBase(
+                                requestUrl
+                            );
+
+                        setTimeout(
+                            doLoad,
+                            0
+                        );
+
+                        return false;
+                    }
+
+                    if (
+                        isMasterManifest &&
+                        !isBinary &&
+                        failureCount >= mirrorCount &&
+                        ALLOHA_NATIVE_HLS.autoMode
+                    ) {
+                        var nextAuto =
+                            allohaSwitchAutoVariant();
+
+                        if (nextAuto && nextAuto.variant) {
+                            requestUrl =
+                                nextAuto.variant.url;
+
+                            /*
+                             * The old URL was only a placeholder for AUTO.
+                             * Reset its failure counter because the next load
+                             * now belongs to another protected rendition.
+                             */
+                            ALLOHA_NATIVE_HLS.failedUrls[
+                                originalRequestUrl
+                            ] = 0;
+
+                            allohaWaitForWsReady(
+                                function () {
+                                    if (!self.stats.aborted) {
+                                        doLoad();
+                                    }
+                                },
+                                1200
+                            );
+
+                            return false;
+                        }
+                    }
+
                     try {
                         notify(
-                            'A413 FAIL ' + failedLeaf +
+                            'A414 FAIL ' + failedLeaf +
                             ' • H' + (status || 0) +
                             ' • ' + acceptsControlsKind + edgeLen +
                             ' • M' + (allohaActiveMirrorNumber() || '?') +
@@ -6786,7 +7164,15 @@
                                     selectedVariant.url,
                                     hlsHeaders,
                                     guardId,
-                                    selectedVariant.mirrors
+                                    selectedVariant.mirrors,
+                                    {
+                                        autoMode:
+                                            String(qualityLabel || 'Авто') === 'Авто',
+                                        qualityVariants:
+                                            picked.variants || [],
+                                        currentQuality:
+                                            selectedVariant.label || ''
+                                    }
                                 );
 
                             var edgeSocketStarted =
