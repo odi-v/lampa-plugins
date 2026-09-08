@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.27-native';
+    var VERSION = '4.1.0-isolated';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -1853,18 +1853,28 @@
 
 
     /*
-     * Provider-scoped HLS loader routing.
+     * v4.1.0: permanent provider router.
      *
-     * Older native builds replaced Hls.DefaultConfig.loader globally and then
-     * wrapped whatever loader happened to be installed at that moment. After
-     * switching between Alloha/Collaps/VeoVeo this could create a wrapper
-     * chain (Collaps -> Alloha -> stock, or the reverse), so unrelated VeoVeo
-     * playback inherited native-provider loader overhead/state.
+     * Hls.DefaultConfig.loader is global inside Lampa. Older builds replaced
+     * it on every source switch, which meant Alloha/Collaps/VeoVeo could
+     * inherit one another's loader state. v4.1.0 installs ONE router once.
+     * The router delegates a request by URL to the provider that owns it:
      *
-     * Capture the pristine Hls.js loader once and explicitly activate only the
-     * loader required by the source that is about to play.
+     *   Alloha vkvideo.cloud runtime base -> AllohaNativeLoader
+     *   Collaps registered interkh URL     -> CollapsNativeLoader
+     *   everything else                   -> pristine Hls.js loader
+     *
+     * Provider state remains provider-local and playback changes no longer
+     * mutate Hls.DefaultConfig.loader.
      */
     var MNOGOTV_HLS_STOCK_LOADER = null;
+    var MNOGOTV_HLS_RUNTIME = {
+        installed: false,
+        routerCtor: null,
+        activeProvider: '',
+        sessionId: '',
+        sequence: 0
+    };
 
     function captureHlsStockLoader() {
         if (
@@ -1879,42 +1889,203 @@
         return MNOGOTV_HLS_STOCK_LOADER;
     }
 
-    function activateProviderHlsLoader(type) {
+    function hlsRuntimeProvider(url) {
+        var clean = stripHash(url);
+
+        try {
+            if (
+                ALLOHA_NATIVE_HLS &&
+                ALLOHA_NATIVE_HLS.loaderCtor
+            ) {
+                var bases = []
+                    .concat(ALLOHA_NATIVE_HLS.primaryBase || [])
+                    .concat(ALLOHA_NATIVE_HLS.mirrorBases || [])
+                    .filter(Boolean);
+
+                for (var i = 0; i < bases.length; i++) {
+                    if (clean.indexOf(String(bases[i])) === 0) {
+                        return 'alloha';
+                    }
+                }
+            }
+        } catch (e0) {}
+
+        try {
+            if (
+                COLLAPS_NATIVE_HLS &&
+                COLLAPS_NATIVE_HLS.loaderCtor
+            ) {
+                if (
+                    COLLAPS_NATIVE_HLS.urlMap &&
+                    COLLAPS_NATIVE_HLS.urlMap[clean]
+                ) {
+                    return 'collaps';
+                }
+
+                /*
+                 * Child playlist/fragment URLs are registered while Collaps
+                 * manifests are rewritten. The host check is only a fallback
+                 * while the active provider itself is Collaps.
+                 */
+                if (
+                    MNOGOTV_HLS_RUNTIME.activeProvider === 'collaps' &&
+                    isCollapsCdnUrl(clean)
+                ) {
+                    return 'collaps';
+                }
+            }
+        } catch (e1) {}
+
+        return 'stock';
+    }
+
+    function installMnogoTvHlsRouter() {
+        if (MNOGOTV_HLS_RUNTIME.installed) return true;
+
         if (
             typeof Hls === 'undefined' ||
-            !Hls.DefaultConfig
+            !Hls.DefaultConfig ||
+            !Hls.DefaultConfig.loader
         ) {
             return false;
         }
 
+        var StockLoader = captureHlsStockLoader();
+        if (!StockLoader) return false;
+
+        function MnogoTvProviderLoader(config) {
+            this.config = config;
+            this.delegate = null;
+            this.stats = hlsNativeStats();
+        }
+
+        MnogoTvProviderLoader.prototype._makeDelegate = function (context) {
+            if (this.delegate) return this.delegate;
+
+            var provider = hlsRuntimeProvider(
+                context && context.url || ''
+            );
+            var Ctor = StockLoader;
+
+            if (
+                provider === 'alloha' &&
+                ALLOHA_NATIVE_HLS &&
+                ALLOHA_NATIVE_HLS.loaderCtor
+            ) {
+                Ctor = ALLOHA_NATIVE_HLS.loaderCtor;
+            }
+            else if (
+                provider === 'collaps' &&
+                COLLAPS_NATIVE_HLS &&
+                COLLAPS_NATIVE_HLS.loaderCtor
+            ) {
+                Ctor = COLLAPS_NATIVE_HLS.loaderCtor;
+            }
+
+            this.delegate = new Ctor(this.config);
+            this.stats = this.delegate.stats || this.stats;
+            return this.delegate;
+        };
+
+        MnogoTvProviderLoader.prototype.load = function (context, config, callbacks) {
+            var d = this._makeDelegate(context);
+            d.load(context, config, callbacks);
+            this.stats = d.stats || this.stats;
+        };
+
+        MnogoTvProviderLoader.prototype.abort = function () {
+            try {
+                if (this.delegate && this.delegate.abort) {
+                    this.delegate.abort();
+                }
+            } catch (e0) {}
+        };
+
+        MnogoTvProviderLoader.prototype.destroy = function () {
+            try {
+                if (this.delegate && this.delegate.destroy) {
+                    this.delegate.destroy();
+                }
+            } catch (e0) {}
+            this.delegate = null;
+            this.config = null;
+        };
+
+        MnogoTvProviderLoader.prototype.getCacheAge = function () {
+            try {
+                return this.delegate && this.delegate.getCacheAge
+                    ? this.delegate.getCacheAge()
+                    : null;
+            } catch (e0) {
+                return null;
+            }
+        };
+
+        MnogoTvProviderLoader.prototype.getResponseHeader = function (name) {
+            try {
+                return this.delegate && this.delegate.getResponseHeader
+                    ? this.delegate.getResponseHeader(name)
+                    : null;
+            } catch (e0) {
+                return null;
+            }
+        };
+
+        Hls.DefaultConfig.loader = MnogoTvProviderLoader;
+        MNOGOTV_HLS_RUNTIME.routerCtor = MnogoTvProviderLoader;
+        MNOGOTV_HLS_RUNTIME.installed = true;
+
+        log('MnogoTV isolated HLS router installed');
+        return true;
+    }
+
+    function prepareProviderRuntime(type) {
         type = String(type || '').toLowerCase();
+        if (type === 'veo') type = 'veoveo';
 
-        var stock = captureHlsStockLoader();
+        installMnogoTvHlsRouter();
 
-        if (
-            type === 'alloha' &&
-            ALLOHA_NATIVE_HLS &&
-            ALLOHA_NATIVE_HLS.loaderCtor
-        ) {
-            Hls.DefaultConfig.loader = ALLOHA_NATIVE_HLS.loaderCtor;
-            return true;
+        MNOGOTV_HLS_RUNTIME.sequence++;
+        MNOGOTV_HLS_RUNTIME.activeProvider = type;
+        MNOGOTV_HLS_RUNTIME.sessionId =
+            type + ':' +
+            MNOGOTV_HLS_RUNTIME.sequence + ':' +
+            Date.now().toString(36);
+
+        /*
+         * Collaps DASH uses a global XMLHttpRequest shim because dash.js does
+         * not expose the same loader hook as Hls.js. Keep the shim installed,
+         * but make it inert for every non-Collaps playback.
+         */
+        if (type !== 'collaps') {
+            try { COLLAPS_NATIVE_DASH.active = false; } catch (e0) {}
+            try { setCollapsDashAudioChoice(null); } catch (e1) {}
         }
 
-        if (
-            type === 'collaps' &&
-            COLLAPS_NATIVE_HLS &&
-            COLLAPS_NATIVE_HLS.loaderCtor
-        ) {
-            Hls.DefaultConfig.loader = COLLAPS_NATIVE_HLS.loaderCtor;
-            return true;
+        /*
+         * A stale Alloha socket must not keep changing edge_hash after the
+         * user has moved to VeoVeo/Collaps/Turbo.
+         */
+        if (type !== 'alloha') {
+            try { closeAllohaEdgeSocket(); } catch (e2) {}
         }
 
-        if (stock) {
-            Hls.DefaultConfig.loader = stock;
-            return true;
-        }
+        try {
+            window.__mnogotv_provider_runtime = {
+                provider: type,
+                sessionId: MNOGOTV_HLS_RUNTIME.sessionId
+            };
+        } catch (e3) {}
 
-        return false;
+        return MNOGOTV_HLS_RUNTIME.sessionId;
+    }
+
+    /*
+     * Compatibility name for older call sites. Unlike v4.0.27 this DOES NOT
+     * replace Hls.DefaultConfig.loader with a provider loader.
+     */
+    function activateProviderHlsLoader(type) {
+        return prepareProviderRuntime(type);
     }
 
 
@@ -1955,6 +2126,7 @@
 
     function base64ToArrayBuffer(value) {
         var raw = value;
+
         if (raw && typeof raw === 'object') {
             raw = raw.base64 !== undefined ? raw.base64 :
                   raw.data !== undefined ? raw.data :
@@ -1962,14 +2134,67 @@
                   raw.response !== undefined ? raw.response :
                   raw.result !== undefined ? raw.result : '';
         }
-        raw = String(raw || '');
+
+        raw = String(raw === undefined || raw === null ? '' : raw).trim();
+
+        /*
+         * Native bridges are annoyingly inconsistent across Android/WebView
+         * versions: some return a data URI, some URL-safe base64, some a JSON
+         * quoted string, and some return an 8-bit binary string despite
+         * dataType=base64. Normalize the harmless variants before atob().
+         */
+        if (
+            raw.length >= 2 &&
+            raw.charAt(0) === '"' &&
+            raw.charAt(raw.length - 1) === '"'
+        ) {
+            try { raw = JSON.parse(raw); } catch (eJson) {}
+            raw = String(raw || '');
+        }
+
         var comma = raw.indexOf('base64,');
         if (comma >= 0) raw = raw.slice(comma + 7);
-        raw = raw.replace(/\s+/g, '');
-        var binary = atob(raw);
-        var out = new Uint8Array(binary.length);
-        for (var i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i) & 255;
-        return out.buffer;
+
+        if (raw.indexOf('%') >= 0) {
+            try { raw = decodeURIComponent(raw); } catch (eUri) {}
+        }
+
+        var compact = raw
+            .replace(/\s+/g, '')
+            .replace(/-/g, '+')
+            .replace(/_/g, '/');
+
+        var looksBase64 =
+            compact.length > 0 &&
+            /^[A-Za-z0-9+/]*={0,2}$/.test(compact);
+
+        if (looksBase64) {
+            while (compact.length % 4) compact += '=';
+
+            try {
+                var binary = atob(compact);
+                var out = new Uint8Array(binary.length);
+                for (var i = 0; i < binary.length; i++) {
+                    out[i] = binary.charCodeAt(i) & 255;
+                }
+                return out.buffer;
+            } catch (eAtob) {
+                /*
+                 * Fall through to raw-byte mode. This is preferable to killing
+                 * an otherwise playable Collaps DASH stream with a debug toast.
+                 */
+            }
+        }
+
+        /*
+         * Fallback for native bridges that already decoded the payload and
+         * returned an 8-bit JavaScript string.
+         */
+        var bytes = new Uint8Array(raw.length);
+        for (var j = 0; j < raw.length; j++) {
+            bytes[j] = raw.charCodeAt(j) & 255;
+        }
+        return bytes.buffer;
     }
 
     function hlsNativeStats() {
@@ -2224,9 +2449,9 @@
 
         try {
             COLLAPS_NATIVE_HLS.loaderCtor = CollapsNativeLoader;
-            Hls.DefaultConfig.loader = CollapsNativeLoader;
             COLLAPS_NATIVE_HLS.installed = true;
-            log('Collaps native Hls loader installed');
+            installMnogoTvHlsRouter();
+            log('Collaps native Hls delegate registered');
             return true;
         }
         catch (e5) {
@@ -4674,7 +4899,7 @@
 
             if (!ALLOHA_NATIVE_HLS.wsReadyNotified) {
                 ALLOHA_NATIVE_HLS.wsReadyNotified = true;
-                try { notify('A26 WS READY'); } catch (eNotifyWsReady) {}
+                try { notify('A41 WS READY'); } catch (eNotifyWsReady) {}
             }
 
             allohaPushHistory({
@@ -4711,7 +4936,7 @@
                 if (!ALLOHA_NATIVE_HLS.edgeNotified) {
                     ALLOHA_NATIVE_HLS.edgeNotified = true;
                     try {
-                        notify('A26 EDGE OK • 32');
+                        notify('A41 EDGE OK • 32');
                     } catch (eNotifyEdge) {}
                 }
 
@@ -4764,7 +4989,7 @@
                     if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
                         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
                         try {
-                            notify('A26 EDGE TIMEOUT • guard64');
+                            notify('A41 EDGE TIMEOUT • guard64');
                         } catch (eNotifyEdgeTimeout) {}
                     }
 
@@ -5096,7 +5321,7 @@
                         if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 1) {
                             try {
                                 notify(
-                                    'A26 OK ' + successLeaf +
+                                    'A41 OK ' + successLeaf +
                                     ' • ' + allohaHumanBytes(self.stats.loaded) +
                                     ' • C' + self.stats.chunkCount +
                                     ' • ' + successInfo.tokenKind +
@@ -5248,7 +5473,7 @@
 
                     try {
                         notify(
-                            'A26 FAIL ' + failedLeaf +
+                            'A41 FAIL ' + failedLeaf +
                             ' • H' + (status || 0) +
                             ' • ' + acceptsControlsKind + edgeLen +
                             ' • M' + (allohaActiveMirrorNumber() || '?') +
@@ -5621,12 +5846,11 @@
         try {
             ALLOHA_NATIVE_HLS.loaderCtor =
                 AllohaNativeLoader;
-            Hls.DefaultConfig.loader =
-                AllohaNativeLoader;
             ALLOHA_NATIVE_HLS.installed = true;
+            installMnogoTvHlsRouter();
 
             log(
-                'Alloha native Hls loader installed'
+                'Alloha native Hls delegate registered'
             );
 
             return true;
@@ -6207,12 +6431,15 @@
          * providers. This is especially important after several source
          * switches in one Lampa session.
          */
-        activateProviderHlsLoader(
-            source && source.type
-        );
+        var providerSessionId =
+            prepareProviderRuntime(
+                source && source.type
+            );
 
         log('play', {
             source: source && source.type,
+            session: providerSessionId,
+            isolation: 'v4.1',
             runas: 'lampa',
             transport: 'native',
             url: first.url
@@ -7603,7 +7830,8 @@
                         'Авто'
                     ) +
                     ' • ' +
-                    (resolved.resolvedBy || 'resolver')
+                    (resolved.resolvedBy || 'resolver') +
+                    ' • isolated'
                 );
 
                 playResolved(
