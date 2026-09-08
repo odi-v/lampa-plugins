@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.20-native';
+    var VERSION = '4.0.21-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3529,7 +3529,7 @@
 
 
     /*
-     * Alloha native adapter v4.0.20
+     * Alloha native adapter v4.0.21
      *
      * Real chain captured in mnogotv.com2.har (2026-09-07):
      *
@@ -4198,7 +4198,7 @@
 
 
     /*
-     * v4.0.20: Alloha HLS transport.
+     * v4.0.21: Alloha HLS transport + CDN mirror failover.
      *
      * HAR proves that /bnsi success is only half of the job:
      *   1) master.m3u8 uses Accepts-Controls = Borth fingerprint (64 hex);
@@ -4217,10 +4217,15 @@
         guardId: '',
         edgeHash: '',
         baseHost: '',
+        primaryBase: '',
+        mirrorBases: [],
+        activeBase: '',
+        failedUrls: {},
         ws: null,
         wsTimer: null,
         heartbeatTimer: null,
         lastRequest: null,
+        lastMirrorSwitch: null,
         lastError: null
     };
 
@@ -4232,6 +4237,79 @@
         } catch (e) {
             return false;
         }
+    }
+
+    function allohaHlsBase(url) {
+        try {
+            var clean = stripHash(url);
+            return clean.slice(0, clean.lastIndexOf('/') + 1);
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function allohaUniqueBases(urls) {
+        var out = [];
+
+        (urls || []).forEach(function (url) {
+            var base = allohaHlsBase(url);
+            if (base && out.indexOf(base) < 0) out.push(base);
+        });
+
+        return out;
+    }
+
+    function allohaRewriteToActiveBase(url) {
+        var clean = stripHash(url);
+        var bases = ALLOHA_NATIVE_HLS.mirrorBases || [];
+        var active = ALLOHA_NATIVE_HLS.activeBase || '';
+
+        if (!active || !bases.length) return clean;
+
+        for (var i = 0; i < bases.length; i++) {
+            if (clean.indexOf(bases[i]) === 0) {
+                return active + clean.slice(bases[i].length);
+            }
+        }
+
+        return clean;
+    }
+
+    function allohaSwitchMirror(failedUrl) {
+        var clean = stripHash(failedUrl);
+        var bases = ALLOHA_NATIVE_HLS.mirrorBases || [];
+
+        if (bases.length < 2) return false;
+
+        var current = '';
+        for (var i = 0; i < bases.length; i++) {
+            if (clean.indexOf(bases[i]) === 0) {
+                current = bases[i];
+                break;
+            }
+        }
+
+        if (!current) current = ALLOHA_NATIVE_HLS.activeBase || bases[0];
+
+        var idx = bases.indexOf(current);
+        var next = bases[(idx + 1) % bases.length];
+
+        if (!next || next === current) return false;
+
+        ALLOHA_NATIVE_HLS.activeBase = next;
+        ALLOHA_NATIVE_HLS.lastMirrorSwitch = {
+            from: current,
+            to: next,
+            failedUrl: clean,
+            ts: Date.now()
+        };
+
+        try {
+            window.__mnogotv_alloha_debug = ALLOHA_NATIVE_HLS;
+        } catch (eDbgMirror) {}
+
+        log('Alloha CDN mirror switched', ALLOHA_NATIVE_HLS.lastMirrorSwitch);
+        return true;
     }
 
     function allohaEdgePayload(type, quality, audioId) {
@@ -4413,11 +4491,31 @@
         return true;
     }
 
-    function configureAllohaNativeHls(url, headers, guardId) {
+    function configureAllohaNativeHls(url, headers, guardId, mirrors) {
         ALLOHA_NATIVE_HLS.headers = headers || {};
         ALLOHA_NATIVE_HLS.guardId = String(guardId || '');
         ALLOHA_NATIVE_HLS.edgeHash = '';
         ALLOHA_NATIVE_HLS.baseHost = '';
+        ALLOHA_NATIVE_HLS.primaryBase = allohaHlsBase(url);
+        ALLOHA_NATIVE_HLS.mirrorBases = allohaUniqueBases(
+            (mirrors && mirrors.length ? mirrors : [url])
+        );
+        if (
+            ALLOHA_NATIVE_HLS.primaryBase &&
+            ALLOHA_NATIVE_HLS.mirrorBases.indexOf(
+                ALLOHA_NATIVE_HLS.primaryBase
+            ) < 0
+        ) {
+            ALLOHA_NATIVE_HLS.mirrorBases.unshift(
+                ALLOHA_NATIVE_HLS.primaryBase
+            );
+        }
+        ALLOHA_NATIVE_HLS.activeBase =
+            ALLOHA_NATIVE_HLS.primaryBase ||
+            ALLOHA_NATIVE_HLS.mirrorBases[0] ||
+            '';
+        ALLOHA_NATIVE_HLS.failedUrls = {};
+        ALLOHA_NATIVE_HLS.lastMirrorSwitch = null;
 
         try {
             ALLOHA_NATIVE_HLS.baseHost =
@@ -4488,10 +4586,12 @@
             this.context = context;
             this.stats = hlsNativeStats();
 
-            var requestUrl =
+            var originalRequestUrl =
                 stripHash(context && context.url || '');
+            var requestUrl =
+                allohaRewriteToActiveBase(originalRequestUrl);
 
-            if (!isAllohaCdnUrl(requestUrl)) {
+            if (!isAllohaCdnUrl(originalRequestUrl)) {
                 this.fallback = new OriginalLoader(this.config);
                 this.fallback.load(context, config, callbacks);
                 this.stats = this.fallback.stats || this.stats;
@@ -4532,10 +4632,11 @@
                             ALLOHA_NATIVE_HLS.guardId
                         );
 
-                headers.Accept =
-                    isBinary
-                        ? '*/*'
-                        : 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*;q=0.8';
+                /*
+                 * Real Alloha requests in the HAR use a wildcard Accept header for master, level,
+                 * init and fragments. Keep the request shape literal.
+                 */
+                headers.Accept = '*/*';
 
                 if (
                     context &&
@@ -4603,7 +4704,9 @@
                             context.responseType ||
                             ''
                         ),
+                    originalRequestUrl: originalRequestUrl,
                     requestUrl: requestUrl,
+                    activeBase: ALLOHA_NATIVE_HLS.activeBase,
                     acceptsControls:
                         headers['Accepts-Controls'],
                     hasAuth:
@@ -4660,6 +4763,11 @@
 
                                 self.stats.chunkCount = 1;
                                 ALLOHA_NATIVE_HLS.lastError = null;
+                                try {
+                                    delete ALLOHA_NATIVE_HLS.failedUrls[
+                                        originalRequestUrl
+                                    ];
+                                } catch (eClearFail) {}
 
                                 callbacks.onSuccess(
                                     {
@@ -4715,6 +4823,23 @@
                                     'native network error'
                                 );
 
+                            ALLOHA_NATIVE_HLS.failedUrls[
+                                originalRequestUrl
+                            ] = (
+                                ALLOHA_NATIVE_HLS.failedUrls[
+                                    originalRequestUrl
+                                ] || 0
+                            ) + 1;
+
+                            /*
+                             * /bnsi gives each quality as "primary or mirror".
+                             * v4.0.20 preserved the second URL but never used it.
+                             * Switch the whole relative HLS tree before Hls.js
+                             * performs its next fragment retry.
+                             */
+                            var mirrorSwitched =
+                                allohaSwitchMirror(requestUrl);
+
                             ALLOHA_NATIVE_HLS.lastError = {
                                 phase:
                                     isBinary
@@ -4723,6 +4848,9 @@
                                 code: status || 0,
                                 text: nativeError,
                                 requestUrl: requestUrl,
+                                originalRequestUrl: originalRequestUrl,
+                                mirrorSwitched: mirrorSwitched,
+                                activeBase: ALLOHA_NATIVE_HLS.activeBase,
                                 acceptsControls:
                                     headers['Accepts-Controls']
                             };
@@ -4975,7 +5103,8 @@
                                 configureAllohaNativeHls(
                                     picked.selected.url,
                                     hlsHeaders,
-                                    guardId
+                                    guardId,
+                                    picked.selected.mirrors
                                 );
 
                             var edgeSocketStarted =
@@ -5010,6 +5139,12 @@
                                     (hlsNativeReady ? 'native' : 'stock') +
                                     ' • edge ' +
                                     (edgeSocketStarted ? 'ws' : 'no-ws') +
+                                    (
+                                        picked.selected.mirrors &&
+                                        picked.selected.mirrors.length > 1
+                                            ? ' • mirror2'
+                                            : ''
+                                    ) +
                                     ' • ' +
                                     (
                                         voiceChoice &&
