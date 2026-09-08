@@ -1,8 +1,8 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.1.4-isolated-auto-fallback';
-    var PLUGIN_ID = 'mnogotv_v414_native';
+    var VERSION = '4.1.5-r2-isolated-ws-dashfix';
+    var PLUGIN_ID = 'mnogotv_v415r2_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
 
@@ -5516,7 +5516,7 @@
 
             try {
                 notify(
-                    'A415 AUTO → ' +
+                    'A415R2 AUTO → ' +
                     label +
                     (
                         socketStarted
@@ -5747,7 +5747,7 @@
 
             if (!ALLOHA_NATIVE_HLS.wsReadyNotified) {
                 ALLOHA_NATIVE_HLS.wsReadyNotified = true;
-                try { notify('A415 WS READY'); } catch (eNotifyWsReady) {}
+                try { notify('A415R2 WS READY'); } catch (eNotifyWsReady) {}
             }
 
             allohaPushHistory({
@@ -5784,7 +5784,7 @@
                 if (!ALLOHA_NATIVE_HLS.edgeNotified) {
                     ALLOHA_NATIVE_HLS.edgeNotified = true;
                     try {
-                        notify('A415 EDGE OK • 32');
+                        notify('A415R2 EDGE OK • 32');
                     } catch (eNotifyEdge) {}
                 }
 
@@ -5926,7 +5926,7 @@
                     if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
                         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
                         try {
-                            notify('A415 EDGE TIMEOUT • guard64');
+                            notify('A415R2 EDGE TIMEOUT • guard64');
                         } catch (eNotifyEdgeTimeout) {}
                     }
 
@@ -6280,7 +6280,7 @@
                         if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 1) {
                             try {
                                 notify(
-                                    'A415 OK ' + successLeaf +
+                                    'A415R2 OK ' + successLeaf +
                                     ' • ' + allohaHumanBytes(self.stats.loaded) +
                                     ' • C' + self.stats.chunkCount +
                                     ' • ' + successInfo.tokenKind +
@@ -6517,7 +6517,7 @@
 
                     try {
                         notify(
-                            'A415 FAIL ' + failedLeaf +
+                            'A415R2 FAIL ' + failedLeaf +
                             ' • H' + (status || 0) +
                             ' • ' + acceptsControlsKind + edgeLen +
                             ' • M' + (allohaActiveMirrorNumber() || '?') +
