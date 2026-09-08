@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.23-native';
+    var VERSION = '4.0.24-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4171,6 +4171,129 @@
         };
     }
 
+
+    /*
+     * v4.0.24: do not assume that every quality listed by /bnsi is actually
+     * fetchable for this title/session. Real-device tests proved:
+     *   - multi-quality titles can expose 1080p that answers HTTP 403;
+     *   - the same title works at 480p;
+     *   - titles that expose only 1080p can work normally.
+     *
+     * Probe the actual master.m3u8 with the exact Alloha guard/auth headers
+     * before handing the URL to Hls.js. Auto walks from highest to lowest.
+     * Explicit quality walks downward from the requested ceiling.
+     */
+    function allohaOrderedVariants(picked, qualityLabel) {
+        var variants =
+            picked && Array.isArray(picked.variants)
+                ? picked.variants.slice()
+                : [];
+
+        variants.sort(function (a, b) {
+            return Number(b.quality || 0) - Number(a.quality || 0);
+        });
+
+        var wanted = parseInt(
+            String(qualityLabel || '').replace(/[^\d]/g, ''),
+            10
+        );
+
+        if (!wanted) return variants;
+
+        var lower = variants.filter(function (v) {
+            return Number(v.quality || 0) <= wanted;
+        });
+
+        var higher = variants.filter(function (v) {
+            return Number(v.quality || 0) > wanted;
+        });
+
+        return lower.concat(higher);
+    }
+
+    function allohaProbeHlsVariant(
+        picked,
+        qualityLabel,
+        headers,
+        ok,
+        fail
+    ) {
+        var candidates = allohaOrderedVariants(picked, qualityLabel);
+        var candidateIndex = 0;
+        var errors = [];
+
+        function nextCandidate() {
+            if (candidateIndex >= candidates.length) {
+                fail(new Error(
+                    'Alloha: ни один master.m3u8 не прошёл проверку' +
+                    (errors.length ? ' • ' + errors.join(' | ') : '')
+                ));
+                return;
+            }
+
+            var variant = candidates[candidateIndex++];
+            var mirrors =
+                variant && Array.isArray(variant.mirrors) &&
+                variant.mirrors.length
+                    ? variant.mirrors.slice()
+                    : [variant && variant.url];
+
+            mirrors = mirrors.filter(Boolean);
+
+            var mirrorIndex = 0;
+
+            function nextMirror() {
+                if (mirrorIndex >= mirrors.length) {
+                    nextCandidate();
+                    return;
+                }
+
+                var url = mirrors[mirrorIndex++];
+                var qlabel =
+                    variant && variant.label
+                        ? variant.label
+                        : String(variant && variant.quality || '?') + 'p';
+
+                nativeText(
+                    url,
+                    headers,
+                    function (manifest) {
+                        if (!looksLikeManifest(manifest)) {
+                            errors.push(
+                                qlabel + '/M' + mirrorIndex + ': not-m3u8'
+                            );
+                            nextMirror();
+                            return;
+                        }
+
+                        var orderedMirrors = [url];
+
+                        mirrors.forEach(function (item) {
+                            if (item !== url) orderedMirrors.push(item);
+                        });
+
+                        ok({
+                            label: qlabel,
+                            quality: Number(variant.quality || 0),
+                            url: url,
+                            mirrors: orderedMirrors
+                        }, errors);
+                    },
+                    function (e) {
+                        errors.push(
+                            qlabel + '/M' + mirrorIndex + ': ' + errText(e)
+                        );
+                        nextMirror();
+                    }
+                );
+            }
+
+            nextMirror();
+        }
+
+        nextCandidate();
+    }
+
     function allohaSubs(tracks) {
         if (!Array.isArray(tracks)) return [];
 
@@ -4198,7 +4321,7 @@
 
 
     /*
-     * v4.0.23: Alloha HLS chunked native transport.
+     * v4.0.24: Alloha HLS quality-probe + chunked native transport.
      *
      * HAR proves that /bnsi success is only half of the job:
      *   1) master.m3u8 uses Accepts-Controls = Borth fingerprint (64 hex);
@@ -4489,7 +4612,7 @@
                 if (!ALLOHA_NATIVE_HLS.edgeNotified) {
                     ALLOHA_NATIVE_HLS.edgeNotified = true;
                     try {
-                        notify('A23 EDGE OK • 32');
+                        notify('A24 EDGE OK • 32');
                     } catch (eNotifyEdge) {}
                 }
 
@@ -4542,7 +4665,7 @@
                     if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
                         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
                         try {
-                            notify('A23 EDGE TIMEOUT • guard64');
+                            notify('A24 EDGE TIMEOUT • guard64');
                         } catch (eNotifyEdgeTimeout) {}
                     }
 
@@ -4851,7 +4974,7 @@
                         if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 1) {
                             try {
                                 notify(
-                                    'A23 OK ' + successLeaf +
+                                    'A24 OK ' + successLeaf +
                                     ' • ' + allohaHumanBytes(self.stats.loaded) +
                                     ' • C' + self.stats.chunkCount +
                                     ' • edge' + successInfo.edgeLength +
@@ -4908,7 +5031,7 @@
 
                     try {
                         notify(
-                            'A23 DECODE ' + allohaHlsLeaf(requestUrl) +
+                            'A24 DECODE ' + allohaHlsLeaf(requestUrl) +
                             ' • edge' +
                             String(
                                 ALLOHA_NATIVE_HLS.edgeHash ||
@@ -5012,7 +5135,7 @@
 
                     try {
                         notify(
-                            'A23 FAIL ' + failedLeaf +
+                            'A24 FAIL ' + failedLeaf +
                             ' • H' + (status || 0) +
                             ' • edge' + edgeLen +
                             ' • M' + (allohaActiveMirrorNumber() || '?') +
@@ -5522,61 +5645,113 @@
                                     'Bearer ' + streamToken;
                             }
 
-                            var hlsNativeReady =
-                                configureAllohaNativeHls(
-                                    picked.selected.url,
-                                    hlsHeaders,
-                                    guardId,
-                                    picked.selected.mirrors
-                                );
-
-                            var edgeSocketStarted =
-                                startAllohaEdgeSocket(
-                                    json,
-                                    picked.selected.label ||
+                            /*
+                             * Probe the real master URL before playback.
+                             * A /bnsi quality key is only a candidate, not a
+                             * guarantee that this session may fetch it.
+                             */
+                            allohaProbeHlsVariant(
+                                picked,
+                                qualityLabel,
+                                hlsHeaders,
+                                function (selectedVariant, probeErrors) {
+                                    var requestedVariant =
+                                        picked.selected &&
+                                        picked.selected.label ||
                                         qualityLabel ||
-                                        'Авто',
-                                    picked.audioId
-                                );
+                                        'Авто';
 
-                            ok({
-                                provider: 'Alloha',
-                                directUrl: picked.selected.url,
-                                directHeaders: hlsHeaders,
-                                relayUrl: '',
-                                relayReady: false,
-                                externalDirect: false,
-                                subtitles: allohaSubs(json.tracks || []),
-                                tracks: [],
-                                hlsQualities: picked.variants,
-                                quality:
-                                    picked.selected.label ||
-                                    qualityLabel ||
-                                    'Авто',
-                                resolvedBy:
-                                    'alloha native • bnsi same-origin' +
-                                    ' • media ' + media.id +
-                                    ' • guard ' +
-                                    (streamToken ? 'full' : 'no-auth-token') +
-                                    ' • hls ' +
-                                    (hlsNativeReady ? 'native' : 'stock') +
-                                    ' • edge ' +
-                                    (edgeSocketStarted ? 'ws' : 'no-ws') +
-                                    ' • chunk1m' +
-                                    (
-                                        picked.selected.mirrors &&
-                                        picked.selected.mirrors.length > 1
-                                            ? ' • 2cdn'
-                                            : ''
-                                    ) +
-                                    ' • ' +
-                                    (
-                                        voiceChoice &&
-                                        voiceChoice.label
-                                            ? voiceChoice.label
-                                            : 'Авто'
-                                    )
-                            });
+                                    var fellBack =
+                                        picked.selected &&
+                                        selectedVariant.label !==
+                                            picked.selected.label;
+
+                                    if (fellBack) {
+                                        try {
+                                            notify(
+                                                'A24 QUALITY • ' +
+                                                requestedVariant +
+                                                ' → ' +
+                                                selectedVariant.label
+                                            );
+                                        } catch (eNotifyQuality) {}
+                                    }
+
+                                    allohaPushHistory({
+                                        phase: 'quality-probe-ok',
+                                        requested: requestedVariant,
+                                        selected: selectedVariant.label,
+                                        fallback: !!fellBack,
+                                        probeErrors: probeErrors || [],
+                                        ts: Date.now()
+                                    });
+
+                                    var hlsNativeReady =
+                                        configureAllohaNativeHls(
+                                            selectedVariant.url,
+                                            hlsHeaders,
+                                            guardId,
+                                            selectedVariant.mirrors
+                                        );
+
+                                    var edgeSocketStarted =
+                                        startAllohaEdgeSocket(
+                                            json,
+                                            selectedVariant.label ||
+                                                qualityLabel ||
+                                                'Авто',
+                                            picked.audioId
+                                        );
+
+                                    ok({
+                                        provider: 'Alloha',
+                                        directUrl: selectedVariant.url,
+                                        directHeaders: hlsHeaders,
+                                        relayUrl: '',
+                                        relayReady: false,
+                                        externalDirect: false,
+                                        subtitles: allohaSubs(json.tracks || []),
+                                        tracks: [],
+                                        hlsQualities: picked.variants,
+                                        quality:
+                                            selectedVariant.label ||
+                                            qualityLabel ||
+                                            'Авто',
+                                        resolvedBy:
+                                            'alloha native • bnsi same-origin' +
+                                            ' • media ' + media.id +
+                                            ' • guard ' +
+                                            (streamToken ? 'full' : 'no-auth-token') +
+                                            ' • qprobe ' +
+                                            selectedVariant.label +
+                                            (fellBack ? ' fallback' : '') +
+                                            ' • hls ' +
+                                            (hlsNativeReady ? 'native' : 'stock') +
+                                            ' • edge ' +
+                                            (edgeSocketStarted ? 'ws' : 'no-ws') +
+                                            ' • chunk1m' +
+                                            (
+                                                selectedVariant.mirrors &&
+                                                selectedVariant.mirrors.length > 1
+                                                    ? ' • 2cdn'
+                                                    : ''
+                                            ) +
+                                            ' • ' +
+                                            (
+                                                voiceChoice &&
+                                                voiceChoice.label
+                                                    ? voiceChoice.label
+                                                    : 'Авто'
+                                            )
+                                    });
+                                },
+                                function (eProbe) {
+                                    fail(new Error(
+                                        'Alloha master probe: ' +
+                                        errText(eProbe)
+                                    ));
+                                }
+                            );
                         },
                         function (eApi) {
                             fail(new Error(
