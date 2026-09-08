@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.22-native';
+    var VERSION = '4.0.23-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4198,7 +4198,7 @@
 
 
     /*
-     * v4.0.22: Alloha HLS transport diagnostics + HAR-matched 480p probe.
+     * v4.0.23: Alloha HLS chunked native transport.
      *
      * HAR proves that /bnsi success is only half of the job:
      *   1) master.m3u8 uses Accepts-Controls = Borth fingerprint (64 hex);
@@ -4489,7 +4489,7 @@
                 if (!ALLOHA_NATIVE_HLS.edgeNotified) {
                     ALLOHA_NATIVE_HLS.edgeNotified = true;
                     try {
-                        notify('A22 EDGE OK • 32');
+                        notify('A23 EDGE OK • 32');
                     } catch (eNotifyEdge) {}
                 }
 
@@ -4542,7 +4542,7 @@
                     if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
                         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
                         try {
-                            notify('A22 EDGE TIMEOUT • guard64');
+                            notify('A23 EDGE TIMEOUT • guard64');
                         } catch (eNotifyEdgeTimeout) {}
                     }
 
@@ -4796,268 +4796,528 @@
                     ALLOHA_NATIVE_HLS.lastRequest
                 );
 
+                function successData(data, chunkCount) {
+                    if (self.stats.aborted) return;
+
+                    var now =
+                        (
+                            window.performance &&
+                            performance.now
+                        )
+                            ? performance.now()
+                            : Date.now();
+
+                    self.stats.loading.first =
+                        self.stats.loading.first || now;
+                    self.stats.loading.end = now;
+                    self.stats.loaded =
+                        self.stats.total =
+                            isBinary
+                                ? (data && data.byteLength || 0)
+                                : String(data || '').length;
+                    self.stats.chunkCount =
+                        Math.max(1, Number(chunkCount || 1));
+
+                    ALLOHA_NATIVE_HLS.lastError = null;
+
+                    var successLeaf = allohaHlsLeaf(requestUrl);
+                    var successInfo = {
+                        phase:
+                            isBinary
+                                ? 'binary-ok'
+                                : contextType + '-ok',
+                        leaf: successLeaf,
+                        bytes: self.stats.loaded || 0,
+                        chunks: self.stats.chunkCount,
+                        edgeLength: String(
+                            ALLOHA_NATIVE_HLS.edgeHash ||
+                            ALLOHA_NATIVE_HLS.guardId ||
+                            ''
+                        ).length,
+                        mirror: allohaActiveMirrorNumber(),
+                        ts: Date.now()
+                    };
+
+                    ALLOHA_NATIVE_HLS.lastSuccess = successInfo;
+                    allohaPushHistory(successInfo);
+
+                    if (/\.m4s(?:$|\?)/i.test(requestUrl)) {
+                        ALLOHA_NATIVE_HLS.fragmentSuccessCount++;
+
+                        /*
+                         * One confirmation is enough now. v4.0.22 already
+                         * proved ordinary ~1 MB fragments work.
+                         */
+                        if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 1) {
+                            try {
+                                notify(
+                                    'A23 OK ' + successLeaf +
+                                    ' • ' + allohaHumanBytes(self.stats.loaded) +
+                                    ' • C' + self.stats.chunkCount +
+                                    ' • edge' + successInfo.edgeLength +
+                                    ' • M' + (successInfo.mirror || '?')
+                                );
+                            } catch (eNotifyOk) {}
+                        }
+                    }
+
+                    try {
+                        delete ALLOHA_NATIVE_HLS.failedUrls[
+                            originalRequestUrl
+                        ];
+                    } catch (eClearFail) {}
+
+                    callbacks.onSuccess(
+                        {
+                            url: context.url,
+                            data: data
+                        },
+                        self.stats,
+                        context,
+                        null
+                    );
+                }
+
+                function decodeFailure(decodeError) {
+                    ALLOHA_NATIVE_HLS.lastError = {
+                        phase:
+                            isBinary
+                                ? 'fragment-decode'
+                                : contextType + '-decode',
+                        code: 0,
+                        text: errText(decodeError),
+                        requestUrl: requestUrl
+                    };
+
+                    try {
+                        window.__mnogotv_alloha_debug =
+                            ALLOHA_NATIVE_HLS;
+                    } catch (eDbg4) {}
+
+                    allohaPushHistory({
+                        phase: ALLOHA_NATIVE_HLS.lastError.phase,
+                        leaf: allohaHlsLeaf(requestUrl),
+                        edgeLength: String(
+                            ALLOHA_NATIVE_HLS.edgeHash ||
+                            ALLOHA_NATIVE_HLS.guardId ||
+                            ''
+                        ).length,
+                        mirror: allohaActiveMirrorNumber(),
+                        ts: Date.now()
+                    });
+
+                    try {
+                        notify(
+                            'A23 DECODE ' + allohaHlsLeaf(requestUrl) +
+                            ' • edge' +
+                            String(
+                                ALLOHA_NATIVE_HLS.edgeHash ||
+                                ALLOHA_NATIVE_HLS.guardId ||
+                                ''
+                            ).length +
+                            ' • M' + (allohaActiveMirrorNumber() || '?')
+                        );
+                    } catch (eNotifyDecode) {}
+
+                    callbacks.onError(
+                        {
+                            code: 0,
+                            text: errText(decodeError)
+                        },
+                        context,
+                        null,
+                        self.stats
+                    );
+                }
+
+                function networkFailure(a, c, allowEof416) {
+                    if (self.stats.aborted) return false;
+
+                    var status =
+                        a &&
+                        a.status !== undefined
+                            ? Number(a.status)
+                            : 0;
+
+                    /*
+                     * A file whose length is an exact multiple of our chunk
+                     * size needs one final probe beyond EOF. HTTP 416 is the
+                     * clean terminator in that case, not a playback failure.
+                     */
+                    if (allowEof416 && status === 416) {
+                        return true;
+                    }
+
+                    var nativeError =
+                        errText(
+                            a ||
+                            c ||
+                            'native network error'
+                        );
+
+                    ALLOHA_NATIVE_HLS.failedUrls[
+                        originalRequestUrl
+                    ] = (
+                        ALLOHA_NATIVE_HLS.failedUrls[
+                            originalRequestUrl
+                        ] || 0
+                    ) + 1;
+
+                    var mirrorSwitched =
+                        allohaSwitchMirror(requestUrl);
+
+                    ALLOHA_NATIVE_HLS.lastError = {
+                        phase:
+                            isBinary
+                                ? 'fragment-network'
+                                : contextType + '-network',
+                        code: status || 0,
+                        text: nativeError,
+                        requestUrl: requestUrl,
+                        originalRequestUrl: originalRequestUrl,
+                        mirrorSwitched: mirrorSwitched,
+                        activeBase: ALLOHA_NATIVE_HLS.activeBase,
+                        acceptsControls:
+                            headers['Accepts-Controls']
+                    };
+
+                    try {
+                        window.__mnogotv_alloha_debug =
+                            ALLOHA_NATIVE_HLS;
+                    } catch (eDbg5) {}
+
+                    log(
+                        'Alloha native loader network error',
+                        ALLOHA_NATIVE_HLS.lastError
+                    );
+
+                    var failedLeaf = allohaHlsLeaf(requestUrl);
+                    var edgeLen = String(
+                        ALLOHA_NATIVE_HLS.edgeHash ||
+                        ALLOHA_NATIVE_HLS.guardId ||
+                        ''
+                    ).length;
+                    var previousOk = ALLOHA_NATIVE_HLS.lastSuccess;
+
+                    allohaPushHistory({
+                        phase: ALLOHA_NATIVE_HLS.lastError.phase,
+                        leaf: failedLeaf,
+                        status: status || 0,
+                        edgeLength: edgeLen,
+                        mirror: allohaActiveMirrorNumber(),
+                        mirrorSwitched: mirrorSwitched,
+                        previous: previousOk && previousOk.leaf || '',
+                        ts: Date.now()
+                    });
+
+                    try {
+                        notify(
+                            'A23 FAIL ' + failedLeaf +
+                            ' • H' + (status || 0) +
+                            ' • edge' + edgeLen +
+                            ' • M' + (allohaActiveMirrorNumber() || '?') +
+                            (
+                                previousOk && previousOk.leaf
+                                    ? ' • prev ' + previousOk.leaf
+                                    : ''
+                            )
+                        );
+                    } catch (eNoty) {}
+
+                    callbacks.onError(
+                        {
+                            code: status || 0,
+                            text: nativeError
+                        },
+                        context,
+                        a || null,
+                        self.stats
+                    );
+
+                    return false;
+                }
+
+                function newNativeRequest() {
+                    var req = null;
+
+                    try {
+                        req = new Lampa.Reguest();
+                    } catch (eReq1) {
+                        try {
+                            req = new Lampa.Request();
+                        } catch (eReq2) {}
+                    }
+
+                    if (
+                        !req ||
+                        typeof req.native !== 'function'
+                    ) {
+                        return null;
+                    }
+
+                    try {
+                        if (req.timeout) {
+                            req.timeout(
+                                Math.max(5000, timeout)
+                            );
+                        }
+                    } catch (eReq3) {}
+
+                    self.network = req;
+                    return req;
+                }
+
+                function joinArrayBuffers(parts, total) {
+                    var out = new Uint8Array(total || 0);
+                    var offset = 0;
+
+                    parts.forEach(function (part) {
+                        var view = new Uint8Array(part);
+                        out.set(view, offset);
+                        offset += view.byteLength;
+                    });
+
+                    return out.buffer;
+                }
+
+                function loadBinaryChunked() {
+                    /*
+                     * The successful HAR advertises:
+                     *     Accept-Ranges: bytes
+                     * on vkvideo.cloud HLS resources.
+                     *
+                     * v4.0.22 proved ~1.1 MB raw fragments survive the native
+                     * bridge. Keep each bridge response <= 1 MiB. This avoids
+                     * sending a multi-megabyte raw fragment as a ~4/3 larger
+                     * base64 string through Android's bridge.
+                     */
+                    var CHUNK_SIZE = 1024 * 1024;
+                    var parts = [];
+                    var total = 0;
+                    var chunkCount = 0;
+
+                    var requestedStart =
+                        (
+                            context &&
+                            Number(context.rangeEnd) >
+                                Number(context.rangeStart) &&
+                            Number(context.rangeEnd) > 0
+                        )
+                            ? Number(context.rangeStart || 0)
+                            : 0;
+
+                    var requestedEndExclusive =
+                        (
+                            context &&
+                            Number(context.rangeEnd) >
+                                Number(context.rangeStart) &&
+                            Number(context.rangeEnd) > 0
+                        )
+                            ? Number(context.rangeEnd)
+                            : 0;
+
+                    var cursor = requestedStart;
+
+                    function finishChunks() {
+                        try {
+                            successData(
+                                joinArrayBuffers(parts, total),
+                                chunkCount
+                            );
+                        } catch (eJoin) {
+                            decodeFailure(eJoin);
+                        }
+                    }
+
+                    function nextChunk() {
+                        if (self.stats.aborted) return;
+
+                        if (
+                            requestedEndExclusive &&
+                            cursor >= requestedEndExclusive
+                        ) {
+                            finishChunks();
+                            return;
+                        }
+
+                        var endInclusive =
+                            cursor + CHUNK_SIZE - 1;
+
+                        if (
+                            requestedEndExclusive &&
+                            endInclusive >= requestedEndExclusive
+                        ) {
+                            endInclusive =
+                                requestedEndExclusive - 1;
+                        }
+
+                        var chunkHeaders = {};
+                        Object.keys(headers).forEach(function (key) {
+                            if (key !== 'Range') {
+                                chunkHeaders[key] = headers[key];
+                            }
+                        });
+
+                        chunkHeaders.Range =
+                            'bytes=' +
+                            cursor +
+                            '-' +
+                            endInclusive;
+
+                        var req = newNativeRequest();
+
+                        if (!req) {
+                            networkFailure(
+                                {
+                                    status: 0,
+                                    message:
+                                        'Lampa.Reguest.native unavailable'
+                                },
+                                null,
+                                false
+                            );
+                            return;
+                        }
+
+                        try {
+                            req.native(
+                                requestUrl,
+                                function (response) {
+                                    if (self.stats.aborted) return;
+
+                                    var part;
+
+                                    try {
+                                        part =
+                                            base64ToArrayBuffer(response);
+                                    } catch (eDecodePart) {
+                                        decodeFailure(eDecodePart);
+                                        return;
+                                    }
+
+                                    var size =
+                                        part && part.byteLength || 0;
+
+                                    /*
+                                     * If the CDN ignored Range and returned
+                                     * the complete object, use it once and
+                                     * stop instead of appending duplicates.
+                                     */
+                                    if (size > CHUNK_SIZE) {
+                                        parts = [part];
+                                        total = size;
+                                        chunkCount = 1;
+                                        finishChunks();
+                                        return;
+                                    }
+
+                                    parts.push(part);
+                                    total += size;
+                                    chunkCount++;
+
+                                    if (!size) {
+                                        finishChunks();
+                                        return;
+                                    }
+
+                                    cursor += size;
+
+                                    if (
+                                        requestedEndExclusive &&
+                                        cursor >= requestedEndExclusive
+                                    ) {
+                                        finishChunks();
+                                        return;
+                                    }
+
+                                    /*
+                                     * A short 206 response means EOF.
+                                     */
+                                    if (size < CHUNK_SIZE) {
+                                        finishChunks();
+                                        return;
+                                    }
+
+                                    nextChunk();
+                                },
+                                function (a, c) {
+                                    /*
+                                     * Exact CHUNK_SIZE multiple: the next
+                                     * range begins at EOF and receives 416.
+                                     */
+                                    if (
+                                        parts.length &&
+                                        networkFailure(a, c, true)
+                                    ) {
+                                        finishChunks();
+                                    }
+                                },
+                                false,
+                                {
+                                    dataType: 'base64',
+                                    headers: chunkHeaders
+                                }
+                            );
+                        } catch (eChunk) {
+                            networkFailure(
+                                {
+                                    status: 0,
+                                    message: errText(eChunk)
+                                },
+                                null,
+                                false
+                            );
+                        }
+                    }
+
+                    nextChunk();
+                }
+
+                /*
+                 * Text manifests are tiny and remain one native request.
+                 * Binary init/media resources use Range chunks.
+                 */
+                if (isBinary) {
+                    loadBinaryChunked();
+                    return;
+                }
+
                 try {
                     network.native(
                         requestUrl,
                         function (response) {
                             if (self.stats.aborted) return;
 
-                            var now =
-                                (
-                                    window.performance &&
-                                    performance.now
-                                )
-                                    ? performance.now()
-                                    : Date.now();
-
-                            self.stats.loading.first =
-                                self.stats.loading.first || now;
-                            self.stats.loading.end = now;
-
                             try {
-                                var data;
+                                var data =
+                                    typeof response === 'string'
+                                        ? response
+                                        : String(response || '');
 
-                                if (isBinary) {
-                                    data =
-                                        base64ToArrayBuffer(response);
-                                    self.stats.loaded =
-                                        self.stats.total =
-                                            data.byteLength || 0;
-                                }
-                                else {
-                                    data =
-                                        typeof response === 'string'
-                                            ? response
-                                            : String(response || '');
-                                    self.stats.loaded =
-                                        self.stats.total =
-                                            data.length || 0;
-                                }
-
-                                self.stats.chunkCount = 1;
-                                ALLOHA_NATIVE_HLS.lastError = null;
-
-                                var successLeaf = allohaHlsLeaf(requestUrl);
-                                var successInfo = {
-                                    phase: isBinary ? 'binary-ok' : contextType + '-ok',
-                                    leaf: successLeaf,
-                                    bytes: self.stats.loaded || 0,
-                                    edgeLength: String(
-                                        ALLOHA_NATIVE_HLS.edgeHash ||
-                                        ALLOHA_NATIVE_HLS.guardId ||
-                                        ''
-                                    ).length,
-                                    mirror: allohaActiveMirrorNumber(),
-                                    ts: Date.now()
-                                };
-
-                                ALLOHA_NATIVE_HLS.lastSuccess = successInfo;
-                                allohaPushHistory(successInfo);
-
-                                if (/\.m4s(?:$|\?)/i.test(requestUrl)) {
-                                    ALLOHA_NATIVE_HLS.fragmentSuccessCount++;
-
-                                    if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 2) {
-                                        try {
-                                            notify(
-                                                'A22 OK ' + successLeaf +
-                                                ' • ' + allohaHumanBytes(self.stats.loaded) +
-                                                ' • edge' + successInfo.edgeLength +
-                                                ' • M' + (successInfo.mirror || '?')
-                                            );
-                                        } catch (eNotifyOk) {}
-                                    }
-                                }
-
-                                try {
-                                    delete ALLOHA_NATIVE_HLS.failedUrls[
-                                        originalRequestUrl
-                                    ];
-                                } catch (eClearFail) {}
-
-                                callbacks.onSuccess(
-                                    {
-                                        url: context.url,
-                                        data: data
-                                    },
-                                    self.stats,
-                                    context,
-                                    null
-                                );
+                                successData(data, 1);
                             }
                             catch (decodeError) {
-                                ALLOHA_NATIVE_HLS.lastError = {
-                                    phase:
-                                        isBinary
-                                            ? 'fragment-decode'
-                                            : contextType + '-decode',
-                                    code: 0,
-                                    text: errText(decodeError),
-                                    requestUrl: requestUrl
-                                };
-
-                                try {
-                                    window.__mnogotv_alloha_debug =
-                                        ALLOHA_NATIVE_HLS;
-                                } catch (eDbg4) {}
-
-                                allohaPushHistory({
-                                    phase: ALLOHA_NATIVE_HLS.lastError.phase,
-                                    leaf: allohaHlsLeaf(requestUrl),
-                                    edgeLength: String(
-                                        ALLOHA_NATIVE_HLS.edgeHash ||
-                                        ALLOHA_NATIVE_HLS.guardId ||
-                                        ''
-                                    ).length,
-                                    mirror: allohaActiveMirrorNumber(),
-                                    ts: Date.now()
-                                });
-
-                                try {
-                                    notify(
-                                        'A22 DECODE ' + allohaHlsLeaf(requestUrl) +
-                                        ' • edge' +
-                                        String(
-                                            ALLOHA_NATIVE_HLS.edgeHash ||
-                                            ALLOHA_NATIVE_HLS.guardId ||
-                                            ''
-                                        ).length +
-                                        ' • M' + (allohaActiveMirrorNumber() || '?')
-                                    );
-                                } catch (eNotifyDecode) {}
-
-                                callbacks.onError(
-                                    {
-                                        code: 0,
-                                        text:
-                                            errText(decodeError)
-                                    },
-                                    context,
-                                    null,
-                                    self.stats
-                                );
+                                decodeFailure(decodeError);
                             }
                         },
                         function (a, c) {
-                            if (self.stats.aborted) return;
-
-                            var status =
-                                a &&
-                                a.status !== undefined
-                                    ? Number(a.status)
-                                    : 0;
-
-                            var nativeError =
-                                errText(
-                                    a ||
-                                    c ||
-                                    'native network error'
-                                );
-
-                            ALLOHA_NATIVE_HLS.failedUrls[
-                                originalRequestUrl
-                            ] = (
-                                ALLOHA_NATIVE_HLS.failedUrls[
-                                    originalRequestUrl
-                                ] || 0
-                            ) + 1;
-
-                            /*
-                             * /bnsi gives each quality as "primary or mirror".
-                             * v4.0.20 preserved the second URL but never used it.
-                             * Switch the whole relative HLS tree before Hls.js
-                             * performs its next fragment retry.
-                             */
-                            var mirrorSwitched =
-                                allohaSwitchMirror(requestUrl);
-
-                            ALLOHA_NATIVE_HLS.lastError = {
-                                phase:
-                                    isBinary
-                                        ? 'fragment-network'
-                                        : contextType + '-network',
-                                code: status || 0,
-                                text: nativeError,
-                                requestUrl: requestUrl,
-                                originalRequestUrl: originalRequestUrl,
-                                mirrorSwitched: mirrorSwitched,
-                                activeBase: ALLOHA_NATIVE_HLS.activeBase,
-                                acceptsControls:
-                                    headers['Accepts-Controls']
-                            };
-
-                            try {
-                                window.__mnogotv_alloha_debug =
-                                    ALLOHA_NATIVE_HLS;
-                            } catch (eDbg5) {}
-
-                            log(
-                                'Alloha native loader network error',
-                                ALLOHA_NATIVE_HLS.lastError
-                            );
-
-                            var failedLeaf = allohaHlsLeaf(requestUrl);
-                            var edgeLen = String(
-                                ALLOHA_NATIVE_HLS.edgeHash ||
-                                ALLOHA_NATIVE_HLS.guardId ||
-                                ''
-                            ).length;
-                            var previousOk = ALLOHA_NATIVE_HLS.lastSuccess;
-
-                            allohaPushHistory({
-                                phase: ALLOHA_NATIVE_HLS.lastError.phase,
-                                leaf: failedLeaf,
-                                status: status || 0,
-                                edgeLength: edgeLen,
-                                mirror: allohaActiveMirrorNumber(),
-                                mirrorSwitched: mirrorSwitched,
-                                previous: previousOk && previousOk.leaf || '',
-                                ts: Date.now()
-                            });
-
-                            try {
-                                notify(
-                                    'A22 FAIL ' + failedLeaf +
-                                    ' • H' + (status || 0) +
-                                    ' • edge' + edgeLen +
-                                    ' • M' + (allohaActiveMirrorNumber() || '?') +
-                                    (
-                                        previousOk && previousOk.leaf
-                                            ? ' • prev ' + previousOk.leaf
-                                            : ''
-                                    )
-                                );
-                            } catch (eNoty) {}
-
-                            callbacks.onError(
-                                {
-                                    code: status || 0,
-                                    text: nativeError
-                                },
-                                context,
-                                a || null,
-                                self.stats
-                            );
+                            networkFailure(a, c, false);
                         },
                         false,
                         {
-                            dataType:
-                                isBinary
-                                    ? 'base64'
-                                    : 'text',
+                            dataType: 'text',
                             headers: headers
                         }
                     );
                 }
                 catch (e6) {
-                    callbacks.onError(
+                    networkFailure(
                         {
-                            code: 0,
-                            text: errText(e6)
+                            status: 0,
+                            message: errText(e6)
                         },
-                        context,
                         null,
-                        self.stats
+                        false
                     );
                 }
             }
@@ -5226,18 +5486,17 @@
                         },
                         function (json) {
                             /*
-                             * v4.0.22 diagnostic probe: the captured real
-                             * Alloha player selected 480p. Force the same
-                             * quality for one test so Android native bridge
-                             * carries ~0.5-1.3 MB fragments instead of much
-                             * larger 1080p fragments. This isolates transport
-                             * size/bridge pressure from auth/edge logic.
+                             * v4.0.22 proved that the whole Alloha chain is
+                             * correct when fragment payloads stay around 1 MB.
+                             * Restore the requested/Auto quality here.
+                             * v4.0.23 keeps large 720p/1080p fragments below
+                             * the Android native bridge pressure by fetching
+                             * binary resources with HTTP Range chunks.
                              */
-                            var probeQuality = '480p';
                             var picked =
                                 allohaPickHls(
                                     json,
-                                    probeQuality
+                                    qualityLabel
                                 );
 
                             if (
@@ -5275,7 +5534,8 @@
                                 startAllohaEdgeSocket(
                                     json,
                                     picked.selected.label ||
-                                        probeQuality,
+                                        qualityLabel ||
+                                        'Авто',
                                     picked.audioId
                                 );
 
@@ -5302,7 +5562,7 @@
                                     (hlsNativeReady ? 'native' : 'stock') +
                                     ' • edge ' +
                                     (edgeSocketStarted ? 'ws' : 'no-ws') +
-                                    ' • probe480' +
+                                    ' • chunk1m' +
                                     (
                                         picked.selected.mirrors &&
                                         picked.selected.mirrors.length > 1
