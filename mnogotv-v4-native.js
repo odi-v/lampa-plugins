@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.21-native';
+    var VERSION = '4.0.22-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4198,7 +4198,7 @@
 
 
     /*
-     * v4.0.21: Alloha HLS transport + CDN mirror failover.
+     * v4.0.22: Alloha HLS transport diagnostics + HAR-matched 480p probe.
      *
      * HAR proves that /bnsi success is only half of the job:
      *   1) master.m3u8 uses Accepts-Controls = Borth fingerprint (64 hex);
@@ -4226,7 +4226,13 @@
         heartbeatTimer: null,
         lastRequest: null,
         lastMirrorSwitch: null,
-        lastError: null
+        lastError: null,
+        edgeReceivedAt: 0,
+        edgeNotified: false,
+        edgeTimeoutNotified: false,
+        fragmentSuccessCount: 0,
+        lastSuccess: null,
+        history: []
     };
 
     function isAllohaCdnUrl(url) {
@@ -4257,6 +4263,43 @@
         });
 
         return out;
+    }
+
+    function allohaHlsLeaf(url) {
+        try {
+            var pathname = new URL(stripHash(url)).pathname || '';
+            return pathname.slice(pathname.lastIndexOf('/') + 1) || 'request';
+        } catch (e) {
+            var clean = stripHash(url);
+            return clean.slice(clean.lastIndexOf('/') + 1) || 'request';
+        }
+    }
+
+    function allohaActiveMirrorNumber() {
+        var bases = ALLOHA_NATIVE_HLS.mirrorBases || [];
+        var idx = bases.indexOf(ALLOHA_NATIVE_HLS.activeBase || '');
+        return idx >= 0 ? (idx + 1) : 0;
+    }
+
+    function allohaPushHistory(item) {
+        try {
+            ALLOHA_NATIVE_HLS.history.push(item);
+            if (ALLOHA_NATIVE_HLS.history.length > 24) {
+                ALLOHA_NATIVE_HLS.history.shift();
+            }
+            window.__mnogotv_alloha_debug = ALLOHA_NATIVE_HLS;
+        } catch (e) {}
+    }
+
+    function allohaHumanBytes(bytes) {
+        bytes = Number(bytes || 0);
+        if (bytes >= 1024 * 1024) {
+            return (bytes / (1024 * 1024)).toFixed(1) + 'MB';
+        }
+        if (bytes >= 1024) {
+            return Math.round(bytes / 1024) + 'KB';
+        }
+        return String(bytes) + 'B';
     }
 
     function allohaRewriteToActiveBase(url) {
@@ -4358,6 +4401,9 @@
     function startAllohaEdgeSocket(json, quality, audioId) {
         closeAllohaEdgeSocket();
         ALLOHA_NATIVE_HLS.edgeHash = '';
+        ALLOHA_NATIVE_HLS.edgeReceivedAt = 0;
+        ALLOHA_NATIVE_HLS.edgeNotified = false;
+        ALLOHA_NATIVE_HLS.edgeTimeoutNotified = false;
 
         if (
             !json ||
@@ -4437,11 +4483,21 @@
             ) {
                 ALLOHA_NATIVE_HLS.edgeHash =
                     String(data.edge_hash).toLowerCase();
+                ALLOHA_NATIVE_HLS.edgeReceivedAt = Date.now();
                 ALLOHA_NATIVE_HLS.lastError = null;
 
-                try {
-                    window.__mnogotv_alloha_debug = ALLOHA_NATIVE_HLS;
-                } catch (eDbg0) {}
+                if (!ALLOHA_NATIVE_HLS.edgeNotified) {
+                    ALLOHA_NATIVE_HLS.edgeNotified = true;
+                    try {
+                        notify('A22 EDGE OK • 32');
+                    } catch (eNotifyEdge) {}
+                }
+
+                allohaPushHistory({
+                    phase: 'edge-ok',
+                    edgeLength: ALLOHA_NATIVE_HLS.edgeHash.length,
+                    ts: Date.now()
+                });
 
                 log('Alloha edge hash updated', {
                     edgeHash: ALLOHA_NATIVE_HLS.edgeHash,
@@ -4483,6 +4539,19 @@
                     try {
                         window.__mnogotv_alloha_debug = ALLOHA_NATIVE_HLS;
                     } catch (eDbg2) {}
+                    if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
+                        ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
+                        try {
+                            notify('A22 EDGE TIMEOUT • guard64');
+                        } catch (eNotifyEdgeTimeout) {}
+                    }
+
+                    allohaPushHistory({
+                        phase: 'edge-timeout',
+                        edgeLength: 0,
+                        ts: Date.now()
+                    });
+
                     log('Alloha edge WebSocket timeout');
                 }
             }, 3500);
@@ -4516,6 +4585,10 @@
             '';
         ALLOHA_NATIVE_HLS.failedUrls = {};
         ALLOHA_NATIVE_HLS.lastMirrorSwitch = null;
+        ALLOHA_NATIVE_HLS.fragmentSuccessCount = 0;
+        ALLOHA_NATIVE_HLS.lastSuccess = null;
+        ALLOHA_NATIVE_HLS.history = [];
+        ALLOHA_NATIVE_HLS.lastError = null;
 
         try {
             ALLOHA_NATIVE_HLS.baseHost =
@@ -4763,6 +4836,39 @@
 
                                 self.stats.chunkCount = 1;
                                 ALLOHA_NATIVE_HLS.lastError = null;
+
+                                var successLeaf = allohaHlsLeaf(requestUrl);
+                                var successInfo = {
+                                    phase: isBinary ? 'binary-ok' : contextType + '-ok',
+                                    leaf: successLeaf,
+                                    bytes: self.stats.loaded || 0,
+                                    edgeLength: String(
+                                        ALLOHA_NATIVE_HLS.edgeHash ||
+                                        ALLOHA_NATIVE_HLS.guardId ||
+                                        ''
+                                    ).length,
+                                    mirror: allohaActiveMirrorNumber(),
+                                    ts: Date.now()
+                                };
+
+                                ALLOHA_NATIVE_HLS.lastSuccess = successInfo;
+                                allohaPushHistory(successInfo);
+
+                                if (/\.m4s(?:$|\?)/i.test(requestUrl)) {
+                                    ALLOHA_NATIVE_HLS.fragmentSuccessCount++;
+
+                                    if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 2) {
+                                        try {
+                                            notify(
+                                                'A22 OK ' + successLeaf +
+                                                ' • ' + allohaHumanBytes(self.stats.loaded) +
+                                                ' • edge' + successInfo.edgeLength +
+                                                ' • M' + (successInfo.mirror || '?')
+                                            );
+                                        } catch (eNotifyOk) {}
+                                    }
+                                }
+
                                 try {
                                     delete ALLOHA_NATIVE_HLS.failedUrls[
                                         originalRequestUrl
@@ -4794,6 +4900,31 @@
                                     window.__mnogotv_alloha_debug =
                                         ALLOHA_NATIVE_HLS;
                                 } catch (eDbg4) {}
+
+                                allohaPushHistory({
+                                    phase: ALLOHA_NATIVE_HLS.lastError.phase,
+                                    leaf: allohaHlsLeaf(requestUrl),
+                                    edgeLength: String(
+                                        ALLOHA_NATIVE_HLS.edgeHash ||
+                                        ALLOHA_NATIVE_HLS.guardId ||
+                                        ''
+                                    ).length,
+                                    mirror: allohaActiveMirrorNumber(),
+                                    ts: Date.now()
+                                });
+
+                                try {
+                                    notify(
+                                        'A22 DECODE ' + allohaHlsLeaf(requestUrl) +
+                                        ' • edge' +
+                                        String(
+                                            ALLOHA_NATIVE_HLS.edgeHash ||
+                                            ALLOHA_NATIVE_HLS.guardId ||
+                                            ''
+                                        ).length +
+                                        ' • M' + (allohaActiveMirrorNumber() || '?')
+                                    );
+                                } catch (eNotifyDecode) {}
 
                                 callbacks.onError(
                                     {
@@ -4865,12 +4996,36 @@
                                 ALLOHA_NATIVE_HLS.lastError
                             );
 
+                            var failedLeaf = allohaHlsLeaf(requestUrl);
+                            var edgeLen = String(
+                                ALLOHA_NATIVE_HLS.edgeHash ||
+                                ALLOHA_NATIVE_HLS.guardId ||
+                                ''
+                            ).length;
+                            var previousOk = ALLOHA_NATIVE_HLS.lastSuccess;
+
+                            allohaPushHistory({
+                                phase: ALLOHA_NATIVE_HLS.lastError.phase,
+                                leaf: failedLeaf,
+                                status: status || 0,
+                                edgeLength: edgeLen,
+                                mirror: allohaActiveMirrorNumber(),
+                                mirrorSwitched: mirrorSwitched,
+                                previous: previousOk && previousOk.leaf || '',
+                                ts: Date.now()
+                            });
+
                             try {
                                 notify(
-                                    'Alloha HLS DEBUG: ' +
-                                    ALLOHA_NATIVE_HLS.lastError.phase +
-                                    ' HTTP ' +
-                                    (status || 0)
+                                    'A22 FAIL ' + failedLeaf +
+                                    ' • H' + (status || 0) +
+                                    ' • edge' + edgeLen +
+                                    ' • M' + (allohaActiveMirrorNumber() || '?') +
+                                    (
+                                        previousOk && previousOk.leaf
+                                            ? ' • prev ' + previousOk.leaf
+                                            : ''
+                                    )
                                 );
                             } catch (eNoty) {}
 
@@ -4922,7 +5077,7 @@
 
                     if (
                         ALLOHA_NATIVE_HLS.edgeHash ||
-                        Date.now() - started >= 2200
+                        Date.now() - started >= 3500
                     ) {
                         self.waitTimer = null;
                         doLoad();
@@ -5070,10 +5225,19 @@
                             'Borth': borth
                         },
                         function (json) {
+                            /*
+                             * v4.0.22 diagnostic probe: the captured real
+                             * Alloha player selected 480p. Force the same
+                             * quality for one test so Android native bridge
+                             * carries ~0.5-1.3 MB fragments instead of much
+                             * larger 1080p fragments. This isolates transport
+                             * size/bridge pressure from auth/edge logic.
+                             */
+                            var probeQuality = '480p';
                             var picked =
                                 allohaPickHls(
                                     json,
-                                    qualityLabel
+                                    probeQuality
                                 );
 
                             if (
@@ -5111,8 +5275,7 @@
                                 startAllohaEdgeSocket(
                                     json,
                                     picked.selected.label ||
-                                        qualityLabel ||
-                                        '480p',
+                                        probeQuality,
                                     picked.audioId
                                 );
 
@@ -5139,10 +5302,11 @@
                                     (hlsNativeReady ? 'native' : 'stock') +
                                     ' • edge ' +
                                     (edgeSocketStarted ? 'ws' : 'no-ws') +
+                                    ' • probe480' +
                                     (
                                         picked.selected.mirrors &&
                                         picked.selected.mirrors.length > 1
-                                            ? ' • mirror2'
+                                            ? ' • 2cdn'
                                             : ''
                                     ) +
                                     ' • ' +
