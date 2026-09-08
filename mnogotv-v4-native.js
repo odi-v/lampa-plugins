@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.0.18-native';
+    var VERSION = '4.0.19-native';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3529,30 +3529,27 @@
 
 
     /*
-     * Alloha native adapter v4.0.16
+     * Alloha native adapter v4.0.19
      *
-     * Worker used to receive 404 from theatre.stravers.live.  The updated
-     * Android Lampa shell has a working native HTTP bridge, so Alloha is
-     * resolved on the device:
+     * Real chain captured in mnogotv.com2.har (2026-09-07):
      *
-     * iframe -> native HTML -> fileList -> media.id -> /api/movies/<id>
-     *        -> hlsSource -> built-in Lampa.Player
+     *   MnogoTV source iframe
+     *     -> GET theatre.stravers.live/?token_movie=...&token=...
+     *     -> fileList.active.id + meta[name="viewporti"]
+     *     -> POST same-origin /bnsi/movies/<media.id>
+     *     -> hlsSource[].quality
+     *     -> vkvideo.cloud master.m3u8 in built-in Lampa.Player
      *
-     * The structure follows the current online_mod Alloha flow, but uses the
-     * iframe/translation data already returned by MnogoTV /sources.
+     * No API-domain discovery and no host probing. All endpoints are derived
+     * from the iframe that MnogoTV actually returned.
      */
 
     function allohaHeaders(url) {
-        var origin = '';
-
-        try {
-            origin = new URL(String(url || '')).origin || '';
-        } catch (e) {}
-
         return {
             'User-Agent': COLLAPS_UA,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru,en;q=0.9'
+            'Accept-Language': 'ru,en;q=0.9',
+            'Referer': 'https://mnogotv.com/'
         };
     }
 
@@ -3612,10 +3609,6 @@
     function decodeAllohaFileListString(raw) {
         raw = String(raw || '');
 
-        /*
-         * fileList is embedded inside a JS single-quoted string.  The common
-         * payload is already JSON with escaped apostrophes/backslashes.
-         */
         try {
             return JSON.parse(raw);
         } catch (e) {}
@@ -3639,8 +3632,8 @@
         html = String(html || '').replace(/\n/g, '');
 
         var patterns = [
-            /fileList\s*=\s*JSON\.parse\('(\{[\s\S]*?\})'\)\s*;/i,
-            /fileList\s*=\s*JSON\.parse\("(\{[\s\S]*?\})"\)\s*;/i
+            /fileList\s*=\s*JSON\.parse\('([\s\S]*?)'\)\s*;/i,
+            /fileList\s*=\s*JSON\.parse\("([\s\S]*?)"\)\s*;/i
         ];
 
         for (var i = 0; i < patterns.length; i++) {
@@ -3649,7 +3642,7 @@
             if (m && m[1]) {
                 var parsed = decodeAllohaFileListString(m[1]);
 
-                if (parsed && parsed.all) return parsed;
+                if (parsed && (parsed.active || parsed.all)) return parsed;
             }
         }
 
@@ -3670,13 +3663,41 @@
     }
 
     function allohaPickMedia(pl, season, episode, voiceChoice) {
-        if (!pl || !pl.all) return null;
+        if (!pl) return null;
 
         var translationId =
             voiceChoice &&
             voiceChoice.translationId
                 ? String(voiceChoice.translationId)
                 : '';
+
+        /*
+         * The translated iframe already has the exact selection activated.
+         * In the captured movie flow fileList.active.id=1560037 and that exact
+         * id is subsequently POSTed to /bnsi/movies/1560037. Prefer it.
+         */
+        if (
+            pl.active &&
+            pl.active.id !== undefined &&
+            pl.active.id !== null
+        ) {
+            var activeTranslation = String(
+                pl.active.id_translation ||
+                pl.active.translation_id ||
+                pl.active.translationId ||
+                ''
+            );
+
+            if (
+                !translationId ||
+                !activeTranslation ||
+                activeTranslation === translationId
+            ) {
+                return pl.active;
+            }
+        }
+
+        if (!pl.all) return pl.active || null;
 
         if (String(pl.type || '').toLowerCase() === 'serial') {
             var seasons = pl.all || {};
@@ -3685,52 +3706,37 @@
                 seasons[season] ||
                 firstObjectValue(seasons);
 
-            if (!seasonObj) return null;
+            if (!seasonObj) return pl.active || null;
 
             var episodeObj =
                 seasonObj[String(episode)] ||
                 seasonObj[episode] ||
                 firstObjectValue(seasonObj);
 
-            if (!episodeObj) return null;
+            if (!episodeObj) return pl.active || null;
 
-            if (
-                translationId &&
-                episodeObj[translationId]
-            ) {
+            if (translationId && episodeObj[translationId]) {
                 return episodeObj[translationId];
             }
 
-            /*
-             * Some backends use numeric keys that arrive as strings, which
-             * is fine in JS objects. If the chosen MnogoTV translation isn't
-             * present for this episode, fall back to the first available one.
-             */
-            return firstObjectValue(episodeObj);
+            return firstObjectValue(episodeObj) || pl.active || null;
         }
 
-        /*
-         * Movie structure in Alloha is usually:
-         * all[type][translation][quality] -> media.
-         * Walk it and prefer a media object that looks playable.
-         */
         var queue = [pl.all];
-        var fallback = null;
+        var fallback = pl.active || null;
 
         while (queue.length) {
             var node = queue.shift();
 
             if (!node || typeof node !== 'object') continue;
 
-            if (
-                node.id !== undefined &&
-                node.id !== null
-            ) {
+            if (node.id !== undefined && node.id !== null) {
                 if (!fallback) fallback = node;
 
                 if (
                     translationId &&
                     (
+                        String(node.id_translation || '') === translationId ||
                         String(node.translation_id || '') === translationId ||
                         String(node.translationId || '') === translationId ||
                         String(node.translation || '') === translationId
@@ -3743,10 +3749,7 @@
             Object.keys(node).forEach(function (key) {
                 var child = node[key];
 
-                if (
-                    child &&
-                    typeof child === 'object'
-                ) {
+                if (child && typeof child === 'object') {
                     queue.push(child);
                 }
             });
@@ -3755,370 +3758,341 @@
         return fallback;
     }
 
-    function allohaIsSafePublicHost(host) {
-        host = String(host || '').toLowerCase();
+    function allohaExtractToken(html, iframe) {
+        var src = String(html || '');
+        var m = src.match(/\btoken\s*:\s*['"]([^'"]+)['"]/i);
 
-        if (
-            !host ||
-            host === 'localhost' ||
-            host === '127.0.0.1' ||
-            host === '::1'
-        ) {
-            return false;
+        if (m && m[1]) return m[1];
+
+        try {
+            return new URL(String(iframe || '')).searchParams.get('token') || '';
+        } catch (e) {}
+
+        return '';
+    }
+
+    function allohaExtractViewporti(html) {
+        var src = String(html || '');
+        var m = src.match(
+            /<meta\b[^>]*\bname\s*=\s*['"]viewporti['"][^>]*\bcontent\s*=\s*['"]([^'"]+)['"][^>]*>/i
+        );
+
+        if (!m) {
+            m = src.match(
+                /<meta\b[^>]*\bcontent\s*=\s*['"]([^'"]+)['"][^>]*\bname\s*=\s*['"]viewporti['"][^>]*>/i
+            );
         }
 
-        if (
-            /^10\./.test(host) ||
-            /^192\.168\./.test(host) ||
-            /^169\.254\./.test(host) ||
-            /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
-        ) {
-            return false;
+        return m && m[1] ? String(m[1]) : '';
+    }
+
+    function allohaExtractAppScript(html, iframe) {
+        var src = String(html || '');
+        var re = /<script\b[^>]*\bsrc\s*=\s*['"]([^'"]*\/build\/app\.[^'"]+\.js(?:\?[^'"]*)?)['"][^>]*>/ig;
+        var m = re.exec(src);
+
+        if (!m || !m[1]) return '';
+
+        try {
+            return new URL(m[1], iframe).href;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function allohaExtractStreamToken(scriptText) {
+        var src = String(scriptText || '');
+
+        /*
+         * Current app.js contains one long URL-safe literal returned by the
+         * guard client. HAR confirms the same literal is sent as:
+         *   Authorizations: Bearer <token>
+         * Keep this dynamic so a future player deploy can rotate the token.
+         */
+        var matches = src.match(/[A-Za-z0-9_-]{180,}/g) || [];
+        var best = '';
+
+        matches.forEach(function (value) {
+            if (value.length > best.length) best = value;
+        });
+
+        return best;
+    }
+
+    function allohaFilledArray(length, value) {
+        var out = new Array(length);
+        for (var i = 0; i < length; i++) out[i] = value;
+        return out;
+    }
+
+    function allohaBitLength(value) {
+        value = value >>> 0;
+        if (value === 0) return 0;
+
+        var bits = 0;
+        while (value > 0) {
+            bits++;
+            value >>>= 1;
+        }
+
+        return bits;
+    }
+
+    function allohaTrailingZeros(value, zeroValue) {
+        value = value >>> 0;
+        if (value === 0) return zeroValue;
+
+        var count = 0;
+        while (!(value & 1)) {
+            count++;
+            value >>>= 1;
+        }
+
+        return count;
+    }
+
+    function allohaViewportStage7(value) {
+        value = String(value || '');
+        var len = value.length;
+        if (len <= 1) return value;
+
+        var bits = 0;
+        while ((1 << bits) < len) bits++;
+
+        var counts = allohaFilledArray(bits + 1, 0);
+        var i;
+
+        for (i = 0; i < len; i++) {
+            counts[allohaBitLength(i)]++;
+        }
+
+        var groups = new Array(bits + 1);
+        var pos = 0;
+
+        for (i = bits; i >= 0; i--) {
+            groups[i] = value.slice(pos, pos + counts[i]);
+            pos += counts[i];
+        }
+
+        var offsets = allohaFilledArray(bits + 1, 0);
+        var out = new Array(len);
+
+        for (i = 0; i < len; i++) {
+            var group = allohaBitLength(i);
+            out[i] = groups[group].charAt(offsets[group]++);
+        }
+
+        return out.join('');
+    }
+
+    function allohaViewportStage6(value) {
+        value = String(value || '');
+        var len = value.length;
+        if (len <= 1) return value;
+
+        var bits = 0;
+        while ((1 << bits) < len) bits++;
+
+        var counts = allohaFilledArray(bits + 1, 0);
+        var i;
+
+        for (i = 0; i < len; i++) {
+            counts[allohaTrailingZeros(i, bits)]++;
+        }
+
+        var groups = new Array(bits + 1);
+        var pos = 0;
+
+        for (i = 0; i <= bits; i++) {
+            groups[i] = value.slice(pos, pos + counts[i]);
+            pos += counts[i];
+        }
+
+        var offsets = allohaFilledArray(bits + 1, 0);
+        var out = new Array(len);
+
+        for (i = 0; i < len; i++) {
+            var group = allohaTrailingZeros(i, bits);
+            out[i] = groups[group].charAt(offsets[group]++);
+        }
+
+        return out.join('');
+    }
+
+    function allohaIsPrime(value) {
+        value = Number(value || 0);
+        if (value < 2) return false;
+        if (value % 2 === 0) return value === 2;
+
+        for (var i = 3; i * i <= value; i += 2) {
+            if (value % i === 0) return false;
         }
 
         return true;
     }
 
-    function allohaPushApiBase(candidates, value, iframeUrl, priority) {
-        value = String(value || '')
-            .replace(/&amp;/g, '&')
-            .replace(/\\\//g, '/')
-            .trim();
+    function allohaViewportStage5(value) {
+        value = String(value || '');
+        var len = value.length;
+        if (len <= 1) return value;
 
-        if (!value) return;
+        var prime = len + 1;
+        while (!allohaIsPrime(prime)) prime++;
 
-        try {
-            if (value.indexOf('//') === 0) {
-                var proto = new URL(String(iframeUrl || '')).protocol || 'https:';
-                value = proto + value;
+        var seen = allohaFilledArray(len, false);
+        var order = [];
+        var cursor = 0;
+
+        while (order.length < len) {
+            cursor = (cursor + 2) % prime;
+
+            if (cursor < len && !seen[cursor]) {
+                order.push(cursor);
+                seen[cursor] = true;
             }
+        }
 
-            if (!/^https?:\/\//i.test(value)) {
-                value = new URL(value, iframeUrl).href;
-            }
+        var out = new Array(len);
 
-            var u = new URL(value);
+        for (var i = 0; i < len; i++) {
+            out[order[i]] = value[i];
+        }
 
-            if (!allohaIsSafePublicHost(u.hostname)) return;
-
-            var bases = [];
-
-            /*
-             * Exact /api/movies/... reference: preserve everything before api/.
-             */
-            var apiPos = u.href.toLowerCase().indexOf('/api/movies/');
-            if (apiPos >= 0) {
-                bases.push(u.href.substring(0, apiPos + 1));
-            }
-
-            /*
-             * A variable named domain/apiDomain may include a path prefix.
-             * Preserve that prefix as well as the origin.
-             */
-            var path = u.pathname || '/';
-            if (
-                path &&
-                path !== '/' &&
-                !/\.[a-z0-9]{1,6}$/i.test(path.split('/').pop() || '')
-            ) {
-                if (path.slice(-1) !== '/') path += '/';
-                bases.push(u.origin + path);
-            }
-
-            bases.push(u.origin + '/');
-
-            bases.forEach(function (base) {
-                if (candidates.indexOf(base) !== -1) return;
-
-                if (priority) candidates.unshift(base);
-                else candidates.push(base);
-            });
-        } catch (e) {}
+        return out.join('');
     }
 
-    function allohaApiBase(iframeUrl, html) {
-        var candidates = [];
-        var src = String(html || '');
-
-        /*
-         * v4.0.16 assumed that /api/movies lived on the iframe host.
-         * The working online_mod does NOT do that: it extracts a separate
-         * "domain" from the page and calls extract.domain + api/movies/<id>.
-         * We cannot reuse its private decrypt blob, so discover the same
-         * endpoint from the page/script URLs and domain-like JS variables.
-         */
-
-        try {
-            allohaPushApiBase(
-                candidates,
-                new URL(String(iframeUrl || '')).origin + '/',
-                iframeUrl,
-                false
-            );
-        } catch (e0) {}
-
-        var normalized = src.replace(/\\\//g, '/');
-
-        var directApi =
-            normalized.match(/https?:\/\/[^"'\\\s<>]+\/api\/movies\//ig) ||
-            [];
-
-        directApi.forEach(function (url) {
-            allohaPushApiBase(candidates, url, iframeUrl, true);
-        });
-
-        /*
-         * Variables seen in provider players commonly use names like
-         * domain/apiDomain/api_host/server/host. Prefer these candidates.
-         */
-        var named =
-            /(?:\b(?:api[_-]?domain|api[_-]?host|api[_-]?url|domain|server|host)\b)\s*[:=]\s*['"]([^'"]+)['"]/ig;
-        var m;
-
-        while ((m = named.exec(normalized))) {
-            allohaPushApiBase(
-                candidates,
-                m[1],
-                iframeUrl,
-                true
-            );
-        }
-
-        /*
-         * Do NOT probe every URL mentioned in the page. v4.0.17 did that and
-         * ended up testing analytics/CDN/font hosts. Keep only URLs whose
-         * surrounding text hints that they belong to the API/player config.
-         */
-        var hinted =
-            /(?:api|domain|server|host|player|movie)[^"'<>]{0,80}(https?:\/\/[a-z0-9.-]+(?::\d+)?(?:\/[^"'\\\s<>]*)?)/ig;
-        var hm;
-
-        while ((hm = hinted.exec(normalized))) {
-            allohaPushApiBase(
-                candidates,
-                hm[1],
-                iframeUrl,
-                false
-            );
-        }
-
-        return candidates;
-    }
-
-    function allohaScriptUrls(iframeUrl, html) {
-        var urls = [];
-        var src = String(html || '').replace(/\\\//g, '/');
-        var re = /<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/ig;
-        var m;
-
-        function score(url) {
-            var s = String(url || '').toLowerCase();
-            var value = 0;
-
-            if (/player|alloha|embed|movie|app|main|index/.test(s)) value += 10;
-            if (/jquery|bootstrap|analytics|metric|counter|ads|vendor/.test(s)) value -= 10;
-
-            try {
-                if (
-                    new URL(url).origin ===
-                    new URL(iframeUrl).origin
-                ) {
-                    value += 4;
-                }
-            } catch (e) {}
-
-            return value;
-        }
-
-        while ((m = re.exec(src))) {
-            try {
-                var url = new URL(m[1], iframeUrl).href;
-                var u = new URL(url);
-
-                if (
-                    /^https?:$/i.test(u.protocol) &&
-                    allohaIsSafePublicHost(u.hostname) &&
-                    urls.indexOf(url) === -1
-                ) {
-                    urls.push(url);
-                }
-            } catch (e) {}
-        }
-
-        urls.sort(function (a, b) {
-            return score(b) - score(a);
-        });
-
-        /*
-         * v4.0.17 could inspect up to ten scripts sequentially with a 15 s
-         * native timeout each. On a TV that turns "discover endpoint" into a
-         * two-minute meditation exercise. Four likely scripts are enough for
-         * diagnostics and keep the resolver bounded.
-         */
-        return urls.slice(0, 4);
-    }
-
-    function allohaNativeTextBounded(url, headers, timeoutMs, ok, fail) {
-        var network = null;
-        var finished = false;
-        var timer = null;
-
-        function done(fn, value) {
-            if (finished) return;
-            finished = true;
-
-            if (timer) {
-                try { clearTimeout(timer); } catch (e0) {}
-                timer = null;
-            }
-
-            fn(value);
-        }
-
-        try { network = new Lampa.Reguest(); } catch (e) {
-            try { network = new Lampa.Request(); } catch (e2) {}
-        }
-
-        if (!network || typeof network.native !== 'function') {
-            fail(new Error('Lampa.Reguest.native недоступен'));
-            return;
-        }
-
-        timeoutMs = Math.max(1200, Number(timeoutMs || 0) || 3500);
-
-        timer = setTimeout(function () {
-            try {
-                if (network && network.clear) network.clear();
-            } catch (e3) {}
-
-            done(
-                fail,
-                new Error('timeout ' + timeoutMs + 'ms')
-            );
-        }, timeoutMs + 250);
-
-        try {
-            if (network.clear) network.clear();
-            if (network.timeout) network.timeout(timeoutMs);
-
-            network.native(
-                url,
-                function (body) {
-                    done(ok, String(body || ''));
-                },
-                function (a, c) {
-                    var status =
-                        a && a.status !== undefined
-                            ? Number(a.status)
-                            : 0;
-
-                    done(
-                        fail,
-                        new Error(
-                            status
-                                ? ('HTTP ' + status)
-                                : errText(a || c || 'network error')
-                        )
-                    );
-                },
-                false,
-                {
-                    dataType: 'text',
-                    headers: headers || {}
-                }
-            );
-        } catch (e4) {
-            done(fail, e4);
-        }
-    }
-
-    function allohaNativeJsonBounded(url, headers, timeoutMs, ok, fail) {
-        allohaNativeTextBounded(
-            url,
-            headers,
-            timeoutMs,
-            function (body) {
-                try {
-                    ok(JSON.parse(String(body || '')));
-                } catch (e) {
-                    fail(new Error('JSON parse error'));
-                }
-            },
-            fail
+    function allohaViewportBorth(value) {
+        return allohaViewportStage5(
+            allohaViewportStage6(
+                allohaViewportStage7(value)
+            )
         );
     }
 
-    function allohaDiscoverApiBases(iframeUrl, html, done) {
-        var bases = allohaApiBase(iframeUrl, html);
-        var scripts = allohaScriptUrls(iframeUrl, html);
-        var index = 0;
-        var started = Date.now();
-        var MAX_DISCOVERY_MS = 12000;
+    function allohaSha256Hex(ascii) {
+        /* Small synchronous SHA-256, kept ES5-compatible for TV WebViews. */
+        ascii = unescape(encodeURIComponent(String(ascii || '')));
 
-        function mergeFromText(body, sourceUrl) {
-            allohaApiBase(sourceUrl || iframeUrl, body).forEach(function (base) {
-                if (bases.indexOf(base) === -1) bases.push(base);
-            });
+        var mathPow = Math.pow;
+        var maxWord = mathPow(2, 32);
+        var lengthProperty = 'length';
+        var i, j;
+        var result = '';
+        var words = [];
+        var asciiBitLength = ascii[lengthProperty] * 8;
+        var hash = allohaSha256Hex.h = allohaSha256Hex.h || [];
+        var k = allohaSha256Hex.k = allohaSha256Hex.k || [];
+        var primeCounter = k[lengthProperty];
+        var isComposite = {};
+
+        for (var candidate = 2; primeCounter < 64; candidate++) {
+            if (!isComposite[candidate]) {
+                for (i = 0; i < 313; i += candidate) {
+                    isComposite[i] = candidate;
+                }
+
+                hash[primeCounter] = (mathPow(candidate, 0.5) * maxWord) | 0;
+                k[primeCounter++] = (mathPow(candidate, 1 / 3) * maxWord) | 0;
+            }
         }
 
-        function next() {
-            if (
-                index >= scripts.length ||
-                Date.now() - started >= MAX_DISCOVERY_MS
-            ) {
-                done(bases);
-                return;
+        ascii += '\x80';
+
+        while (ascii[lengthProperty] % 64 - 56) ascii += '\x00';
+
+        for (i = 0; i < ascii[lengthProperty]; i++) {
+            j = ascii.charCodeAt(i);
+            words[i >> 2] |= j << ((3 - i) % 4) * 8;
+        }
+
+        words[words[lengthProperty]] = ((asciiBitLength / maxWord) | 0);
+        words[words[lengthProperty]] = asciiBitLength;
+
+        for (j = 0; j < words[lengthProperty];) {
+            var w = words.slice(j, j += 16);
+            var oldHash = hash.slice(0);
+            hash = hash.slice(0, 8);
+
+            for (i = 0; i < 64; i++) {
+                var i2 = i + j;
+                var w15 = w[i - 15];
+                var w2 = w[i - 2];
+                var a = hash[0];
+                var e = hash[4];
+                var temp1 =
+                    hash[7] +
+                    (
+                        ((e >>> 6) | (e << 26)) ^
+                        ((e >>> 11) | (e << 21)) ^
+                        ((e >>> 25) | (e << 7))
+                    ) +
+                    ((e & hash[5]) ^ ((~e) & hash[6])) +
+                    k[i] +
+                    (
+                        w[i] =
+                            i < 16
+                                ? w[i]
+                                : (
+                                    w[i - 16] +
+                                    (
+                                        ((w15 >>> 7) | (w15 << 25)) ^
+                                        ((w15 >>> 18) | (w15 << 14)) ^
+                                        (w15 >>> 3)
+                                    ) +
+                                    w[i - 7] +
+                                    (
+                                        ((w2 >>> 17) | (w2 << 15)) ^
+                                        ((w2 >>> 19) | (w2 << 13)) ^
+                                        (w2 >>> 10)
+                                    )
+                                ) | 0
+                    );
+                var temp2 =
+                    (
+                        ((a >>> 2) | (a << 30)) ^
+                        ((a >>> 13) | (a << 19)) ^
+                        ((a >>> 22) | (a << 10))
+                    ) +
+                    ((a & hash[1]) ^ (a & hash[2]) ^ (hash[1] & hash[2]));
+
+                hash = [(temp1 + temp2) | 0].concat(hash);
+                hash[4] = (hash[4] + temp1) | 0;
+                hash.pop();
             }
 
-            var scriptUrl = scripts[index++];
-
-            allohaNativeTextBounded(
-                scriptUrl,
-                {
-                    'User-Agent': COLLAPS_UA,
-                    'Accept': '*/*',
-                    'Referer': iframeUrl
-                },
-                2800,
-                function (body) {
-                    mergeFromText(body, scriptUrl);
-                    next();
-                },
-                function () {
-                    next();
-                }
-            );
+            for (i = 0; i < 8; i++) {
+                hash[i] = (hash[i] + oldHash[i]) | 0;
+            }
         }
 
-        next();
+        for (i = 0; i < 8; i++) {
+            for (j = 3; j + 1; j--) {
+                var b = (hash[i] >> (j * 8)) & 255;
+                result += (b < 16 ? '0' : '') + b.toString(16);
+            }
+        }
+
+        return result;
     }
 
-    function allohaApiUrls(base, mediaId) {
-        base = String(base || '');
-        if (base && base.slice(-1) !== '/') base += '/';
+    function allohaGuardId(iframe, mediaId) {
+        var seed = [];
 
-        var id = encodeURIComponent(mediaId);
-        var urls = [];
+        try { seed.push(navigator.userAgent || COLLAPS_UA); } catch (e0) {}
+        try {
+            seed.push(
+                Intl.DateTimeFormat().resolvedOptions().timeZone || ''
+            );
+        } catch (e1) {}
+        try { seed.push(screen.width + 'x' + screen.height); } catch (e2) {}
+        try { seed.push(navigator.language || navigator.userLanguage || ''); } catch (e3) {}
+        try { seed.push(String(navigator.hardwareConcurrency || '')); } catch (e4) {}
+        try { seed.push(String(navigator.deviceMemory || '')); } catch (e5) {}
 
-        function add(url) {
-            if (url && urls.indexOf(url) === -1) urls.push(url);
-        }
+        seed.push(String(iframe || ''));
+        seed.push(String(mediaId || ''));
 
-        if (/\/api\/$/i.test(base)) {
-            add(base + 'movies/' + id);
-        }
-        else {
-            add(base + 'api/movies/' + id);
-        }
-
-        /*
-         * Some mirrors expose the same handler with a trailing slash.
-         */
-        urls.slice().forEach(function (url) {
-            add(url + '/');
-        });
-
-        return urls;
+        return allohaSha256Hex(seed.join('||'));
     }
 
     function allohaPickHls(json, qualityLabel) {
@@ -4142,14 +4116,18 @@
 
         Object.keys(qualities).forEach(function (q) {
             var raw = String(qualities[q] || '');
-            var link = raw.split(' or ').filter(Boolean)[0] || '';
+            var links = raw.split(' or ').filter(Boolean);
+            var link = links[0] || '';
 
             if (!link) return;
 
             variants.push({
                 label: String(q) + 'p',
                 quality: parseInt(q, 10) || 0,
-                url: normalizeDirectUrl(link)
+                url: normalizeDirectUrl(link),
+                mirrors: links.map(function (item) {
+                    return normalizeDirectUrl(item);
+                }).filter(Boolean)
             });
         });
 
@@ -4179,10 +4157,6 @@
         }
 
         if (!selected) {
-            /*
-             * Keep 4K/AV1 experiments out of the first Alloha bring-up.
-             * 1080p is enough to prove the transport.
-             */
             selected =
                 variants.filter(function (v) {
                     return v.quality <= 1080;
@@ -4253,7 +4227,7 @@
             function (html) {
                 var pl = parseAllohaFileList(html);
 
-                if (!pl || !pl.all) {
+                if (!pl) {
                     fail(new Error(
                         'Alloha: iframe открыт, но fileList не найден'
                     ));
@@ -4275,135 +4249,154 @@
                     return;
                 }
 
-                allohaDiscoverApiBases(
-                    iframe,
-                    html,
-                    function (bases) {
-                        var attempts = [];
-                        var errors = [];
-                        var baseIndex = 0;
-                        var apiQueue = [];
+                var token = allohaExtractToken(html, iframe);
+                var viewporti = allohaExtractViewporti(html);
+                var appScript = allohaExtractAppScript(html, iframe);
 
-                        bases.forEach(function (base) {
-                            allohaApiUrls(base, media.id).forEach(function (url) {
-                                if (apiQueue.indexOf(url) === -1) apiQueue.push(url);
-                            });
-                        });
+                if (!token) {
+                    fail(new Error('Alloha: token не найден в iframe'));
+                    return;
+                }
 
-                        /*
-                         * Avoid spending a minute probing a pathological page.
-                         * Usually the correct endpoint is among the first few
-                         * inline/script origins.
-                         */
-                        apiQueue = apiQueue.slice(0, 8);
+                if (!viewporti) {
+                    fail(new Error('Alloha: meta viewporti не найден'));
+                    return;
+                }
 
-                        function shortHost(url) {
-                            try {
-                                var u = new URL(url);
-                                return u.host + u.pathname.replace(
-                                    /\/api\/movies\/.*$/i,
-                                    '/api/movies/…'
+                var guardId = allohaGuardId(iframe, media.id);
+                var borthTail = allohaViewportBorth(viewporti);
+                var borth = guardId + '|' + borthTail;
+                var origin = '';
+                var apiUrl = '';
+
+                try {
+                    origin = new URL(iframe).origin;
+                    apiUrl = new URL(
+                        (
+                            String(pl.type || '').toLowerCase() === 'trailer'
+                                ? '/bnsi/trailers/'
+                                : '/bnsi/movies/'
+                        ) + encodeURIComponent(media.id),
+                        iframe
+                    ).href;
+                } catch (eUrl) {
+                    fail(new Error('Alloha: не удалось построить /bnsi URL'));
+                    return;
+                }
+
+                var postdata =
+                    'token=' + encodeURIComponent(token) +
+                    '&av1=true' +
+                    '&autoplay=0' +
+                    '&audio=' +
+                    '&subtitle=';
+
+                function requestBnsi(streamToken) {
+                    nativeJson(
+                        apiUrl,
+                        {
+                            'User-Agent': COLLAPS_UA,
+                            'Accept': 'application/json, text/javascript, */*; q=0.01',
+                            'Accept-Language': 'ru,en;q=0.9',
+                            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                            'Origin': origin,
+                            'Referer': iframe,
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'Borth': borth
+                        },
+                        function (json) {
+                            var picked =
+                                allohaPickHls(
+                                    json,
+                                    qualityLabel
                                 );
-                            } catch (e) {
-                                return String(url || '').slice(0, 80);
-                            }
-                        }
 
-                        var apiStarted = Date.now();
-                        var MAX_API_MS = 18000;
-
-                        function nextApi() {
                             if (
-                                baseIndex >= apiQueue.length ||
-                                Date.now() - apiStarted >= MAX_API_MS
+                                !picked ||
+                                !picked.selected ||
+                                !picked.selected.url
                             ) {
-                                var shown =
-                                    attempts.slice(0, 7).join(', ');
-
                                 fail(new Error(
-                                    'Alloha API: endpoint не найден' +
-                                    (
-                                        shown
-                                            ? (' • пробовал: ' + shown)
-                                            : ''
-                                    )
+                                    'Alloha /bnsi: hlsSource пуст'
                                 ));
                                 return;
                             }
 
-                            var apiUrl = apiQueue[baseIndex++];
-                            attempts.push(shortHost(apiUrl));
+                            var hlsHeaders = {
+                                'User-Agent': COLLAPS_UA,
+                                'Origin': origin,
+                                'Referer': iframe,
+                                'Accepts-Controls': guardId
+                            };
 
-                            allohaNativeJsonBounded(
-                                apiUrl,
-                                {
-                                    'User-Agent': COLLAPS_UA,
-                                    'Accept': 'application/json,*/*;q=0.8',
-                                    'Referer': iframe
-                                },
-                                3500,
-                                function (json) {
-                                    var picked =
-                                        allohaPickHls(
-                                            json,
-                                            qualityLabel
-                                        );
+                            if (streamToken) {
+                                hlsHeaders.Authorizations =
+                                    'Bearer ' + streamToken;
+                            }
 
-                                    if (
-                                        !picked ||
-                                        !picked.selected ||
-                                        !picked.selected.url
-                                    ) {
-                                        errors.push(
-                                            shortHost(apiUrl) +
-                                            ': hlsSource пуст'
-                                        );
-                                        nextApi();
-                                        return;
-                                    }
+                            ok({
+                                provider: 'Alloha',
+                                directUrl: picked.selected.url,
+                                directHeaders: hlsHeaders,
+                                relayUrl: '',
+                                relayReady: false,
+                                externalDirect: false,
+                                subtitles: allohaSubs(json.tracks || []),
+                                tracks: [],
+                                hlsQualities: picked.variants,
+                                quality:
+                                    picked.selected.label ||
+                                    qualityLabel ||
+                                    'Авто',
+                                resolvedBy:
+                                    'alloha native • bnsi same-origin' +
+                                    ' • media ' + media.id +
+                                    ' • guard ' +
+                                    (streamToken ? 'full' : 'no-auth-token') +
+                                    ' • ' +
+                                    (
+                                        voiceChoice &&
+                                        voiceChoice.label
+                                            ? voiceChoice.label
+                                            : 'Авто'
+                                    )
+                            });
+                        },
+                        function (eApi) {
+                            fail(new Error(
+                                'Alloha /bnsi native: ' + errText(eApi)
+                            ));
+                        },
+                        postdata
+                    );
+                }
 
-                                    ok({
-                                        provider: 'Alloha',
-                                        directUrl: picked.selected.url,
-                                        directHeaders: {},
-                                        relayUrl: '',
-                                        relayReady: false,
-                                        externalDirect: false,
-                                        subtitles: allohaSubs(json.tracks || []),
-                                        tracks: [],
-                                        hlsQualities: picked.variants,
-                                        quality:
-                                            picked.selected.label ||
-                                            qualityLabel ||
-                                            'Авто',
-                                        resolvedBy:
-                                            'alloha native • api ' +
-                                            shortHost(apiUrl) +
-                                            ' • media ' +
-                                            media.id +
-                                            ' • ' +
-                                            (
-                                                voiceChoice &&
-                                                voiceChoice.label
-                                                    ? voiceChoice.label
-                                                    : 'Авто'
-                                            )
-                                    });
-                                },
-                                function (e) {
-                                    errors.push(
-                                        shortHost(apiUrl) +
-                                        ': ' +
-                                        errText(e)
-                                    );
-                                    nextApi();
-                                }
+                /*
+                 * The HLS guard token lives in the player bundle and can
+                 * rotate. Fetch only the exact app.*.js referenced by this
+                 * iframe. No host/domain guessing.
+                 */
+                if (appScript) {
+                    nativeText(
+                        appScript,
+                        {
+                            'User-Agent': COLLAPS_UA,
+                            'Accept': '*/*',
+                            'Referer': iframe
+                        },
+                        function (scriptText) {
+                            requestBnsi(
+                                allohaExtractStreamToken(scriptText)
                             );
+                        },
+                        function () {
+                            requestBnsi('');
                         }
-
-                        nextApi();
-                    }
-                );
+                    );
+                }
+                else {
+                    requestBnsi('');
+                }
             },
             function (e) {
                 fail(new Error(
