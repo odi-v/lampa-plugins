@@ -5262,15 +5262,76 @@
         var found = null;
         var seen = [];
 
-        function walk(value, depth) {
-            if (
-                found ||
-                !value ||
-                typeof value !== 'object' ||
-                depth > 6
-            ) {
+        function normalizeEscaped(value) {
+            return String(value || '')
+                .replace(/&quot;/g, '"')
+                .replace(/&#34;/g, '"')
+                .replace(/&amp;/g, '&')
+                .replace(/\\"/g, '"')
+                .replace(/\\\//g, '/');
+        }
+
+        function scanString(raw, depth) {
+            if (found || depth > 8) return;
+
+            var s = normalizeEscaped(raw);
+            if (!s) return;
+
+            /*
+             * Some Alloha builds serialize the playback config into a string
+             * inside /bnsi or inline app/page JS. Parse JSON-looking strings
+             * first, then fall back to conservative pnr/pnk regex extraction.
+             */
+            try {
+                var trimmed = s.trim();
+                if (
+                    (trimmed[0] === '{' && trimmed[trimmed.length - 1] === '}') ||
+                    (trimmed[0] === '[' && trimmed[trimmed.length - 1] === ']')
+                ) {
+                    walk(JSON.parse(trimmed), depth + 1);
+                    if (found) return;
+                }
+            } catch (eJson) {}
+
+            var pnrMatch =
+                s.match(/["']?pnr["']?\s*[:=]\s*["']([^"']+)["']/i);
+            var pnkMatch =
+                s.match(/["']?pnk["']?\s*[:=]\s*["']?([A-Za-z0-9._~%+\-]+)["']?/i);
+
+            if (pnrMatch && pnkMatch) {
+                found = {
+                    pnr: String(pnrMatch[1] || '').replace(/\\\//g, '/'),
+                    pnk: String(pnkMatch[1] || '')
+                };
                 return;
             }
+
+            /*
+             * Last fallback for script snippets where the two assignments are
+             * separated by more code.
+             */
+            var pnrLoose = s.match(/\bpnr\b[\s\S]{0,160}?["'](wss?:\/\/[^"']+)["']/i);
+            var pnkLoose = s.match(/\bpnk\b[\s\S]{0,120}?["']?([A-Za-z0-9._~%+\-]{4,})["']?/i);
+
+            if (pnrLoose && pnkLoose) {
+                found = {
+                    pnr: String(pnrLoose[1] || '').replace(/\\\//g, '/'),
+                    pnk: String(pnkLoose[1] || '')
+                };
+            }
+        }
+
+        function walk(value, depth) {
+            if (found || value === null || value === undefined || depth > 8) {
+                return;
+            }
+
+            if (typeof value === 'string') {
+                scanString(value, depth);
+                return;
+            }
+
+            if (typeof value !== 'object') return;
 
             if (seen.indexOf(value) >= 0) return;
             seen.push(value);
@@ -5291,9 +5352,21 @@
 
             Object.keys(value).some(function (key) {
                 var child = value[key];
-                if (child && typeof child === 'object') {
+
+                /*
+                 * Check strings too. Earlier versions only descended into
+                 * objects, so JSON/JS serialized socket configs were skipped.
+                 */
+                if (
+                    child &&
+                    (
+                        typeof child === 'object' ||
+                        typeof child === 'string'
+                    )
+                ) {
                     walk(child, depth + 1);
                 }
+
                 return !!found;
             });
         }
@@ -5443,7 +5516,7 @@
 
             try {
                 notify(
-                    'A414 AUTO → ' +
+                    'A415 AUTO → ' +
                     label +
                     (
                         socketStarted
@@ -5674,7 +5747,7 @@
 
             if (!ALLOHA_NATIVE_HLS.wsReadyNotified) {
                 ALLOHA_NATIVE_HLS.wsReadyNotified = true;
-                try { notify('A414 WS READY'); } catch (eNotifyWsReady) {}
+                try { notify('A415 WS READY'); } catch (eNotifyWsReady) {}
             }
 
             allohaPushHistory({
@@ -5711,7 +5784,7 @@
                 if (!ALLOHA_NATIVE_HLS.edgeNotified) {
                     ALLOHA_NATIVE_HLS.edgeNotified = true;
                     try {
-                        notify('A414 EDGE OK • 32');
+                        notify('A415 EDGE OK • 32');
                     } catch (eNotifyEdge) {}
                 }
 
@@ -5853,7 +5926,7 @@
                     if (!ALLOHA_NATIVE_HLS.edgeTimeoutNotified) {
                         ALLOHA_NATIVE_HLS.edgeTimeoutNotified = true;
                         try {
-                            notify('A414 EDGE TIMEOUT • guard64');
+                            notify('A415 EDGE TIMEOUT • guard64');
                         } catch (eNotifyEdgeTimeout) {}
                     }
 
@@ -6207,7 +6280,7 @@
                         if (ALLOHA_NATIVE_HLS.fragmentSuccessCount <= 1) {
                             try {
                                 notify(
-                                    'A414 OK ' + successLeaf +
+                                    'A415 OK ' + successLeaf +
                                     ' • ' + allohaHumanBytes(self.stats.loaded) +
                                     ' • C' + self.stats.chunkCount +
                                     ' • ' + successInfo.tokenKind +
@@ -6444,7 +6517,7 @@
 
                     try {
                         notify(
-                            'A414 FAIL ' + failedLeaf +
+                            'A415 FAIL ' + failedLeaf +
                             ' • H' + (status || 0) +
                             ' • ' + acceptsControlsKind + edgeLen +
                             ' • M' + (allohaActiveMirrorNumber() || '?') +
@@ -7098,7 +7171,7 @@
                     '&audio=' +
                     '&subtitle=';
 
-                function requestBnsi(streamToken) {
+                function requestBnsi(streamToken, appScriptText) {
                     nativeJson(
                         apiUrl,
                         {
@@ -7175,9 +7248,21 @@
                                     }
                                 );
 
+                            /*
+                             * pnr/pnk are not guaranteed to live as plain
+                             * top-level JSON fields. Preserve all exact
+                             * same-origin material already fetched for this
+                             * playback and let allohaFindSocketConfig scan it.
+                             */
+                            var socketSeed = {
+                                bnsi: json,
+                                iframeHtml: html,
+                                appScriptText: appScriptText || ''
+                            };
+
                             var edgeSocketStarted =
                                 startAllohaEdgeSocket(
-                                    json,
+                                    socketSeed,
                                     selectedVariant.label ||
                                         qualityLabel ||
                                         'Авто',
@@ -7208,7 +7293,7 @@
                                 playerQualities:
                                     allohaPlayerQualityMap(
                                         picked,
-                                        json,
+                                        socketSeed,
                                         hlsHeaders,
                                         guardId
                                     ),
@@ -7275,16 +7360,17 @@
                         },
                         function (scriptText) {
                             requestBnsi(
-                                allohaExtractStreamToken(scriptText)
+                                allohaExtractStreamToken(scriptText),
+                                scriptText
                             );
                         },
                         function () {
-                            requestBnsi('');
+                            requestBnsi('', '');
                         }
                     );
                 }
                 else {
-                    requestBnsi('');
+                    requestBnsi('', '');
                 }
             },
             function (e) {
@@ -7485,12 +7571,22 @@
                 'Авто'
         };
 
-        if (playbackTracks.length) {
+        var isCollapsDash =
+            String(source && source.type || '').toLowerCase() === 'collaps' &&
+            String(resolved && resolved.directUrl || '').indexOf('#manifest.mpd') >= 0;
+
+        if (playbackTracks.length && !isCollapsDash) {
             /*
-             * Give Lampa fresh track objects for every playback. Lampa mutates
-             * them with Object.defineProperty(enabled); reusing old objects
-             * across a quality reload caused "Cannot redefine property:
-             * enabled" on some TVs.
+             * HLS providers can safely expose fresh track objects to Lampa.
+             *
+             * Collaps DASH is intentionally excluded: dash.js creates its own
+             * AudioTrack objects and Lampa mutates them with a non-configurable
+             * `enabled` property. Feeding an additional translate.tracks list
+             * makes setupAudioTracks run twice on quality changes and triggers
+             * "Cannot redefine property: enabled".
+             *
+             * Collaps DASH audio is selected below through our dash.js
+             * AdaptationSet selector instead.
              */
             first.translate = {
                 tracks: playbackTracks
@@ -7517,10 +7613,6 @@
          * архитектурой этой ветки.
          */
         try { Lampa.Player.runas('lampa'); } catch (eRunas) {}
-
-        var isCollapsDash =
-            String(source && source.type || '').toLowerCase() === 'collaps' &&
-            String(resolved && resolved.directUrl || '').indexOf('#manifest.mpd') >= 0;
 
         if (isCollapsDash) {
             /*
