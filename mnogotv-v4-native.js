@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    var VERSION = '4.1.0-isolated';
+    var VERSION = '4.1.1-isolated-quality';
     var PLUGIN_ID = 'mnogotv_v412_native';
     var COMPONENT = 'mnogotv_v318_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4390,6 +4390,110 @@
         return allohaSha256Hex(seed.join('||'));
     }
 
+    function allohaAutoQualityVariant(picked) {
+        var variants =
+            picked && Array.isArray(picked.variants)
+                ? picked.variants.slice()
+                : [];
+
+        if (!variants.length) return picked && picked.selected || null;
+
+        variants.sort(function (a, b) {
+            return Number(b.quality || 0) - Number(a.quality || 0);
+        });
+
+        var wanted = 0;
+        try {
+            if (Lampa.Storage && typeof Lampa.Storage.field === 'function') {
+                wanted = parseInt(Lampa.Storage.field('video_quality_default'), 10) || 0;
+            }
+        } catch (e0) {}
+
+        if (wanted) {
+            return variants.filter(function (v) {
+                return Number(v.quality || 0) === wanted;
+            })[0] || variants.filter(function (v) {
+                return Number(v.quality || 0) <= wanted;
+            })[0] || variants[variants.length - 1];
+        }
+
+        return picked.selected || variants[0];
+    }
+
+    /*
+     * v4.1.1: expose Alloha's separate quality URLs through Lampa's native
+     * Player quality menu. Lampa accepts play.quality as an object whose values
+     * may provide a call(instance, done) function. That is useful here because
+     * changing Alloha quality is not just a URL replacement: the native HLS
+     * guard state, CDN bases and edge WebSocket must be re-bound to the chosen
+     * rendition before Lampa reloads the source.
+     */
+    function allohaPlayerQualityMap(picked, json, hlsHeaders, guardId) {
+        var result = {};
+        var variants =
+            picked && Array.isArray(picked.variants)
+                ? picked.variants.slice()
+                : [];
+
+        if (!variants.length) return result;
+
+        variants.sort(function (a, b) {
+            return Number(b.quality || 0) - Number(a.quality || 0);
+        });
+
+        function entryFor(variant, mode) {
+            return {
+                url: variant.url,
+                label: mode === 'auto' ? 'MnogoTV' : '',
+                __variant: variant,
+                __mode: mode,
+                call: function (instance, done) {
+                    var target =
+                        instance && instance.__variant
+                            ? instance.__variant
+                            : variant;
+
+                    try {
+                        configureAllohaNativeHls(
+                            target.url,
+                            hlsHeaders,
+                            guardId,
+                            target.mirrors || [target.url]
+                        );
+
+                        startAllohaEdgeSocket(
+                            json,
+                            target.label || 'Авто',
+                            picked.audioId
+                        );
+
+                        log('Alloha player quality switch', {
+                            mode: instance && instance.__mode || mode,
+                            quality: target.label,
+                            url: target.url
+                        });
+                    } catch (e0) {
+                        log('Alloha player quality switch prepare failed', e0);
+                    }
+
+                    done(target.url);
+                }
+            };
+        }
+
+        var autoVariant = allohaAutoQualityVariant(picked);
+        if (autoVariant) result.auto = entryFor(autoVariant, 'auto');
+
+        variants.forEach(function (variant) {
+            var key = String(variant.label || (variant.quality + 'p'));
+            if (!key) return;
+            result[key] = entryFor(variant, 'manual');
+        });
+
+        return result;
+    }
+
+
     function allohaPickHls(json, qualityLabel) {
         var list =
             json &&
@@ -6145,6 +6249,13 @@
                                 subtitles: allohaSubs(json.tracks || []),
                                 tracks: [],
                                 hlsQualities: picked.variants,
+                                playerQualities:
+                                    allohaPlayerQualityMap(
+                                        picked,
+                                        json,
+                                        hlsHeaders,
+                                        guardId
+                                    ),
                                 quality:
                                     selectedVariant.label ||
                                     qualityLabel ||
@@ -6160,6 +6271,7 @@
                                     (hlsNativeReady ? 'native' : 'stock') +
                                     ' • edge ' +
                                     (edgeSocketStarted ? 'ws-wait' : 'no-ws') +
+                                    ' • player-quality' +
                                     ' • chunk1m' +
                                     (
                                         selectedVariant.mirrors &&
@@ -6387,6 +6499,20 @@
             headers: resolved.directHeaders || {},
             isonline: true
         };
+
+        /*
+         * Lampa's native player panel reads play.quality and renders its own
+         * quality selector. Alloha supplies callable entries because each
+         * manual quality switch must also refresh its guard/edge session.
+         * Other providers keep using the levels discovered by Hls.js/dash.js.
+         */
+        if (
+            resolved.playerQualities &&
+            typeof resolved.playerQualities === 'object' &&
+            Object.keys(resolved.playerQualities).length
+        ) {
+            first.quality = resolved.playerQualities;
+        }
 
         /*
          * Native-only: независимо от Android TV / webOS всегда используем
