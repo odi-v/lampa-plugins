@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.4-collaps | CollapsAdapter SHA-256: a2881ffa9c0e75d294decb896bc96f2bb3851e94b2e90e3ee64874bb3e307d05 */
+/* MnogoTV/Lampa 5.0.5-collaps | CollapsAdapter SHA-256: 64fba1d291b53615ca22720fc8a42fcb3ed6a2095b9e2fbdbcd919b294ee13a8 */
 (function (global) {
     'use strict';
 
@@ -441,22 +441,63 @@
         return { kind: kind, length: text.length, route: route.join('.') || 'direct', status: status };
     }
 
+    function nativeJsonDetail(value) {
+        var raw = value, info = { fields: [], error: '', status: 0 };
+        function safe(value) {
+            if (typeof value !== 'string' && typeof value !== 'number') return '';
+            return String(value).replace(/https?:\/\/\S+/gi, '[url]')
+                .replace(/(?:token|key|secret|authorization)\s*[:=]\s*\S+/gi, '[redacted]')
+                .replace(/[A-Za-z0-9_\/-]{24,}/g, '[redacted]').slice(0, 140);
+        }
+        for (var depth = 0; depth < 8; depth++) {
+            if (typeof raw === 'string' && /^[\s]*[{"[]/.test(raw)) {
+                try { raw = JSON.parse(raw); } catch (e) { break; }
+            }
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) break;
+            info.fields = Object.keys(raw).slice(0, 8).map(function (name) { return safe(name); });
+            var status = Number(raw.status || raw.statusCode || 0);
+            if (status >= 100 && status <= 599) info.status = status;
+            var err = raw.error;
+            var details = err && typeof err === 'object' ? err : raw;
+            var message = typeof err === 'string' ? err : details.message || details.detail || details.reason || details.description || details.code;
+            if (message !== undefined) info.error = safe(message);
+            if (err || raw.success === false || info.status >= 400) break;
+            var next = raw.data !== undefined ? raw.data : raw.body !== undefined ? raw.body :
+                raw.response !== undefined ? raw.response : raw.result;
+            if (next === undefined) break;
+            raw = next;
+        }
+        return info;
+    }
+
     function nativeDecodeSummary(value, range) {
         var info = describeNativePayload(value);
+        var detail = nativeJsonDetail(value);
+        info.json = detail;
         info.range = range ? 'yes' : 'no';
         info.summary = info.kind + ' · len=' + info.length + ' · via=' + info.route +
-            ' · HTTP=' + (info.status || '?') + ' · Range=' + info.range;
+            ' · status=' + (detail.status || info.status || '?') + ' · Range=' + info.range +
+            (detail.error ? ' · error=' + detail.error : '') +
+            (detail.fields.length ? ' · fields=' + detail.fields.join(',') : '');
         return info;
     }
 
     function base64ToArrayBuffer(value) {
         var raw = value;
-        for (var depth = 0; depth < 5; depth++) {
+        for (var depth = 0; depth < 8; depth++) {
+            if (typeof raw === 'string' && /^[\s]*[{"[]/.test(raw)) {
+                try { raw = JSON.parse(raw); } catch (jsonError) {
+                    throw new Error('Некорректный JSON-ответ native bridge');
+                }
+            }
             if (Object.prototype.toString.call(raw) === '[object ArrayBuffer]') return raw;
             if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(raw)) {
                 return raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
             }
             if (!raw || typeof raw !== 'object') break;
+            if (raw.error || raw.success === false || Number(raw.status || raw.statusCode || 0) >= 400) {
+                throw new Error('Native bridge вернул JSON с ошибкой вместо видеоданных');
+            }
             raw = raw.base64 !== undefined ? raw.base64 :
                   raw.data !== undefined ? raw.data :
                   raw.body !== undefined ? raw.body :
@@ -2368,7 +2409,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.4-collaps';
+    var VERSION = '5.0.5-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
