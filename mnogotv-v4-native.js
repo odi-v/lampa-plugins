@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.3-collaps | CollapsAdapter SHA-256: 5085d2337fa28818d137ba57c5874c97c0424b08a0077c8267a7cb5fe02f15f3 */
+/* MnogoTV/Lampa 5.0.4-collaps | CollapsAdapter SHA-256: a2881ffa9c0e75d294decb896bc96f2bb3851e94b2e90e3ee64874bb3e307d05 */
 (function (global) {
     'use strict';
 
@@ -409,6 +409,46 @@
         }
     }
 
+    function describeNativePayload(value) {
+        var root = value, raw = value, route = [], depth = 0;
+        var status = root && typeof root === 'object' ? Number(root.status || root.statusCode || 0) : 0;
+        while (raw && typeof raw === 'object' && depth++ < 5) {
+            if (Object.prototype.toString.call(raw) === '[object ArrayBuffer]') {
+                return { kind: 'arraybuffer', length: raw.byteLength, route: route.join('.'), status: status };
+            }
+            if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(raw)) {
+                return { kind: 'typed-array', length: raw.byteLength, route: route.join('.'), status: status };
+            }
+            var fields = ['base64', 'data', 'body', 'response', 'result'], field = '';
+            fields.some(function (name) { if (raw[name] !== undefined) { field = name; return true; } return false; });
+            if (!field) return { kind: 'object-without-body', length: 0, route: route.join('.'), status: status };
+            route.push(field); raw = raw[field];
+        }
+        var text = typeof raw === 'string' ? raw : '';
+        var trimmed = text.trim(), kind = typeof raw;
+        if (raw === null || raw === undefined || trimmed === '' && typeof raw === 'string') kind = 'empty';
+        else if (typeof raw === 'string') {
+            if (/^(?:<!doctype|<html|<head|<body|<\?xml)/i.test(trimmed)) kind = 'html-or-xml';
+            else if (/^[{[]/.test(trimmed)) kind = 'json-text';
+            else if (/^https?:\/\//i.test(trimmed)) kind = 'url-text';
+            else if (/^data:/i.test(trimmed)) kind = 'data-url';
+            else if (/^"[A-Za-z0-9+/=\s]+"$/.test(trimmed)) kind = 'quoted-base64';
+            else if (/^[A-Za-z0-9+/\s]*={0,2}$/.test(trimmed)) kind = 'base64-like';
+            else if (/^[A-Za-z0-9_\-\s]*={0,2}$/.test(trimmed)) kind = 'base64url-like';
+            else kind = 'non-base64-text';
+        }
+        // Deliberately omit response text, URLs, tokens and arbitrary object values.
+        return { kind: kind, length: text.length, route: route.join('.') || 'direct', status: status };
+    }
+
+    function nativeDecodeSummary(value, range) {
+        var info = describeNativePayload(value);
+        info.range = range ? 'yes' : 'no';
+        info.summary = info.kind + ' · len=' + info.length + ' · via=' + info.route +
+            ' · HTTP=' + (info.status || '?') + ' · Range=' + info.range;
+        return info;
+    }
+
     function base64ToArrayBuffer(value) {
         var raw = value;
         for (var depth = 0; depth < 5; depth++) {
@@ -638,9 +678,11 @@
                             callbacks.onSuccess({ url: context.url, data: data }, self.stats, context, null);
                         }
                         catch (decodeError) {
-                            var decodeText = 'native decode: ' + errText(decodeError);
+                            var payloadInfo = nativeDecodeSummary(response, headers.Range || headers.range);
+                            var decodeText = 'native decode: ' + payloadInfo.summary;
                             COLLAPS_NATIVE_HLS.lastError = {
                                 phase: isBinary ? 'fragment-decode' : 'text-decode',
+                                payload: payloadInfo,
                                 code: 0,
                                 text: decodeText,
                                 requestUrl: requestUrl
@@ -1017,6 +1059,7 @@
         active: false,
         generation: 0,
         qualityControl: null,
+        lastDecode: null,
         unixTime: 0,
         originalMediaPlayer: null,
         xhrInstalled: false,
@@ -1344,6 +1387,8 @@
                                 ? base64ToArrayBuffer(payload)
                                 : String(payload || '');
                         } catch (decodeError) {
+                            var payloadInfo = nativeDecodeSummary(payload, headers.Range || headers.range);
+                            COLLAPS_NATIVE_DASH.lastDecode = payloadInfo;
                             COLLAPS_NATIVE_DASH.errorCount++;
                             COLLAPS_NATIVE_DASH.lastStatus = 0;
                             self.status = 0;
@@ -1354,7 +1399,7 @@
                             self._emit('loadend', {});
                             notify(
                                 'Collaps DASH DEBUG: native decode • ' +
-                                errText(decodeError)
+                                payloadInfo.summary
                             );
                             return;
                         }
@@ -2299,6 +2344,7 @@
                 quality: COLLAPS_NATIVE_DASH.qualityControl ? COLLAPS_NATIVE_DASH.qualityControl.diagnostics() : null,
                 hls: {
                     installed: !!COLLAPS_NATIVE_HLS.installed,
+                    lastDecode: COLLAPS_NATIVE_HLS.lastError && COLLAPS_NATIVE_HLS.lastError.payload || null,
                     mappedUrls: Object.keys(COLLAPS_NATIVE_HLS.urlMap || {}).length,
                     lastRequest: COLLAPS_NATIVE_HLS.lastRequest ? String(COLLAPS_NATIVE_HLS.lastRequest.url || '') : '',
                     lastError: COLLAPS_NATIVE_HLS.lastError ? String(COLLAPS_NATIVE_HLS.lastError.phase || COLLAPS_NATIVE_HLS.lastError.message || '') : ''
@@ -2306,6 +2352,7 @@
                 dash: {
                     installed: !!COLLAPS_NATIVE_DASH.installed,
                     active: !!COLLAPS_NATIVE_DASH.active,
+                    lastDecode: COLLAPS_NATIVE_DASH.lastDecode,
                     requests: Number(COLLAPS_NATIVE_DASH.requestCount || 0),
                     successes: Number(COLLAPS_NATIVE_DASH.successCount || 0),
                     errors: Number(COLLAPS_NATIVE_DASH.errorCount || 0)
@@ -2321,7 +2368,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.3-collaps';
+    var VERSION = '5.0.4-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
