@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.2-collaps | CollapsAdapter SHA-256: 9226be608c33284ae6af5e4f16d0638080355bc0df93a00d0d3ec40999ca11b7 */
+/* MnogoTV/Lampa 5.0.3-collaps | CollapsAdapter SHA-256: 5085d2337fa28818d137ba57c5874c97c0424b08a0077c8267a7cb5fe02f15f3 */
 (function (global) {
     'use strict';
 
@@ -411,7 +411,12 @@
 
     function base64ToArrayBuffer(value) {
         var raw = value;
-        if (raw && typeof raw === 'object') {
+        for (var depth = 0; depth < 5; depth++) {
+            if (Object.prototype.toString.call(raw) === '[object ArrayBuffer]') return raw;
+            if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(raw)) {
+                return raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+            }
+            if (!raw || typeof raw !== 'object') break;
             raw = raw.base64 !== undefined ? raw.base64 :
                   raw.data !== undefined ? raw.data :
                   raw.body !== undefined ? raw.body :
@@ -422,6 +427,9 @@
         var comma = raw.indexOf('base64,');
         if (comma >= 0) raw = raw.slice(comma + 7);
         raw = raw.replace(/\s+/g, '');
+        if (!raw || !/^[A-Za-z0-9+/]*={0,2}$/.test(raw) || raw.length % 4 === 1) {
+            throw new Error('Ответ native bridge не является Base64-видеофрагментом');
+        }
         var binary = atob(raw);
         var out = new Uint8Array(binary.length);
         for (var i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i) & 255;
@@ -1007,6 +1015,8 @@
     var COLLAPS_NATIVE_DASH = {
         installed: false,
         active: false,
+        generation: 0,
+        qualityControl: null,
         unixTime: 0,
         originalMediaPlayer: null,
         xhrInstalled: false,
@@ -1066,6 +1076,8 @@
         function NativeDashXHR() {
             this._delegate = null;
             this._nativeRequest = null;
+            this._requestSerial = 0;
+            this._aborted = false;
             this._useNative = false;
             this._method = 'GET';
             this._url = '';
@@ -1178,6 +1190,8 @@
         };
 
         NativeDashXHR.prototype.open = function (method, url, async, user, password) {
+            this._requestSerial++;
+            this._aborted = false;
             this._method = String(method || 'GET').toUpperCase();
             this._url = stripHash(String(url || ''));
             this.responseURL = this._url;
@@ -1278,6 +1292,12 @@
             }
 
             this._nativeRequest = network;
+            var serial = ++this._requestSerial;
+            var generation = COLLAPS_NATIVE_DASH.generation;
+            function stale() {
+                return self._aborted || self._requestSerial !== serial ||
+                    generation !== COLLAPS_NATIVE_DASH.generation || !COLLAPS_NATIVE_DASH.active;
+            }
             COLLAPS_NATIVE_DASH.requestCount++;
             COLLAPS_NATIVE_DASH.lastUrl = this._url;
 
@@ -1317,6 +1337,7 @@
                 network.native(
                     this._url,
                     function (payload) {
+                        if (stale()) return;
                         var data;
                         try {
                             data = binary
@@ -1369,6 +1390,7 @@
                         self._emit('loadend', {});
                     },
                     function (a, c) {
+                        if (stale()) return;
                         var status =
                             a &&
                             a.status !== undefined
@@ -1420,6 +1442,8 @@
         };
 
         NativeDashXHR.prototype.abort = function () {
+            this._aborted = true;
+            this._requestSerial++;
             try {
                 if (this._nativeRequest && this._nativeRequest.clear) {
                     this._nativeRequest.clear();
@@ -1655,6 +1679,123 @@
         }
     }
 
+    function installCollapsDashQuality(player, events) {
+        if (!player || !player.getBitrateInfoListFor || !player.setQualityFor ||
+            !player.updateSettings || !player.getSettings) return null;
+        var alive = true, automatic = true, requested = null, rendered = null;
+        var subscriptions = [];
+        var generation = COLLAPS_NATIVE_DASH.generation;
+        var nativeLevels = player.getBitrateInfoListFor;
+        // Lampa adds non-configurable enabled setters to this result.
+        player.getBitrateInfoListFor = function (type) {
+            return (nativeLevels.call(player, type) || []).map(function (level) {
+                var copy = {};
+                Object.keys(level).forEach(function (key) {
+                    if (key !== 'enabled') copy[key] = level[key];
+                });
+                return copy;
+            });
+        };
+        function active() {
+            return alive && COLLAPS_NATIVE_DASH.active &&
+                generation === COLLAPS_NATIVE_DASH.generation;
+        }
+        function levels() {
+            try { return player.getBitrateInfoListFor('video') || []; }
+            catch (e) { return []; }
+        }
+        function setAuto(value) {
+            var settings = player.getSettings();
+            var abr = settings && settings.streaming && settings.streaming.abr;
+            // Lampa writes a boolean where dash.js expects a per-media object.
+            if (abr && (!abr.autoSwitchBitrate || typeof abr.autoSwitchBitrate !== 'object')) {
+                abr.autoSwitchBitrate = { video: value, audio: true };
+            }
+            player.updateSettings({ streaming: { abr: {
+                autoSwitchBitrate: { video: value, audio: true }
+            } } });
+        }
+        function labelFor(index, list) {
+            var match = null;
+            list.some(function (level, i) {
+                if (Number(level.qualityIndex === undefined ? i : level.qualityIndex) === Number(index)) {
+                    match = level; return true;
+                }
+                return false;
+            });
+            return match && Number(match.height) > 0 ? Number(match.height) + 'p' : '';
+        }
+        function publish() {
+            if (!active() || !Lampa.PlayerPanel || !Lampa.PlayerPanel.quality ||
+                !Lampa.PlayerPanel.setLevels) return;
+            var list = levels();
+            if (!list.length) return;
+            var actual = rendered === null ? '' : labelFor(rendered, list);
+            var target = requested === null ? '' : labelFor(requested, list);
+            var label = automatic ? 'AUTO' + (actual ? ' · ' + actual : '') :
+                (actual && rendered !== requested ? actual + ' → ' + target : target);
+            var menu = [];
+            function entry(title, index) {
+                var row = { title: title, quality: title, selected: index === null ? automatic : !automatic && requested === index };
+                Object.defineProperty(row, 'enabled', {
+                    configurable: true,
+                    get: function () { return row.selected; },
+                    set: function (value) {
+                        if (!value || !active()) return;
+                        automatic = index === null;
+                        requested = index;
+                        setAuto(automatic);
+                        if (!automatic) player.setQualityFor('video', index, false);
+                        publish();
+                    }
+                });
+                menu.push(row);
+            }
+            entry('AUTO', null);
+            list.forEach(function (level, i) {
+                var index = Number(level.qualityIndex === undefined ? i : level.qualityIndex);
+                if (Number(level.height) > 0) entry(Number(level.height) + 'p', index);
+            });
+            // Use Lampa's panel API; array entries switch quality without reloading the URL.
+            Lampa.PlayerPanel.quality({}, '__collaps_levels__');
+            Lampa.PlayerPanel.setLevels(menu, label || 'AUTO');
+        }
+        function on(name, callback) {
+            if (name && player.on) {
+                player.on(name, callback);
+                subscriptions.push({ name: name, callback: callback });
+            }
+        }
+        on(events.STREAM_INITIALIZED, function () {
+            if (!active()) return;
+            setAuto(automatic);
+            publish();
+        });
+        on(events.QUALITY_CHANGE_RENDERED, function (event) {
+            if (!active() || !event || event.mediaType !== 'video') return;
+            if (event.newQuality !== undefined) rendered = Number(event.newQuality);
+            publish();
+        });
+        on(events.PLAYBACK_PLAYING || events.PLAYBACK_STARTED, publish);
+        return {
+            start: function () {
+                if (!active()) return;
+                automatic = true; requested = null; rendered = null;
+                setAuto(true);
+            },
+            dispose: function () {
+                alive = false;
+                subscriptions.forEach(function (sub) {
+                    try { if (player.off) player.off(sub.name, sub.callback); } catch (e) {}
+                });
+                subscriptions = [];
+            },
+            diagnostics: function () {
+                return { automatic: automatic, requested: requested, rendered: rendered };
+            }
+        };
+    }
+
     function configureCollapsNativeDash(unixTime) {
         COLLAPS_NATIVE_DASH.unixTime = parseInt(unixTime || 0, 10) || 0;
         COLLAPS_NATIVE_DASH.active = true;
@@ -1690,6 +1831,16 @@
                     typeof player.extend === 'function'
                 ) {
                     var unix = COLLAPS_NATIVE_DASH.unixTime;
+                    if (COLLAPS_NATIVE_DASH.qualityControl) COLLAPS_NATIVE_DASH.qualityControl.dispose();
+                    var qualityControl = installCollapsDashQuality(player, factory.events || dashjs.MediaPlayer.events || {});
+                    COLLAPS_NATIVE_DASH.qualityControl = qualityControl;
+                    if (typeof player.destroy === 'function') {
+                        var originalDestroy = player.destroy;
+                        player.destroy = function () {
+                            if (qualityControl) qualityControl.dispose();
+                            return originalDestroy.apply(player, arguments);
+                        };
+                    }
 
                     try {
                         player.extend(
@@ -1791,6 +1942,7 @@
                             var originalInitialize = player.initialize;
 
                             player.initialize = function () {
+                                if (qualityControl) qualityControl.start();
                                 var result =
                                     originalInitialize.apply(
                                         player,
@@ -2102,6 +2254,9 @@
             } catch (e) {}
             try {
                 COLLAPS_NATIVE_DASH.active = false;
+                COLLAPS_NATIVE_DASH.generation++;
+                if (COLLAPS_NATIVE_DASH.qualityControl) COLLAPS_NATIVE_DASH.qualityControl.dispose();
+                COLLAPS_NATIVE_DASH.qualityControl = null;
                 COLLAPS_NATIVE_DASH.unixTime = 0;
                 setCollapsDashAudioChoice(null);
             } catch (e2) {}
@@ -2141,6 +2296,7 @@
         this.diagnostics = function () {
             return {
                 adapter: 'CollapsAdapter',
+                quality: COLLAPS_NATIVE_DASH.qualityControl ? COLLAPS_NATIVE_DASH.qualityControl.diagnostics() : null,
                 hls: {
                     installed: !!COLLAPS_NATIVE_HLS.installed,
                     mappedUrls: Object.keys(COLLAPS_NATIVE_HLS.urlMap || {}).length,
@@ -2165,7 +2321,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.2-collaps';
+    var VERSION = '5.0.3-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -2426,6 +2582,7 @@
             try { Lampa.Player.runas('lampa'); } catch (e) {}
             try {
                 if (Lampa.PlayerVideo) {
+                    if (Lampa.PlayerVideo.clearParamas) Lampa.PlayerVideo.clearParamas();
                     if (voice && voice.index >= 0 && Lampa.PlayerVideo.setParams) Lampa.PlayerVideo.setParams({ track: voice.index });
                     else if (Lampa.PlayerVideo.clearParamas) Lampa.PlayerVideo.clearParamas();
                 }
