@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.5-collaps | CollapsAdapter SHA-256: 64fba1d291b53615ca22720fc8a42fcb3ed6a2095b9e2fbdbcd919b294ee13a8 */
+/* MnogoTV/Lampa 5.0.6-collaps | CollapsAdapter SHA-256: 9375ff10722fb5e2e1e6c64b41000e5573d4ef9af25746df3886734be2c78a58 */
 (function (global) {
     'use strict';
 
@@ -442,18 +442,27 @@
     }
 
     function nativeJsonDetail(value) {
-        var raw = value, info = { fields: [], error: '', status: 0 };
+        var raw = value, info = { fields: [], error: '', status: 0, parse: 'not-json', preview: '' };
         function safe(value) {
             if (typeof value !== 'string' && typeof value !== 'number') return '';
-            return String(value).replace(/https?:\/\/\S+/gi, '[url]')
-                .replace(/(?:token|key|secret|authorization)\s*[:=]\s*\S+/gi, '[redacted]')
+            return String(value).replace(/[\x00-\x1f\x7f]/g, ' ').replace(/https?:\/\/\S+/gi, '[url]')
+                .replace(/(?:token|key|secret|authorization)[\"'\s]*[:=][\"'\s]*[^,}\s]+/gi, '[redacted]')
                 .replace(/[A-Za-z0-9_\/-]{24,}/g, '[redacted]').slice(0, 140);
         }
         for (var depth = 0; depth < 8; depth++) {
             if (typeof raw === 'string' && /^[\s]*[{"[]/.test(raw)) {
-                try { raw = JSON.parse(raw); } catch (e) { break; }
+                try { raw = JSON.parse(raw); info.parse = 'valid'; } catch (e) {
+                    info.parse = 'invalid'; info.preview = safe(raw); break;
+                }
             }
-            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) break;
+            if (Array.isArray(raw)) {
+                info.parse = 'array(' + raw.length + ')';
+                if (raw.length && raw[0] && typeof raw[0] === 'object') { raw = raw[0]; }
+                else { info.preview = safe(raw.slice(0, 3).join(' | ')); break; }
+            }
+            if (!raw || typeof raw !== 'object') {
+                info.preview = safe(raw); break;
+            }
             info.fields = Object.keys(raw).slice(0, 8).map(function (name) { return safe(name); });
             var status = Number(raw.status || raw.statusCode || 0);
             if (status >= 100 && status <= 599) info.status = status;
@@ -475,9 +484,11 @@
         var detail = nativeJsonDetail(value);
         info.json = detail;
         info.range = range ? 'yes' : 'no';
-        info.summary = info.kind + ' · len=' + info.length + ' · via=' + info.route +
+        // Put the actionable detail first: TV notifications can clip long lines.
+        info.summary = (detail.error ? 'error=' + detail.error + ' · ' : '') +
+            (detail.preview ? 'text=' + detail.preview + ' · ' : '') +
+            'JSON=' + detail.parse + ' · ' + info.kind + ' · len=' + info.length +
             ' · status=' + (detail.status || info.status || '?') + ' · Range=' + info.range +
-            (detail.error ? ' · error=' + detail.error : '') +
             (detail.fields.length ? ' · fields=' + detail.fields.join(',') : '');
         return info;
     }
@@ -1439,7 +1450,7 @@
                             self._emit('error', { error: decodeError });
                             self._emit('loadend', {});
                             notify(
-                                'Collaps DASH DEBUG: native decode • ' +
+                                'Collaps 5.0.6 DASH: decode • ' +
                                 payloadInfo.summary
                             );
                             return;
@@ -2409,7 +2420,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.5-collaps';
+    var VERSION = '5.0.6-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
