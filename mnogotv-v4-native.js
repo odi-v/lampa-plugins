@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.8-collaps | CollapsAdapter SHA-256: 6369e2ec7d624d43a9d446b5799490f7db7bd55813bcda183bb70d118359a500 */
+/* MnogoTV/Lampa 5.0.9-collaps | CollapsAdapter SHA-256: 23c39c9a4039c14d1f662d4acfbf339aa07ea3973ca2be9fe78972a3b5fd7b61 */
 (function (global) {
     'use strict';
 
@@ -550,16 +550,41 @@
     // No provider state is shared and normal successful requests are unchanged.
     function collapsDashRequest(network, url, complete, fail, post, options, stale, budget, recovery) {
         var ended = false, deadline = Date.now() + Math.max(10000, Number(budget) || 30000);
+        var telemetry = null, requestId = null, started = Date.now();
+        if (recovery && options.dataType === 'base64') {
+            telemetry = recovery.telemetry || (recovery.telemetry = {seq: 0, active: {}, completed: []});
+            Object.keys(telemetry.active).forEach(function (id) { if (!telemetry.active[id].alive()) delete telemetry.active[id]; });
+            requestId = ++telemetry.seq;
+            telemetry.active[requestId] = {started: started, alive: function () { return !ended && !stale(); }};
+        }
+        function record(value) {
+            if (!telemetry) return;
+            delete telemetry.active[requestId];
+            var bytes = 0;
+            var raw = value;
+            for (var depth = 0; raw && typeof raw === 'object' && depth < 8; depth++) {
+                if (typeof raw.byteLength === 'number') { bytes = raw.byteLength; break; }
+                raw = raw.base64 !== undefined ? raw.base64 : raw.data !== undefined ? raw.data : raw.body;
+            }
+            // Do not decode/copy media again just to measure it.
+            if (!bytes && typeof raw === 'string' && /^[A-Za-z0-9+/]/.test(raw)) {
+                bytes = Math.floor(raw.length * 3 / 4) - (/==$/.test(raw) ? 2 : /=$/.test(raw) ? 1 : 0);
+            }
+            if (!bytes) return;
+            telemetry.completed.push({bytes: bytes, ms: Date.now() - started, finished: Date.now()});
+            if (telemetry.completed.length > 64) telemetry.completed.shift();
+        }
         function inactive() { return ended || stale(); }
         function error(message) {
             if (inactive()) return;
             ended = true;
+            if (telemetry) delete telemetry.active[requestId];
             try { if (network.clear) network.clear(); } catch (e) {}
             fail({status: 0, responseText: message});
         }
         function done(value) {
             if (inactive()) return;
-            ended = true; complete(value);
+            ended = true; record(value); complete(value);
         }
         function request(params, ok, bad) {
             if (inactive()) return;
@@ -668,7 +693,9 @@
             else done(value);
         }, function (e) {
             if (inactive()) return;
-            ended = true; fail(e);
+            ended = true;
+            if (telemetry) delete telemetry.active[requestId];
+            fail(e);
         });
     }
 
@@ -1257,6 +1284,8 @@
         qualityControl: null,
         lastDecode: null,
         rangeRecovery: {paths: {}},
+        monitor: null,
+        playbackTelemetry: null,
         unixTime: 0,
         originalMediaPlayer: null,
         xhrInstalled: false,
@@ -1595,7 +1624,7 @@
                             self._emit('error', { error: decodeError });
                             self._emit('loadend', {});
                             notify(
-                                'Collaps 5.0.8 DASH: decode • ' +
+                                'Collaps 5.0.9 DASH: decode • ' +
                                 payloadInfo.summary
                             );
                             return;
@@ -1659,7 +1688,7 @@
                         self._emit('loadend', {});
 
                         notify(
-                            'Collaps 5.0.8 DASH: ' +
+                            'Collaps 5.0.9 DASH: ' +
                             (a && /^Collaps Range:/.test(a.responseText || '')
                                 ? a.responseText : 'native HTTP ' + (self.status || 0))
                         );
@@ -1920,6 +1949,87 @@
         }
     }
 
+    function installCollapsMonitor(player) {
+        var video = null, panel = null, timer = null, disposed = false, previous = null;
+        var phase = 'запуск', subscriptions = [], generation = COLLAPS_NATIVE_DASH.generation;
+        function active() { return !disposed && COLLAPS_NATIVE_DASH.active && generation === COLLAPS_NATIVE_DASH.generation; }
+        function sample() {
+            if (!active()) return dispose();
+            if (!video) return;
+            var now = Date.now(), recovery = COLLAPS_NATIVE_DASH.rangeRecovery;
+            var network = recovery && recovery.telemetry, count = 0, oldest = 0, largest = null;
+            if (network) {
+                Object.keys(network.active).forEach(function (id) {
+                    var item = network.active[id];
+                    if (!item.alive()) { delete network.active[id]; return; }
+                    count++; oldest = Math.max(oldest, (now - item.started) / 1000);
+                });
+                network.completed.forEach(function (item) {
+                    if (now - item.finished < 15000 && (!largest || item.bytes > largest.bytes)) largest = item;
+                });
+            }
+            function buffer(type) {
+                try {
+                    var value = player.getBufferLength && player.getBufferLength(type);
+                    return typeof value === 'number' && isFinite(value) ? value.toFixed(1) + 'с' : 'н/д';
+                } catch (e) { return 'н/д'; }
+            }
+            var av = 0;
+            try {
+                for (var i = 0; i < video.buffered.length; i++) {
+                    if (video.currentTime >= video.buffered.start(i) && video.currentTime <= video.buffered.end(i)) {
+                        av = video.buffered.end(i) - video.currentTime; break;
+                    }
+                }
+            } catch (e) {}
+            var frames = 'н/д', total = null, dropped = null;
+            try {
+                if (video.getVideoPlaybackQuality) {
+                    var quality = video.getVideoPlaybackQuality(); total = quality.totalVideoFrames; dropped = quality.droppedVideoFrames;
+                } else { total = video.webkitDecodedFrameCount; dropped = video.webkitDroppedFrameCount; }
+                if (typeof total === 'number' && typeof dropped === 'number') {
+                    frames = previous && total >= previous.total && dropped >= previous.dropped
+                        ? '+' + (dropped - previous.dropped) + '/' + (total - previous.total) + ' за ' + ((now - previous.time) / 1000).toFixed(1) + 'с' : 'сбор данных';
+                    previous = {total: total, dropped: dropped, time: now};
+                }
+            } catch (e2) {}
+            var text = 'Collaps 5.0.9 | ' + (video.videoHeight || '?') + 'p | ' + (video.paused ? 'пауза' : phase) + '\n' +
+                'Буфер видео ' + buffer('video') + ' | звук ' + buffer('audio') + ' | общий ' + av.toFixed(1) + 'с\n' +
+                'Пропуски кадров: ' + frames + ' | запросов ' + count + ' | ожидание ' + oldest.toFixed(1) + 'с\n' +
+                'Крупный фрагм. за 15с: ' + (largest ? (largest.bytes / 1048576).toFixed(2) + ' МБ / ' + (largest.ms / 1000).toFixed(2) + 'с' : 'нет данных');
+            COLLAPS_NATIVE_DASH.playbackTelemetry = {time: now, text: text};
+            if (panel) panel.textContent = text;
+        }
+        function dispose() {
+            disposed = true;
+            if (timer !== null) clearInterval(timer);
+            timer = null;
+            subscriptions.forEach(function (sub) { if (video && video.removeEventListener) video.removeEventListener(sub.name, sub.fn); });
+            subscriptions = [];
+            if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+            panel = null; video = null;
+        }
+        return {start: function (element) {
+            if (!active() || timer !== null) return;
+            video = element && element.addEventListener ? element : null;
+            if (!video) { try { video = player.getVideoElement && player.getVideoElement(); } catch (e) {} }
+            if (!video || !video.addEventListener) return;
+            ['waiting', 'playing', 'seeking', 'seeked', 'pause', 'ended'].forEach(function (name) {
+                var fn = function () {
+                    phase = {waiting:'загрузка',playing:'воспроизведение',seeking:'перемотка',seeked:'после перемотки',pause:'пауза',ended:'конец'}[name];
+                    sample();
+                };
+                video.addEventListener(name, fn); subscriptions.push({name:name, fn:fn});
+            });
+            if (typeof document !== 'undefined' && document.createElement && document.body) {
+                panel = document.createElement('div');
+                panel.style.cssText = 'position:fixed;left:3%;top:3%;z-index:2147483646;background:rgba(0,0,0,.8);color:#fff;padding:10px 14px;font:18px/1.4 sans-serif;white-space:pre-line;pointer-events:none;';
+                document.body.appendChild(panel);
+            }
+            timer = setInterval(sample, 1000); sample();
+        }, dispose: dispose};
+    }
+
     function installCollapsDashQuality(player, events) {
         if (!player || !player.getBitrateInfoListFor || !player.setQualityFor ||
             !player.updateSettings || !player.getSettings) return null;
@@ -2073,12 +2183,16 @@
                 ) {
                     var unix = COLLAPS_NATIVE_DASH.unixTime;
                     if (COLLAPS_NATIVE_DASH.qualityControl) COLLAPS_NATIVE_DASH.qualityControl.dispose();
+                    if (COLLAPS_NATIVE_DASH.monitor) COLLAPS_NATIVE_DASH.monitor.dispose();
+                    var monitor = installCollapsMonitor(player);
+                    COLLAPS_NATIVE_DASH.monitor = monitor;
                     var qualityControl = installCollapsDashQuality(player, factory.events || dashjs.MediaPlayer.events || {});
                     COLLAPS_NATIVE_DASH.qualityControl = qualityControl;
                     if (typeof player.destroy === 'function') {
                         var originalDestroy = player.destroy;
                         player.destroy = function () {
                             if (qualityControl) qualityControl.dispose();
+                            monitor.dispose();
                             return originalDestroy.apply(player, arguments);
                         };
                     }
@@ -2190,6 +2304,7 @@
                                         arguments
                                     );
 
+                                monitor.start(arguments[0]);
                                 [250, 700, 1500, 3000].forEach(function (ms) {
                                     setTimeout(function () {
                                         applyCollapsDashAudioChoice(
@@ -2497,6 +2612,9 @@
                 COLLAPS_NATIVE_DASH.active = false;
                 COLLAPS_NATIVE_DASH.generation++;
                 COLLAPS_NATIVE_DASH.rangeRecovery = {paths: {}};
+                if (COLLAPS_NATIVE_DASH.monitor) COLLAPS_NATIVE_DASH.monitor.dispose();
+                COLLAPS_NATIVE_DASH.monitor = null;
+                COLLAPS_NATIVE_DASH.playbackTelemetry = null;
                 if (COLLAPS_NATIVE_DASH.qualityControl) COLLAPS_NATIVE_DASH.qualityControl.dispose();
                 COLLAPS_NATIVE_DASH.qualityControl = null;
                 COLLAPS_NATIVE_DASH.unixTime = 0;
@@ -2538,6 +2656,7 @@
         this.diagnostics = function () {
             return {
                 adapter: 'CollapsAdapter',
+                playback: COLLAPS_NATIVE_DASH.playbackTelemetry,
                 quality: COLLAPS_NATIVE_DASH.qualityControl ? COLLAPS_NATIVE_DASH.qualityControl.diagnostics() : null,
                 hls: {
                     installed: !!COLLAPS_NATIVE_HLS.installed,
@@ -2565,7 +2684,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.8-collaps';
+    var VERSION = '5.0.9-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
