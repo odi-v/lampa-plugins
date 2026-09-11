@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.7-collaps | CollapsAdapter SHA-256: a1429dc4e9637464fbf130e1ad9fcc1c1723db0790213de9a56021443c15e9ec */
+/* MnogoTV/Lampa 5.0.8-collaps | CollapsAdapter SHA-256: 6369e2ec7d624d43a9d446b5799490f7db7bd55813bcda183bb70d118359a500 */
 (function (global) {
     'use strict';
 
@@ -528,14 +528,33 @@
         return out.buffer;
     }
 
+    function collapsDashRangeKey(url) {
+        try {
+            var u = new URL(url), path = u.pathname;
+            if (path.indexOf('/x-en-x/') !== -1) {
+                var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+                var subst = 'DlChEXitLONYRkFjAsnBbymWzSHMqKPgQZpvwerofJTVdIuUcxaG';
+                var encoded = path.split('/x-en-x/')[1].replace(/[A-Za-z]/g, function (ch) {
+                    return alphabet.charAt(subst.indexOf(ch));
+                });
+                var logical = atob(encoded);
+                path = logical.slice(logical.indexOf('/') + 1).split('?')[0];
+            }
+            // Learn only numbered media segments; audio/init and other paths stay independent.
+            if (!/\/\d+\.(?:webm|m4s|mp4|ts)$/.test(path)) return '';
+            return u.origin + path.slice(0, path.lastIndexOf('/') + 1);
+        } catch (e) { return ''; }
+    }
+
     // Per-request recovery for the Android bridge's oversized-response marker.
     // No provider state is shared and normal successful requests are unchanged.
-    function collapsDashRequest(network, url, complete, fail, post, options, stale, budget) {
+    function collapsDashRequest(network, url, complete, fail, post, options, stale, budget, recovery) {
         var ended = false, deadline = Date.now() + Math.max(10000, Number(budget) || 30000);
         function inactive() { return ended || stale(); }
         function error(message) {
             if (inactive()) return;
             ended = true;
+            try { if (network.clear) network.clear(); } catch (e) {}
             fail({status: 0, responseText: message});
         }
         function done(value) {
@@ -555,8 +574,8 @@
                 }, post, params);
             } catch (e) { error('Collaps Range: ' + errText(e)); }
         }
-        request(options, function (value) {
-            if (options.dataType !== 'base64' || value !== '[Response too large, skipped]') return done(value);
+        var rangeKey = collapsDashRangeKey(url);
+        function recover() {
             var headers = {}, start = 0, end = null, rawRange = '';
             Object.keys(options.headers || {}).forEach(function (key) {
                 if (key.toLowerCase() === 'range') rawRange = options.headers[key];
@@ -571,12 +590,15 @@
             // 256 KiB binary -> about 342 KiB Base64, below the failing multi-MB responses.
             var chunkSize = 262144, overlap = 32, maxBytes = 67108864;
             var chunks = [], total = 0, tail = null, firstByte = null;
+            var stride = chunkSize - overlap, issued = 0, consumed = 0, inflight = 0, ready = {}, pumping = false;
             function finish() {
                 if (inactive()) return;
                 if (!total) return error('Collaps Range: пустой фрагмент');
                 var out = new Uint8Array(total), offset = 0;
                 chunks.forEach(function (chunk) { out.set(chunk, offset); offset += chunk.length; });
-                chunks = []; done(out.buffer);
+                chunks = []; ready = {};
+                try { if (network.clear) network.clear(); } catch (e) {}
+                done(out.buffer);
             }
             function get(a, b, ok, bad) {
                 var h = {};
@@ -587,18 +609,16 @@
                 request({dataType: 'base64', headers: h}, function (body) {
                     var bytes;
                     try { bytes = new Uint8Array(base64ToArrayBuffer(body)); }
-                    catch (e) { return error('Collaps Range: часть не получена — ' + errText(e)); }
-                    if (bytes.length > b - a + 1) return error('Collaps Range: сервер проигнорировал диапазон');
+                    catch (e) { return bad({rangeError: 'Collaps Range: часть не получена — ' + errText(e)}); }
+                    if (bytes.length > b - a + 1) return bad({rangeError: 'Collaps Range: сервер проигнорировал диапазон'});
                     ok(bytes);
                 }, bad);
             }
-            function next() {
-                if (inactive()) return;
-                var keep = tail ? tail.length : 0;
-                var a = start + total - keep, b = a + chunkSize - 1;
-                if (end !== null) b = Math.min(b, end);
-                if (total >= maxBytes) return error('Collaps Range: превышен предел сборки 64 MiB');
-                get(a, b, function (bytes) {
+            function drain() {
+                while (!inactive() && ready[consumed]) {
+                    var item = ready[consumed]; delete ready[consumed];
+                    if (item.error) return error(item.error);
+                    var bytes = item.bytes, keep = tail ? tail.length : 0;
                     if (bytes.length < keep) return error('Collaps Range: фрагмент изменился или обрезан');
                     for (var i = 0; i < keep; i++) {
                         if (bytes[i] !== tail[i]) return error('Collaps Range: части не совпадают');
@@ -606,22 +626,46 @@
                     if (!total && bytes[0] !== firstByte) return error('Collaps Range: начальные данные изменились');
                     var piece = bytes.subarray(keep);
                     if (total + piece.length > maxBytes) return error('Collaps Range: превышен предел сборки 64 MiB');
-                    chunks.push(piece); total += piece.length;
-                    if (bytes.length < b - a + 1 || end !== null && start + total > end) return finish();
+                    chunks.push(piece); total += piece.length; consumed++;
+                    if (bytes.length < item.length || end !== null && start + total > end) return finish();
                     if (!piece.length) return error('Collaps Range: нет продвижения');
                     tail = bytes.subarray(bytes.length - Math.min(overlap, bytes.length));
-                    next();
-                }, function (e) {
-                    // Overlap means even at exact EOF a valid next request still has bytes.
-                    // A 416 here is an error, never evidence for a successful partial file.
-                    error('Collaps Range: запрос части не выполнен (status=' + (e && e.status || '?') + ')');
+                }
+            }
+            function launch(index, a, b) {
+                inflight++;
+                function receive(item) {
+                    if (inactive()) return;
+                    inflight--; ready[index] = item; drain(); pump();
+                }
+                get(a, b, function (bytes) { receive({bytes: bytes, length: b - a + 1}); }, function (e) {
+                    receive({error: e && e.rangeError || 'Collaps Range: запрос части не выполнен (status=' + (e && e.status || '?') + ')'});
                 });
+            }
+            function pump() {
+                if (inactive() || pumping) return;
+                pumping = true;
+                // At most two unconsumed parts, including out-of-order completed requests.
+                while (!inactive() && inflight < 2 && issued - consumed < 2) {
+                    var a = start + issued * stride, b = a + chunkSize - 1;
+                    if (end !== null) { if (a > end) break; b = Math.min(b, end); }
+                    if (a - start >= maxBytes) { error('Collaps Range: превышен предел сборки 64 MiB'); break; }
+                    launch(issued++, a, b);
+                }
+                pumping = false;
             }
             // Verify Range behaviour on this very URL, not just Accept-Ranges advertising.
             get(start, start, function (bytes) {
                 if (bytes.length !== 1) return error('Collaps Range: проверка диапазона не пройдена');
-                firstByte = bytes[0]; next();
-            }, function (e) { error('Collaps Range: диапазоны недоступны (status=' + (e && e.status || '?') + ')'); });
+                firstByte = bytes[0];
+                if (recovery && rangeKey) recovery.paths[rangeKey] = true;
+                pump();
+            }, function (e) { error(e && e.rangeError || 'Collaps Range: диапазоны недоступны (status=' + (e && e.status || '?') + ')'); });
+        }
+        if (options.dataType === 'base64' && recovery && rangeKey && recovery.paths[rangeKey]) return recover();
+        request(options, function (value) {
+            if (options.dataType === 'base64' && value === '[Response too large, skipped]') recover();
+            else done(value);
         }, function (e) {
             if (inactive()) return;
             ended = true; fail(e);
@@ -1212,6 +1256,7 @@
         generation: 0,
         qualityControl: null,
         lastDecode: null,
+        rangeRecovery: {paths: {}},
         unixTime: 0,
         originalMediaPlayer: null,
         xhrInstalled: false,
@@ -1550,7 +1595,7 @@
                             self._emit('error', { error: decodeError });
                             self._emit('loadend', {});
                             notify(
-                                'Collaps 5.0.7 DASH: decode • ' +
+                                'Collaps 5.0.8 DASH: decode • ' +
                                 payloadInfo.summary
                             );
                             return;
@@ -1614,7 +1659,7 @@
                         self._emit('loadend', {});
 
                         notify(
-                            'Collaps 5.0.7 DASH: ' +
+                            'Collaps 5.0.8 DASH: ' +
                             (a && /^Collaps Range:/.test(a.responseText || '')
                                 ? a.responseText : 'native HTTP ' + (self.status || 0))
                         );
@@ -1623,7 +1668,7 @@
                     {
                         dataType: binary ? 'base64' : 'text',
                         headers: headers
-                    }, stale, Math.max(10000, Number(this._timeout || 0) || 30000)
+                    }, stale, Math.max(10000, Number(this._timeout || 0) || 30000), COLLAPS_NATIVE_DASH.rangeRecovery
                 );
             } catch (e7) {
                 COLLAPS_NATIVE_DASH.errorCount++;
@@ -2451,6 +2496,7 @@
             try {
                 COLLAPS_NATIVE_DASH.active = false;
                 COLLAPS_NATIVE_DASH.generation++;
+                COLLAPS_NATIVE_DASH.rangeRecovery = {paths: {}};
                 if (COLLAPS_NATIVE_DASH.qualityControl) COLLAPS_NATIVE_DASH.qualityControl.dispose();
                 COLLAPS_NATIVE_DASH.qualityControl = null;
                 COLLAPS_NATIVE_DASH.unixTime = 0;
@@ -2519,7 +2565,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.7-collaps';
+    var VERSION = '5.0.8-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
