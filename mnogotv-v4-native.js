@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.11-debug-collaps | CollapsAdapter SHA-256: eee35037899a2ab1e00e959b12f3e650b4c59650a2e0e63d2c9ec98851ede6f7 */
+/* MnogoTV/Lampa 5.0.12-debug-collaps | CollapsAdapter SHA-256: eee35037899a2ab1e00e959b12f3e650b4c59650a2e0e63d2c9ec98851ede6f7 */
 (function (global) {
     'use strict';
 
@@ -387,13 +387,18 @@
      */
     var COLLAPS_NATIVE_HLS = {
         installed: false,
+        active: false,
+        generation: 0,
         originalLoader: null,
         unixTime: 0,
         key: '',
         headers: {},
         urlMap: {},
         lastRequest: null,
-        lastError: null
+        lastError: null,
+        monitor: null,
+        playbackTelemetry: null,
+        selectedPath: 'HLS'
     };
 
     function stripHash(url) {
@@ -746,6 +751,7 @@
     }
 
     function configureCollapsNativeHls(rawUrl, clientUrl, unixTime, key, headers) {
+        COLLAPS_NATIVE_HLS.active = true;
         COLLAPS_NATIVE_HLS.unixTime = parseInt(unixTime || 0, 10) || 0;
         COLLAPS_NATIVE_HLS.key = String(key || '');
         COLLAPS_NATIVE_HLS.headers = headers || {};
@@ -1626,7 +1632,7 @@
                             self._emit('error', { error: decodeError });
                             self._emit('loadend', {});
                             notify(
-                                'Collaps 5.0.11 DEBUG DASH: decode • ' +
+                                'Collaps 5.0.12 DEBUG DASH: decode • ' +
                                 payloadInfo.summary
                             );
                             return;
@@ -1692,7 +1698,7 @@
                         self._emit('loadend', {});
 
                         notify(
-                            'Collaps 5.0.11 DEBUG DASH: ' +
+                            'Collaps 5.0.12 DEBUG DASH: ' +
                             (a && /^Collaps Range:/.test(a.responseText || '')
                                 ? a.responseText : 'native HTTP ' + (self.status || 0))
                         );
@@ -2085,7 +2091,7 @@
             var mediaTime = Number(video.currentTime || 0);
             var dims = (video.videoWidth || '?') + 'x' + (video.videoHeight || '?');
 
-            var text = 'Collaps 5.0.11 DEBUG | ' + dims + ' | ' + (video.paused ? 'пауза' : phase) + '\n' +
+            var text = 'Collaps 5.0.12 DEBUG | ' + dims + ' | ' + (video.paused ? 'пауза' : phase) + '\n' +
                 'Поток: ' + COLLAPS_NATIVE_DASH.selectedPath + ' | кодек: ' + codec + '\n' +
                 'MPD: ' + (heights.sort(function (a, b) { return a - b; }).join(', ') || 'н/д') + ' | t=' + mediaTime.toFixed(1) + 'с\n' +
                 'readyState ' + ready + ' | networkState ' + netState + ' | rate ' + Number(video.playbackRate || 1).toFixed(2) + 'x\n' +
@@ -2167,6 +2173,151 @@
             },
             dispose: dispose
         };
+    }
+
+
+    function installCollapsHlsMonitor() {
+        var video = null, panel = null, timer = null, disposed = false, previous = null;
+        var phase = 'запуск', subscriptions = [], retries = [], generation = COLLAPS_NATIVE_HLS.generation;
+
+        function active() {
+            return !disposed && COLLAPS_NATIVE_HLS.active && generation === COLLAPS_NATIVE_HLS.generation;
+        }
+
+        function stateLabel(value, map) {
+            return map[value] !== undefined ? map[value] : String(value);
+        }
+
+        function findVideo() {
+            try {
+                var nodes = document && document.querySelectorAll ? document.querySelectorAll('video') : [];
+                for (var i = nodes.length - 1; i >= 0; i--) {
+                    if (nodes[i] && nodes[i].addEventListener) return nodes[i];
+                }
+            } catch (e) {}
+            return null;
+        }
+
+        function bufferedAhead() {
+            var value = 0;
+            try {
+                for (var i = 0; i < video.buffered.length; i++) {
+                    if (video.currentTime >= video.buffered.start(i) && video.currentTime <= video.buffered.end(i)) {
+                        value = video.buffered.end(i) - video.currentTime;
+                        break;
+                    }
+                }
+            } catch (e) {}
+            return value;
+        }
+
+        function sample() {
+            if (!active()) return dispose();
+            if (!video) return;
+            var now = Date.now(), av = bufferedAhead();
+            var total = null, dropped = null, frameDelta = 'сбор данных', cumulative = 'н/д';
+            try {
+                if (video.getVideoPlaybackQuality) {
+                    var quality = video.getVideoPlaybackQuality();
+                    total = Number(quality.totalVideoFrames);
+                    dropped = Number(quality.droppedVideoFrames);
+                } else {
+                    total = Number(video.webkitDecodedFrameCount);
+                    dropped = Number(video.webkitDroppedFrameCount);
+                }
+                if (isFinite(total) && isFinite(dropped)) {
+                    var cumulativePct = total > 0 ? dropped * 100 / total : 0;
+                    cumulative = dropped + '/' + total + ' (' + cumulativePct.toFixed(2) + '%)';
+                    if (previous && total >= previous.total && dropped >= previous.dropped) {
+                        var dt = Math.max(0.001, (now - previous.time) / 1000);
+                        var dTotal = total - previous.total;
+                        var dDropped = dropped - previous.dropped;
+                        var fps = dTotal / dt;
+                        var deltaPct = dTotal > 0 ? dDropped * 100 / dTotal : 0;
+                        frameDelta = '+' + dDropped + '/' + dTotal + ' · ' + fps.toFixed(1) + ' кадр/с · drop ' + deltaPct.toFixed(1) + '%';
+                    }
+                    previous = {total: total, dropped: dropped, time: now};
+                }
+            } catch (e2) {}
+
+            var ready = stateLabel(Number(video.readyState), {
+                0: '0/HAVE_NOTHING', 1: '1/METADATA', 2: '2/CURRENT', 3: '3/FUTURE', 4: '4/ENOUGH'
+            });
+            var netState = stateLabel(Number(video.networkState), {
+                0: '0/EMPTY', 1: '1/IDLE', 2: '2/LOADING', 3: '3/NO_SOURCE'
+            });
+            var dims = (video.videoWidth || '?') + 'x' + (video.videoHeight || '?');
+            var last = COLLAPS_NATIVE_HLS.lastRequest;
+            var err = COLLAPS_NATIVE_HLS.lastError;
+            var text = 'Collaps 5.0.12 DEBUG | ' + dims + ' | ' + (video.paused ? 'пауза' : phase) + '\n' +
+                'Поток: ' + COLLAPS_NATIVE_HLS.selectedPath + ' | HLS/Hls.js native loader\n' +
+                't=' + Number(video.currentTime || 0).toFixed(1) + 'с | rate ' + Number(video.playbackRate || 1).toFixed(2) + 'x\n' +
+                'readyState ' + ready + ' | networkState ' + netState + '\n' +
+                'Буфер HTML5: ' + av.toFixed(1) + 'с\n' +
+                'Кадры Δ: ' + frameDelta + '\n' +
+                'Кадры всего: drop ' + cumulative + '\n' +
+                'HLS loader: ' + (err ? ('ошибка ' + String(err.phase || err.text || '')) : (last ? 'активен' : 'ожидание'));
+
+            COLLAPS_NATIVE_HLS.playbackTelemetry = {
+                time: now,
+                text: text,
+                readyState: Number(video.readyState),
+                networkState: Number(video.networkState),
+                currentTime: Number(video.currentTime || 0),
+                buffer: av,
+                totalFrames: total,
+                droppedFrames: dropped
+            };
+            if (panel) panel.textContent = text;
+        }
+
+        function dispose() {
+            disposed = true;
+            if (timer !== null) clearInterval(timer);
+            timer = null;
+            retries.forEach(function (id) { clearTimeout(id); });
+            retries = [];
+            subscriptions.forEach(function (sub) {
+                if (video && video.removeEventListener) video.removeEventListener(sub.name, sub.fn);
+            });
+            subscriptions = [];
+            if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+            panel = null;
+            video = null;
+        }
+
+        function attach() {
+            if (!active() || timer !== null) return true;
+            video = findVideo();
+            if (!video) return false;
+            ['waiting','playing','stalled','suspend','seeking','seeked','pause','ended'].forEach(function (name) {
+                var fn = function () {
+                    phase = {waiting:'загрузка',playing:'воспроизведение',stalled:'stalled',suspend:'suspend',seeking:'перемотка',seeked:'после перемотки',pause:'пауза',ended:'конец'}[name] || name;
+                    sample();
+                };
+                video.addEventListener(name, fn);
+                subscriptions.push({name:name, fn:fn});
+            });
+            if (typeof document !== 'undefined' && document.createElement && document.body) {
+                var old = document.getElementById('mnogotv-collaps-debug');
+                if (old && old.parentNode) old.parentNode.removeChild(old);
+                panel = document.createElement('div');
+                panel.id = 'mnogotv-collaps-debug';
+                panel.style.cssText = 'position:fixed;left:2%;top:2%;z-index:2147483647;background:rgba(0,0,0,.84);color:#fff;padding:10px 14px;font:17px/1.35 monospace;white-space:pre-line;pointer-events:none;max-width:94vw;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.5);';
+                document.body.appendChild(panel);
+            }
+            timer = setInterval(sample, 1000);
+            sample();
+            return true;
+        }
+
+        [250, 600, 1200, 2200, 4000].forEach(function (ms) {
+            retries.push(setTimeout(function () {
+                if (!active() || timer !== null) return;
+                attach();
+            }, ms));
+        });
+        return {dispose: dispose};
     }
 
     function installCollapsDashQuality(player, events) {
@@ -2622,7 +2773,11 @@
                          * path; HLS may expose a different rendition ladder.
                          * AUTO remains under the stock player's ABR control.
                          */
-                        if (dashMode === 'alternative') {
+                        if (dashMode === 'hls') {
+                            selectedDash = '';
+                            selectedDashLabel = '';
+                        }
+                        else if (dashMode === 'alternative') {
                             if (!dashStream || !dashaStream || !av1 || dashStream === dashaStream) {
                                 fail(new Error('Collaps: отдельный альтернативный DASH для этого видео отсутствует'));
                                 return;
@@ -2678,6 +2833,7 @@
 
                         /* Real master playlist: AUTO plus all provider qualities. */
                         if (hlsStream) {
+                            COLLAPS_NATIVE_HLS.selectedPath = dashMode === 'hls' ? 'HLS / диагностический' : 'HLS';
                             var hlsHeaders = collapsPlaybackHeaders('hls');
                             var clientHlsUrl = collapsClientCdnUrl(
                                 hlsStream,
@@ -2750,6 +2906,12 @@
 
         function resetSession(reason) {
             try {
+                COLLAPS_NATIVE_HLS.active = false;
+                COLLAPS_NATIVE_HLS.generation++;
+                if (COLLAPS_NATIVE_HLS.monitor) COLLAPS_NATIVE_HLS.monitor.dispose();
+                COLLAPS_NATIVE_HLS.monitor = null;
+                COLLAPS_NATIVE_HLS.playbackTelemetry = null;
+                COLLAPS_NATIVE_HLS.selectedPath = 'HLS';
                 COLLAPS_NATIVE_HLS.unixTime = 0;
                 COLLAPS_NATIVE_HLS.key = '';
                 COLLAPS_NATIVE_HLS.headers = {};
@@ -2813,6 +2975,9 @@
                 quality: COLLAPS_NATIVE_DASH.qualityControl ? COLLAPS_NATIVE_DASH.qualityControl.diagnostics() : null,
                 hls: {
                     installed: !!COLLAPS_NATIVE_HLS.installed,
+                    active: !!COLLAPS_NATIVE_HLS.active,
+                    playback: COLLAPS_NATIVE_HLS.playbackTelemetry,
+                    selectedPath: COLLAPS_NATIVE_HLS.selectedPath,
                     lastDecode: COLLAPS_NATIVE_HLS.lastError && COLLAPS_NATIVE_HLS.lastError.payload || null,
                     mappedUrls: Object.keys(COLLAPS_NATIVE_HLS.urlMap || {}).length,
                     lastRequest: COLLAPS_NATIVE_HLS.lastRequest ? String(COLLAPS_NATIVE_HLS.lastRequest.url || '') : '',
@@ -2837,7 +3002,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.11-debug-collaps';
+    var VERSION = '5.0.12-debug-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3106,6 +3271,12 @@
             status.text('Collaps • ' + resolved.transport + ' • AUTO');
             Lampa.Player.play(item);
             Lampa.Player.playlist([item]);
+            if (resolved.transport === 'HLS') {
+                try {
+                    if (COLLAPS_NATIVE_HLS.monitor) COLLAPS_NATIVE_HLS.monitor.dispose();
+                    COLLAPS_NATIVE_HLS.monitor = installCollapsHlsMonitor();
+                } catch (e3) { log('Collaps HLS monitor start failed', e3); }
+            }
         }, function (e) { status.text('Ошибка: ' + errText(e)); notify('MnogoTV: ' + errText(e)); });
     }
 
@@ -3200,10 +3371,11 @@
         streamButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', function () {
             Lampa.Select.show({title: 'Collaps — поток для следующего запуска', items: [
                 {title: 'Основной', mode: 'default', selected: dashMode === 'default'},
-                {title: 'Альтернативный DASH — проверить кодек и качества', mode: 'alternative', selected: dashMode === 'alternative'}
+                {title: 'Альтернативный DASH — проверить кодек и качества', mode: 'alternative', selected: dashMode === 'alternative'},
+                {title: 'Диагностический HLS — проверить другой видеопуть', mode: 'hls', selected: dashMode === 'hls'}
             ], onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
                 dashMode = item.mode;
-                streamButton.text('Поток: ' + (dashMode === 'alternative' ? 'альтернативный' : 'основной'));
+                streamButton.text('Поток: ' + (dashMode === 'alternative' ? 'альтернативный' : dashMode === 'hls' ? 'HLS диагностика' : 'основной'));
                 status.text('Запустите фильм или серию. Кодек и качества появятся на панели плеера.');
                 Lampa.Controller.toggle('content');
             }});
