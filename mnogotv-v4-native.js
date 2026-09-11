@@ -1626,7 +1626,7 @@
                             self._emit('error', { error: decodeError });
                             self._emit('loadend', {});
                             notify(
-                                'Collaps 5.0.10 DASH: decode • ' +
+                                'Collaps 5.0.11 DEBUG DASH: decode • ' +
                                 payloadInfo.summary
                             );
                             return;
@@ -1692,7 +1692,7 @@
                         self._emit('loadend', {});
 
                         notify(
-                            'Collaps 5.0.10 DASH: ' +
+                            'Collaps 5.0.11 DEBUG DASH: ' +
                             (a && /^Collaps Range:/.test(a.responseText || '')
                                 ? a.responseText : 'native HTTP ' + (self.status || 0))
                         );
@@ -2837,7 +2837,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.10-collaps';
+    var VERSION = '5.0.11-debug-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
