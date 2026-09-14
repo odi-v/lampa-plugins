@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.12-debug-collaps | CollapsAdapter SHA-256: eee35037899a2ab1e00e959b12f3e650b4c59650a2e0e63d2c9ec98851ede6f7 */
+/* MnogoTV/Lampa 5.0.11-collaps | CollapsAdapter SHA-256: eee35037899a2ab1e00e959b12f3e650b4c59650a2e0e63d2c9ec98851ede6f7 */
 (function (global) {
     'use strict';
 
@@ -387,18 +387,13 @@
      */
     var COLLAPS_NATIVE_HLS = {
         installed: false,
-        active: false,
-        generation: 0,
         originalLoader: null,
         unixTime: 0,
         key: '',
         headers: {},
         urlMap: {},
         lastRequest: null,
-        lastError: null,
-        monitor: null,
-        playbackTelemetry: null,
-        selectedPath: 'HLS'
+        lastError: null
     };
 
     function stripHash(url) {
@@ -751,7 +746,6 @@
     }
 
     function configureCollapsNativeHls(rawUrl, clientUrl, unixTime, key, headers) {
-        COLLAPS_NATIVE_HLS.active = true;
         COLLAPS_NATIVE_HLS.unixTime = parseInt(unixTime || 0, 10) || 0;
         COLLAPS_NATIVE_HLS.key = String(key || '');
         COLLAPS_NATIVE_HLS.headers = headers || {};
@@ -1632,7 +1626,7 @@
                             self._emit('error', { error: decodeError });
                             self._emit('loadend', {});
                             notify(
-                                'Collaps 5.0.12 DEBUG DASH: decode • ' +
+                                'Collaps 5.0.10 DASH: decode • ' +
                                 payloadInfo.summary
                             );
                             return;
@@ -1698,7 +1692,7 @@
                         self._emit('loadend', {});
 
                         notify(
-                            'Collaps 5.0.12 DEBUG DASH: ' +
+                            'Collaps 5.0.10 DASH: ' +
                             (a && /^Collaps Range:/.test(a.responseText || '')
                                 ? a.responseText : 'native HTTP ' + (self.status || 0))
                         );
@@ -1989,335 +1983,90 @@
     function installCollapsMonitor(player) {
         var video = null, panel = null, timer = null, disposed = false, previous = null;
         var phase = 'запуск', subscriptions = [], generation = COLLAPS_NATIVE_DASH.generation;
-        var startRetries = [];
-
-        function active() {
-            return !disposed && COLLAPS_NATIVE_DASH.active && generation === COLLAPS_NATIVE_DASH.generation;
-        }
-
-        function stateLabel(value, map) {
-            return map[value] !== undefined ? map[value] : String(value);
-        }
-
-        function findVideo(element) {
-            var candidate = element && element.addEventListener ? element : null;
-            if (candidate && String(candidate.tagName || '').toLowerCase() === 'video') return candidate;
-            try {
-                candidate = player.getVideoElement && player.getVideoElement();
-                if (candidate && candidate.addEventListener) return candidate;
-            } catch (e) {}
-            try {
-                candidate = document && document.querySelector && document.querySelector('video');
-                if (candidate && candidate.addEventListener) return candidate;
-            } catch (e2) {}
-            return null;
-        }
-
+        function active() { return !disposed && COLLAPS_NATIVE_DASH.active && generation === COLLAPS_NATIVE_DASH.generation; }
         function sample() {
             if (!active()) return dispose();
             if (!video) return;
-
             var now = Date.now(), recovery = COLLAPS_NATIVE_DASH.rangeRecovery;
             var network = recovery && recovery.telemetry, count = 0, oldest = 0, largest = null;
             if (network) {
                 Object.keys(network.active).forEach(function (id) {
                     var item = network.active[id];
                     if (!item.alive()) { delete network.active[id]; return; }
-                    count++;
-                    oldest = Math.max(oldest, (now - item.started) / 1000);
+                    count++; oldest = Math.max(oldest, (now - item.started) / 1000);
                 });
                 network.completed.forEach(function (item) {
                     if (now - item.finished < 15000 && (!largest || item.bytes > largest.bytes)) largest = item;
                 });
             }
-
             function buffer(type) {
                 try {
                     var value = player.getBufferLength && player.getBufferLength(type);
                     return typeof value === 'number' && isFinite(value) ? value.toFixed(1) + 'с' : 'н/д';
                 } catch (e) { return 'н/д'; }
             }
-
             var av = 0;
             try {
                 for (var i = 0; i < video.buffered.length; i++) {
                     if (video.currentTime >= video.buffered.start(i) && video.currentTime <= video.buffered.end(i)) {
-                        av = video.buffered.end(i) - video.currentTime;
-                        break;
+                        av = video.buffered.end(i) - video.currentTime; break;
                     }
                 }
             } catch (e) {}
-
-            var total = null, dropped = null, frameDelta = 'сбор данных', cumulative = 'н/д';
+            var frames = 'н/д', total = null, dropped = null;
             try {
                 if (video.getVideoPlaybackQuality) {
-                    var quality = video.getVideoPlaybackQuality();
-                    total = Number(quality.totalVideoFrames);
-                    dropped = Number(quality.droppedVideoFrames);
-                } else {
-                    total = Number(video.webkitDecodedFrameCount);
-                    dropped = Number(video.webkitDroppedFrameCount);
-                }
-
-                if (isFinite(total) && isFinite(dropped)) {
-                    var cumulativePct = total > 0 ? (dropped * 100 / total) : 0;
-                    cumulative = dropped + '/' + total + ' (' + cumulativePct.toFixed(2) + '%)';
-
-                    if (previous && total >= previous.total && dropped >= previous.dropped) {
-                        var dt = Math.max(0.001, (now - previous.time) / 1000);
-                        var dTotal = total - previous.total;
-                        var dDropped = dropped - previous.dropped;
-                        var fps = dTotal / dt;
-                        var deltaPct = dTotal > 0 ? (dDropped * 100 / dTotal) : 0;
-                        frameDelta = '+' + dDropped + '/' + dTotal + ' · ' + fps.toFixed(1) + ' кадр/с · drop ' + deltaPct.toFixed(1) + '%';
-                    }
+                    var quality = video.getVideoPlaybackQuality(); total = quality.totalVideoFrames; dropped = quality.droppedVideoFrames;
+                } else { total = video.webkitDecodedFrameCount; dropped = video.webkitDroppedFrameCount; }
+                if (typeof total === 'number' && typeof dropped === 'number') {
+                    frames = previous && total >= previous.total && dropped >= previous.dropped
+                        ? '+' + (dropped - previous.dropped) + '/' + (total - previous.total) + ' за ' + ((now - previous.time) / 1000).toFixed(1) + 'с' : 'сбор данных';
                     previous = {total: total, dropped: dropped, time: now};
                 }
             } catch (e2) {}
-
             var manifest = COLLAPS_NATIVE_DASH.manifestInfo || [], codecs = [], heights = [];
             manifest.forEach(function (rep) {
                 if (rep.height && heights.indexOf(rep.height) < 0) heights.push(rep.height);
                 if (rep.height === Number(video.videoHeight) && codecs.indexOf(rep.codec) < 0) codecs.push(rep.codec);
             });
             var codec = codecs.length ? codecs.map(collapsCodecLabel).join(' / ') : 'н/д';
-
-            var ready = stateLabel(Number(video.readyState), {
-                0: '0/HAVE_NOTHING', 1: '1/METADATA', 2: '2/CURRENT', 3: '3/FUTURE', 4: '4/ENOUGH'
-            });
-            var netState = stateLabel(Number(video.networkState), {
-                0: '0/EMPTY', 1: '1/IDLE', 2: '2/LOADING', 3: '3/NO_SOURCE'
-            });
-            var mediaTime = Number(video.currentTime || 0);
-            var dims = (video.videoWidth || '?') + 'x' + (video.videoHeight || '?');
-
-            var text = 'Collaps 5.0.12 DEBUG | ' + dims + ' | ' + (video.paused ? 'пауза' : phase) + '\n' +
+            var text = 'Collaps 5.0.10 | ' + (video.videoHeight || '?') + 'p | ' + (video.paused ? 'пауза' : phase) + '\n' +
                 'Поток: ' + COLLAPS_NATIVE_DASH.selectedPath + ' | кодек: ' + codec + '\n' +
-                'MPD: ' + (heights.sort(function (a, b) { return a - b; }).join(', ') || 'н/д') + ' | t=' + mediaTime.toFixed(1) + 'с\n' +
-                'readyState ' + ready + ' | networkState ' + netState + ' | rate ' + Number(video.playbackRate || 1).toFixed(2) + 'x\n' +
-                'Буфер: видео ' + buffer('video') + ' | звук ' + buffer('audio') + ' | HTML5 ' + av.toFixed(1) + 'с\n' +
-                'Кадры Δ: ' + frameDelta + '\n' +
-                'Кадры всего: drop ' + cumulative + '\n' +
-                'Сеть: активных ' + count + ' | самое долгое ' + oldest.toFixed(1) + 'с | крупный 15с ' +
-                    (largest ? (largest.bytes / 1048576).toFixed(2) + ' МБ / ' + (largest.ms / 1000).toFixed(2) + 'с' : 'нет данных');
-
-            COLLAPS_NATIVE_DASH.playbackTelemetry = {
-                time: now,
-                text: text,
-                readyState: Number(video.readyState),
-                networkState: Number(video.networkState),
-                currentTime: mediaTime,
-                buffer: av,
-                totalFrames: total,
-                droppedFrames: dropped
-            };
+                'Разрешения MPD: ' + (heights.sort(function (a, b) { return a - b; }).join(', ') || 'н/д') + '\n' +
+                'Буфер видео ' + buffer('video') + ' | звук ' + buffer('audio') + ' | общий ' + av.toFixed(1) + 'с\n' +
+                'Пропуски кадров: ' + frames + ' | запросов ' + count + ' | ожидание ' + oldest.toFixed(1) + 'с\n' +
+                'Крупный фрагм. за 15с: ' + (largest ? (largest.bytes / 1048576).toFixed(2) + ' МБ / ' + (largest.ms / 1000).toFixed(2) + 'с' : 'нет данных');
+            COLLAPS_NATIVE_DASH.playbackTelemetry = {time: now, text: text};
             if (panel) panel.textContent = text;
         }
-
         function dispose() {
             disposed = true;
             if (timer !== null) clearInterval(timer);
             timer = null;
-            startRetries.forEach(function (id) { clearTimeout(id); });
-            startRetries = [];
-            subscriptions.forEach(function (sub) {
-                if (video && video.removeEventListener) video.removeEventListener(sub.name, sub.fn);
-            });
+            subscriptions.forEach(function (sub) { if (video && video.removeEventListener) video.removeEventListener(sub.name, sub.fn); });
             subscriptions = [];
             if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
-            panel = null;
-            video = null;
+            panel = null; video = null;
         }
-
-        function attach(element) {
-            if (!active() || timer !== null) return true;
-            video = findVideo(element);
-            if (!video) return false;
-
-            ['waiting', 'playing', 'stalled', 'suspend', 'seeking', 'seeked', 'pause', 'ended'].forEach(function (name) {
+        return {start: function (element) {
+            if (!active() || timer !== null) return;
+            video = element && element.addEventListener ? element : null;
+            if (!video) { try { video = player.getVideoElement && player.getVideoElement(); } catch (e) {} }
+            if (!video || !video.addEventListener) return;
+            ['waiting', 'playing', 'seeking', 'seeked', 'pause', 'ended'].forEach(function (name) {
                 var fn = function () {
-                    phase = {
-                        waiting: 'загрузка', playing: 'воспроизведение', stalled: 'stalled', suspend: 'suspend',
-                        seeking: 'перемотка', seeked: 'после перемотки', pause: 'пауза', ended: 'конец'
-                    }[name] || name;
+                    phase = {waiting:'загрузка',playing:'воспроизведение',seeking:'перемотка',seeked:'после перемотки',pause:'пауза',ended:'конец'}[name];
                     sample();
                 };
-                video.addEventListener(name, fn);
-                subscriptions.push({name: name, fn: fn});
-            });
-
-            if (typeof document !== 'undefined' && document.createElement && document.body) {
-                var old = document.getElementById('mnogotv-collaps-debug');
-                if (old && old.parentNode) old.parentNode.removeChild(old);
-                panel = document.createElement('div');
-                panel.id = 'mnogotv-collaps-debug';
-                panel.style.cssText = 'position:fixed;left:2%;top:2%;z-index:2147483647;background:rgba(0,0,0,.84);color:#fff;padding:10px 14px;font:17px/1.35 monospace;white-space:pre-line;pointer-events:none;max-width:94vw;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.5);';
-                document.body.appendChild(panel);
-            }
-
-            timer = setInterval(sample, 1000);
-            sample();
-            return true;
-        }
-
-        return {
-            start: function (element) {
-                if (!active() || timer !== null) return;
-                if (attach(element)) return;
-                [100, 300, 700, 1500, 3000].forEach(function (ms) {
-                    startRetries.push(setTimeout(function () {
-                        if (!active() || timer !== null) return;
-                        attach(element);
-                    }, ms));
-                });
-            },
-            dispose: dispose
-        };
-    }
-
-
-    function installCollapsHlsMonitor() {
-        var video = null, panel = null, timer = null, disposed = false, previous = null;
-        var phase = 'запуск', subscriptions = [], retries = [], generation = COLLAPS_NATIVE_HLS.generation;
-
-        function active() {
-            return !disposed && COLLAPS_NATIVE_HLS.active && generation === COLLAPS_NATIVE_HLS.generation;
-        }
-
-        function stateLabel(value, map) {
-            return map[value] !== undefined ? map[value] : String(value);
-        }
-
-        function findVideo() {
-            try {
-                var nodes = document && document.querySelectorAll ? document.querySelectorAll('video') : [];
-                for (var i = nodes.length - 1; i >= 0; i--) {
-                    if (nodes[i] && nodes[i].addEventListener) return nodes[i];
-                }
-            } catch (e) {}
-            return null;
-        }
-
-        function bufferedAhead() {
-            var value = 0;
-            try {
-                for (var i = 0; i < video.buffered.length; i++) {
-                    if (video.currentTime >= video.buffered.start(i) && video.currentTime <= video.buffered.end(i)) {
-                        value = video.buffered.end(i) - video.currentTime;
-                        break;
-                    }
-                }
-            } catch (e) {}
-            return value;
-        }
-
-        function sample() {
-            if (!active()) return dispose();
-            if (!video) return;
-            var now = Date.now(), av = bufferedAhead();
-            var total = null, dropped = null, frameDelta = 'сбор данных', cumulative = 'н/д';
-            try {
-                if (video.getVideoPlaybackQuality) {
-                    var quality = video.getVideoPlaybackQuality();
-                    total = Number(quality.totalVideoFrames);
-                    dropped = Number(quality.droppedVideoFrames);
-                } else {
-                    total = Number(video.webkitDecodedFrameCount);
-                    dropped = Number(video.webkitDroppedFrameCount);
-                }
-                if (isFinite(total) && isFinite(dropped)) {
-                    var cumulativePct = total > 0 ? dropped * 100 / total : 0;
-                    cumulative = dropped + '/' + total + ' (' + cumulativePct.toFixed(2) + '%)';
-                    if (previous && total >= previous.total && dropped >= previous.dropped) {
-                        var dt = Math.max(0.001, (now - previous.time) / 1000);
-                        var dTotal = total - previous.total;
-                        var dDropped = dropped - previous.dropped;
-                        var fps = dTotal / dt;
-                        var deltaPct = dTotal > 0 ? dDropped * 100 / dTotal : 0;
-                        frameDelta = '+' + dDropped + '/' + dTotal + ' · ' + fps.toFixed(1) + ' кадр/с · drop ' + deltaPct.toFixed(1) + '%';
-                    }
-                    previous = {total: total, dropped: dropped, time: now};
-                }
-            } catch (e2) {}
-
-            var ready = stateLabel(Number(video.readyState), {
-                0: '0/HAVE_NOTHING', 1: '1/METADATA', 2: '2/CURRENT', 3: '3/FUTURE', 4: '4/ENOUGH'
-            });
-            var netState = stateLabel(Number(video.networkState), {
-                0: '0/EMPTY', 1: '1/IDLE', 2: '2/LOADING', 3: '3/NO_SOURCE'
-            });
-            var dims = (video.videoWidth || '?') + 'x' + (video.videoHeight || '?');
-            var last = COLLAPS_NATIVE_HLS.lastRequest;
-            var err = COLLAPS_NATIVE_HLS.lastError;
-            var text = 'Collaps 5.0.12 DEBUG | ' + dims + ' | ' + (video.paused ? 'пауза' : phase) + '\n' +
-                'Поток: ' + COLLAPS_NATIVE_HLS.selectedPath + ' | HLS/Hls.js native loader\n' +
-                't=' + Number(video.currentTime || 0).toFixed(1) + 'с | rate ' + Number(video.playbackRate || 1).toFixed(2) + 'x\n' +
-                'readyState ' + ready + ' | networkState ' + netState + '\n' +
-                'Буфер HTML5: ' + av.toFixed(1) + 'с\n' +
-                'Кадры Δ: ' + frameDelta + '\n' +
-                'Кадры всего: drop ' + cumulative + '\n' +
-                'HLS loader: ' + (err ? ('ошибка ' + String(err.phase || err.text || '')) : (last ? 'активен' : 'ожидание'));
-
-            COLLAPS_NATIVE_HLS.playbackTelemetry = {
-                time: now,
-                text: text,
-                readyState: Number(video.readyState),
-                networkState: Number(video.networkState),
-                currentTime: Number(video.currentTime || 0),
-                buffer: av,
-                totalFrames: total,
-                droppedFrames: dropped
-            };
-            if (panel) panel.textContent = text;
-        }
-
-        function dispose() {
-            disposed = true;
-            if (timer !== null) clearInterval(timer);
-            timer = null;
-            retries.forEach(function (id) { clearTimeout(id); });
-            retries = [];
-            subscriptions.forEach(function (sub) {
-                if (video && video.removeEventListener) video.removeEventListener(sub.name, sub.fn);
-            });
-            subscriptions = [];
-            if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
-            panel = null;
-            video = null;
-        }
-
-        function attach() {
-            if (!active() || timer !== null) return true;
-            video = findVideo();
-            if (!video) return false;
-            ['waiting','playing','stalled','suspend','seeking','seeked','pause','ended'].forEach(function (name) {
-                var fn = function () {
-                    phase = {waiting:'загрузка',playing:'воспроизведение',stalled:'stalled',suspend:'suspend',seeking:'перемотка',seeked:'после перемотки',pause:'пауза',ended:'конец'}[name] || name;
-                    sample();
-                };
-                video.addEventListener(name, fn);
-                subscriptions.push({name:name, fn:fn});
+                video.addEventListener(name, fn); subscriptions.push({name:name, fn:fn});
             });
             if (typeof document !== 'undefined' && document.createElement && document.body) {
-                var old = document.getElementById('mnogotv-collaps-debug');
-                if (old && old.parentNode) old.parentNode.removeChild(old);
                 panel = document.createElement('div');
-                panel.id = 'mnogotv-collaps-debug';
-                panel.style.cssText = 'position:fixed;left:2%;top:2%;z-index:2147483647;background:rgba(0,0,0,.84);color:#fff;padding:10px 14px;font:17px/1.35 monospace;white-space:pre-line;pointer-events:none;max-width:94vw;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.5);';
+                panel.style.cssText = 'position:fixed;left:3%;top:3%;z-index:2147483646;background:rgba(0,0,0,.8);color:#fff;padding:10px 14px;font:18px/1.4 sans-serif;white-space:pre-line;pointer-events:none;';
                 document.body.appendChild(panel);
             }
-            timer = setInterval(sample, 1000);
-            sample();
-            return true;
-        }
-
-        [250, 600, 1200, 2200, 4000].forEach(function (ms) {
-            retries.push(setTimeout(function () {
-                if (!active() || timer !== null) return;
-                attach();
-            }, ms));
-        });
-        return {dispose: dispose};
+            timer = setInterval(sample, 1000); sample();
+        }, dispose: dispose};
     }
 
     function installCollapsDashQuality(player, events) {
@@ -2773,11 +2522,7 @@
                          * path; HLS may expose a different rendition ladder.
                          * AUTO remains under the stock player's ABR control.
                          */
-                        if (dashMode === 'hls') {
-                            selectedDash = '';
-                            selectedDashLabel = '';
-                        }
-                        else if (dashMode === 'alternative') {
+                        if (dashMode === 'alternative') {
                             if (!dashStream || !dashaStream || !av1 || dashStream === dashaStream) {
                                 fail(new Error('Collaps: отдельный альтернативный DASH для этого видео отсутствует'));
                                 return;
@@ -2833,7 +2578,6 @@
 
                         /* Real master playlist: AUTO plus all provider qualities. */
                         if (hlsStream) {
-                            COLLAPS_NATIVE_HLS.selectedPath = dashMode === 'hls' ? 'HLS / диагностический' : 'HLS';
                             var hlsHeaders = collapsPlaybackHeaders('hls');
                             var clientHlsUrl = collapsClientCdnUrl(
                                 hlsStream,
@@ -2906,12 +2650,6 @@
 
         function resetSession(reason) {
             try {
-                COLLAPS_NATIVE_HLS.active = false;
-                COLLAPS_NATIVE_HLS.generation++;
-                if (COLLAPS_NATIVE_HLS.monitor) COLLAPS_NATIVE_HLS.monitor.dispose();
-                COLLAPS_NATIVE_HLS.monitor = null;
-                COLLAPS_NATIVE_HLS.playbackTelemetry = null;
-                COLLAPS_NATIVE_HLS.selectedPath = 'HLS';
                 COLLAPS_NATIVE_HLS.unixTime = 0;
                 COLLAPS_NATIVE_HLS.key = '';
                 COLLAPS_NATIVE_HLS.headers = {};
@@ -2975,9 +2713,6 @@
                 quality: COLLAPS_NATIVE_DASH.qualityControl ? COLLAPS_NATIVE_DASH.qualityControl.diagnostics() : null,
                 hls: {
                     installed: !!COLLAPS_NATIVE_HLS.installed,
-                    active: !!COLLAPS_NATIVE_HLS.active,
-                    playback: COLLAPS_NATIVE_HLS.playbackTelemetry,
-                    selectedPath: COLLAPS_NATIVE_HLS.selectedPath,
                     lastDecode: COLLAPS_NATIVE_HLS.lastError && COLLAPS_NATIVE_HLS.lastError.payload || null,
                     mappedUrls: Object.keys(COLLAPS_NATIVE_HLS.urlMap || {}).length,
                     lastRequest: COLLAPS_NATIVE_HLS.lastRequest ? String(COLLAPS_NATIVE_HLS.lastRequest.url || '') : '',
@@ -3002,7 +2737,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.12-debug-collaps';
+    var VERSION = '5.0.11-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3246,7 +2981,7 @@
         currentPlayback = adapter;
     }
 
-    function play(movie, source, imdb, season, episode, epMeta, voice, status, dashMode) {
+    function play(movie, source, imdb, season, episode, epMeta, voice, status, dashMode, playerMode) {
         activatePlayback();
         adapter.resolve({ source: source, imdb: imdb, season: season, episode: episode, voice: voice, dashMode: dashMode }, function (resolved) {
             var title = titleOf(movie);
@@ -3260,7 +2995,9 @@
                 headers: resolved.headers || {},
                 isonline: true
             };
-            try { Lampa.Player.runas('lampa'); } catch (e) {}
+            var launchPlayer = playerMode === 'android' ? 'android' : 'lampa';
+            item.launch_player = launchPlayer;
+            try { Lampa.Player.runas(launchPlayer); } catch (e) {}
             try {
                 if (Lampa.PlayerVideo) {
                     if (Lampa.PlayerVideo.clearParamas) Lampa.PlayerVideo.clearParamas();
@@ -3268,15 +3005,9 @@
                     else if (Lampa.PlayerVideo.clearParamas) Lampa.PlayerVideo.clearParamas();
                 }
             } catch (e2) {}
-            status.text('Collaps • ' + resolved.transport + ' • AUTO');
+            status.text('Collaps • ' + resolved.transport + (launchPlayer === 'android' ? ' • внешний плеер' : ' • AUTO'));
             Lampa.Player.play(item);
             Lampa.Player.playlist([item]);
-            if (resolved.transport === 'HLS') {
-                try {
-                    if (COLLAPS_NATIVE_HLS.monitor) COLLAPS_NATIVE_HLS.monitor.dispose();
-                    COLLAPS_NATIVE_HLS.monitor = installCollapsHlsMonitor();
-                } catch (e3) { log('Collaps HLS monitor start failed', e3); }
-            }
         }, function (e) { status.text('Ошибка: ' + errText(e)); notify('MnogoTV: ' + errText(e)); });
     }
 
@@ -3295,12 +3026,14 @@
         var focus = null;
         var voice = { index: -1, label: 'Авто' };
         var dashMode = 'default';
+        var playerMode = 'lampa';
         var initialized = false;
         var root = $('<div class="mnogotv-v5"></div>');
         var bar = $('<div class="mnogotv-v5__bar"></div>');
         var seasonButton = $('<div class="mnogotv-v5__pill selector">Сезон 1</div>');
         var voiceButton = $('<div class="mnogotv-v5__pill selector">Озвучка: Авто</div>');
         var qualityButton = $('<div class="mnogotv-v5__pill selector">Качество: AUTO</div>');
+        var playerButton = $('<div class="mnogotv-v5__pill selector">Плеер: встроенный</div>');
         var streamButton = $('<div class="mnogotv-v5__pill selector">Поток: основной</div>');
         var status = $('<div class="mnogotv-v5__status">Collaps готов</div>');
         var list = $('<div class="mnogotv-v5__list"></div>');
@@ -3339,7 +3072,7 @@
             if (!isSeries(movie)) {
                 var film = $('<div class="mnogotv-v5__item selector"><span>▶ Смотреть фильм</span><span class="mnogotv-v5__meta">Collaps</span></div>');
                 film.on('hover:focus', function (e) { last = e.target; });
-                film.on('hover:enter click', function () { play(movie, source, imdb, null, null, {}, voice, status, dashMode); });
+                film.on('hover:enter click', function () { play(movie, source, imdb, null, null, {}, voice, status, dashMode, playerMode); });
                 list.append(film); last = film[0]; return;
             }
             status.text('Загрузка серий…');
@@ -3351,7 +3084,7 @@
                     row.find('span').first().text(('0' + n).slice(-2) + ' • ' + (ep.name || ('Серия ' + n)));
                     row.find('.mnogotv-v5__meta').text(ep.air_date || '');
                     row.on('hover:focus', function (e) { focus = ep; last = e.target; });
-                    row.on('hover:enter click', function () { play(movie, source, imdb, season, n, ep, voice, status, dashMode); });
+                    row.on('hover:enter click', function () { play(movie, source, imdb, season, n, ep, voice, status, dashMode, playerMode); });
                     list.append(row);
                 });
             }, function (e) { status.text('Ошибка серий: ' + errText(e)); });
@@ -3371,14 +3104,28 @@
         streamButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', function () {
             Lampa.Select.show({title: 'Collaps — поток для следующего запуска', items: [
                 {title: 'Основной', mode: 'default', selected: dashMode === 'default'},
-                {title: 'Альтернативный DASH — проверить кодек и качества', mode: 'alternative', selected: dashMode === 'alternative'},
-                {title: 'Диагностический HLS — проверить другой видеопуть', mode: 'hls', selected: dashMode === 'hls'}
+                {title: 'Альтернативный DASH — проверить кодек и качества', mode: 'alternative', selected: dashMode === 'alternative'}
             ], onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
                 dashMode = item.mode;
-                streamButton.text('Поток: ' + (dashMode === 'alternative' ? 'альтернативный' : dashMode === 'hls' ? 'HLS диагностика' : 'основной'));
+                streamButton.text('Поток: ' + (dashMode === 'alternative' ? 'альтернативный' : 'основной'));
                 status.text('Запустите фильм или серию. Кодек и качества появятся на панели плеера.');
                 Lampa.Controller.toggle('content');
             }});
+        });
+        playerButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', function () {
+            var items = [{ title: 'Встроенный Lampa', mode: 'lampa', selected: playerMode === 'lampa' }];
+            if (Lampa.Platform && Lampa.Platform.is('android')) {
+                items.push({ title: 'Внешний Android-плеер', mode: 'android', selected: playerMode === 'android' });
+            }
+            Lampa.Select.show({ title: 'Collaps — плеер для следующего запуска', items: items,
+                onBack: function () { Lampa.Controller.toggle('content'); },
+                onSelect: function (item) {
+                    playerMode = item.mode === 'android' ? 'android' : 'lampa';
+                    playerButton.text('Плеер: ' + (playerMode === 'android' ? 'внешний' : 'встроенный'));
+                    status.text('Запустите фильм или серию.');
+                    Lampa.Controller.toggle('content');
+                }
+            });
         });
         seasonButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseSeason);
         voiceButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseVoice);
@@ -3391,7 +3138,7 @@
                 initialized = true; addCss();
                 bar.append($('<div class="mnogotv-v5__pill">Источник: Collaps</div>'));
                 if (isSeries(movie)) bar.append(seasonButton); else seasonButton.hide();
-                bar.append(voiceButton).append(qualityButton).append(streamButton);
+                bar.append(voiceButton).append(qualityButton).append(streamButton).append(playerButton);
                 root.append($('<h2></h2>').text(titleOf(movie))).append(bar).append(status).append(list);
                 renderList();
             }
