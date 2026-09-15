@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.12-collaps | CollapsAdapter SHA-256: dd190540a731b747733921f84832ce15524056e5ed9bb30e522277eb630ff98a */
+/* MnogoTV/Lampa 5.0.13-collaps | CollapsAdapter SHA-256: d7cac28ea1475d073654ab3a6fc81b0da2554f318169be638abf463b06472d01 */
 (function (global) {
     'use strict';
 
@@ -386,6 +386,8 @@
      * loader unchanged.
      */
     var COLLAPS_NATIVE_HLS = {
+        generation: 0,
+        rangeRecovery: {paths: {}},
         installed: false,
         originalLoader: null,
         unixTime: 0,
@@ -764,6 +766,7 @@
         COLLAPS_NATIVE_HLS.originalLoader = OriginalLoader;
 
         function CollapsNativeLoader(config) {
+            this.serial = 0;
             this.config = config;
             this.context = null;
             this.stats = hlsNativeStats();
@@ -778,6 +781,7 @@
         };
 
         CollapsNativeLoader.prototype.abort = function () {
+            this.serial++;
             this.stats.aborted = true;
             try { if (this.network && this.network.clear) this.network.clear(); } catch (e) {}
             try { if (this.fallback && this.fallback.abort) this.fallback.abort(); } catch (e2) {}
@@ -787,6 +791,7 @@
         CollapsNativeLoader.prototype.getResponseHeader = function () { return null; };
 
         CollapsNativeLoader.prototype.load = function (context, config, callbacks) {
+            var serial = ++this.serial;
             this.context = context;
             var initialStats = hlsNativeStats();
             var stats = this.stats;
@@ -858,6 +863,11 @@
             try { if (network.timeout) network.timeout(Math.max(5000, timeout)); } catch (e3) {}
 
             var self = this;
+            var generation = COLLAPS_NATIVE_HLS.generation;
+            function stale() {
+                return self.stats.aborted || self.serial !== serial ||
+                    generation !== COLLAPS_NATIVE_HLS.generation;
+            }
             COLLAPS_NATIVE_HLS.lastRequest = {
                 type: String(context && context.type || ''),
                 responseType: String(context && context.responseType || ''),
@@ -871,10 +881,10 @@
             log('Collaps native loader request', COLLAPS_NATIVE_HLS.lastRequest);
 
             try {
-                network.native(
-                    requestUrl,
+                collapsDashRequest(
+                    network, requestUrl,
                     function (response) {
-                        if (self.stats.aborted) return;
+                        if (stale()) return;
                         var now = (window.performance && performance.now) ? performance.now() : Date.now();
                         self.stats.loading.first = self.stats.loading.first || now;
                         self.stats.loading.end = now;
@@ -916,7 +926,7 @@
                         }
                     },
                     function (a, c) {
-                        if (self.stats.aborted) return;
+                        if (stale()) return;
                         var status = a && a.status !== undefined ? Number(a.status) : 0;
                         var nativeTextError = errText(a || c || 'native network error');
                         COLLAPS_NATIVE_HLS.lastError = {
@@ -945,7 +955,7 @@
                     {
                         dataType: isBinary ? 'base64' : 'text',
                         headers: headers
-                    }
+                    }, stale, timeout, COLLAPS_NATIVE_HLS.rangeRecovery
                 );
             }
             catch (e4) {
@@ -2662,6 +2672,8 @@
 
         function resetSession(reason) {
             try {
+                COLLAPS_NATIVE_HLS.generation++;
+                COLLAPS_NATIVE_HLS.rangeRecovery = {paths: {}};
                 COLLAPS_NATIVE_HLS.unixTime = 0;
                 COLLAPS_NATIVE_HLS.key = '';
                 COLLAPS_NATIVE_HLS.headers = {};
@@ -2749,7 +2761,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.12-collaps';
+    var VERSION = '5.0.13-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
