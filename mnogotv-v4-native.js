@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.13-collaps | CollapsAdapter SHA-256: d7cac28ea1475d073654ab3a6fc81b0da2554f318169be638abf463b06472d01 */
+/* MnogoTV/Lampa 5.0.16-collaps | CollapsAdapter SHA-256: d5b0c987495cfb34a34f764acf6b8cc38a3bef3a2baaa9d930b0649e3a982f97 */
 (function (global) {
     'use strict';
 
@@ -747,6 +747,122 @@
         }).join('\n');
     }
 
+    function hlsManifestLevels(text) {
+        return String(text || '').split(/\r?\n/).filter(function (line) {
+            return /^#EXT-X-STREAM-INF:/.test(line);
+        }).map(function (line) {
+            var size = /RESOLUTION=(\d+)x(\d+)/.exec(line);
+            var codec = /CODECS="([^"]+)"/.exec(line);
+            return { width: size ? +size[1] : 0, height: size ? +size[2] : 0, codecs: codec ? codec[1] : '' };
+        });
+    }
+
+    function installCollapsHlsUI(hls) {
+        var state = COLLAPS_NATIVE_HLS, generation = state.generation;
+        var disposed = false, timer = null, panel = null, previous = null, signature = '';
+        var subs = [], initialized = false, deferred = null, requested = null;
+        function active() { return !disposed && generation === state.generation; }
+        function publish(force) {
+            if (!active() || !hls.media || !hls.levels || !hls.levels.length) return;
+            var automatic = hls.autoLevelEnabled;
+            var current = hls.currentLevel, list = hls.levels;
+            var target = requested === null ? hls.loadLevel : requested;
+            var label = automatic ? 'AUTO' : list[target] && list[target].height + 'p' || 'Качество';
+            var key = label + ':' + list.map(function (l) { return l.height; }).join(',');
+            if (!force && key === signature) return;
+            signature = key;
+            if (!Lampa.PlayerPanel || !Lampa.PlayerPanel.setLevels) return;
+            var menu = [];
+            function row(title, index) {
+                var item = {title: title, quality: title, selected: index === -1 ? automatic : !automatic && target === index};
+                Object.defineProperty(item, 'enabled', { configurable: true, get: function () { return item.selected; }, set: function (value) {
+                    if (!value || !active()) return;
+                    requested = index === -1 ? null : index;
+                    // Let the stream controller replace future buffered fragments sooner.
+                    // AUTO releases the manual lock without forcing any rendition.
+                    if (index === -1) hls.loadLevel = -1;
+                    else hls.nextLevel = index;
+                    publish(true);
+                }});
+                menu.push(item);
+            }
+            row('AUTO', -1);
+            list.forEach(function (l, i) { row(l.height ? l.height + 'p' : 'Уровень ' + (i + 1), i); });
+            if (Lampa.PlayerPanel.quality) Lampa.PlayerPanel.quality({}, '__collaps_hls_levels__');
+            Lampa.PlayerPanel.setLevels(menu, label);
+        }
+        function sizes(list) { return list && list.length ? list.map(function (l) { return l.width && l.height ? l.width + '×' + l.height : 'н/д'; }).join(', ') : 'н/д'; }
+        function mbps(value) { return typeof value === 'number' && isFinite(value) && value > 0 ? (value / 1000000).toFixed(2) + ' Мбит/с' : 'н/д'; }
+        function autoLevel(index) { var l = hls.levels && hls.levels[index]; return l ? l.height + 'p (#' + index + ')' : 'н/д'; }
+        function sample() {
+            if (!active()) return dispose();
+            var v = hls.media;
+            if (!v) return;
+            publish(false);
+            var buffer = 0, frames = 'н/д', now = Date.now();
+            try { for (var i=0; i<v.buffered.length; i++) if (v.currentTime >= v.buffered.start(i) && v.currentTime <= v.buffered.end(i)) buffer = v.buffered.end(i)-v.currentTime; } catch (e) {}
+            try {
+                var q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : {totalVideoFrames:v.webkitDecodedFrameCount,droppedVideoFrames:v.webkitDroppedFrameCount};
+                if (typeof q.totalVideoFrames === 'number' && typeof q.droppedVideoFrames === 'number') {
+                    if (previous && q.totalVideoFrames >= previous.total && q.droppedVideoFrames >= previous.drop) frames = '+' + (q.droppedVideoFrames-previous.drop) + '/' + (q.totalVideoFrames-previous.total) + ' за ' + ((now-previous.time)/1000).toFixed(1) + 'с';
+                    previous = {total:q.totalVideoFrames,drop:q.droppedVideoFrames,time:now};
+                }
+            } catch (e2) {}
+            var abr = { bandwidth: hls.bandwidthEstimate, next: hls.nextAutoLevel,
+                min: hls.minAutoLevel, max: hls.maxAutoLevel, cap: hls.autoLevelCapping };
+            var last = state.lastSegment;
+            var abrText = 'AUTO оценка: ' + mbps(abr.bandwidth) + ' | следующий: ' + autoLevel(abr.next) +
+                '\nAUTO границы: ' + autoLevel(abr.min) + ' — ' + autoLevel(abr.max) + ' | cap: ' + (abr.cap === -1 ? 'нет' : abr.cap === undefined ? 'н/д' : abr.cap) +
+                '\nБитрейты: ' + (hls.levels || []).map(function (l) { return l.height + 'p: ' + mbps(l.bitrate); }).join('; ') +
+                '\nСегмент: ' + (last ? (last.bytes/1048576).toFixed(2) + ' МиБ / ' + (last.ms/1000).toFixed(2) + 'с = ' + mbps(last.bps) : 'н/д') + ' | TTFB неизвестен';
+            var text = 'Collaps HLS | ' + (hls.autoLevelEnabled ? 'AUTO' : 'ручной') + ' | факт ' + (v.videoWidth || '?') + '×' + (v.videoHeight || '?') + '\n' +
+                'Буфер общий: ' + buffer.toFixed(1) + 'с | пропуски/кадры: ' + frames + '\n' +
+                'Исходный: ' + sizes(state.originalLevels) + '\nПосле обработки: ' + sizes(state.rewrittenLevels) + '\nПлеер: ' + sizes(hls.levels) + '\n' + abrText;
+            state.playbackTelemetry = {text:text,abr:abr,lastSegment:last,original:state.originalLevels,rewritten:state.rewrittenLevels,levels:hls.levels.map(function(l){return {width:l.width,height:l.height,videoCodec:l.videoCodec};})};
+            if (!panel && document.body) {
+                panel = document.createElement('div');
+                panel.style.cssText = 'position:fixed;left:3%;top:3%;z-index:99999;padding:10px;background:rgba(0,0,0,.8);color:white;font-size:18px;white-space:pre-line;pointer-events:none';
+                document.body.appendChild(panel);
+            }
+            if (panel) panel.textContent = text;
+        }
+        function dispose() {
+            if (disposed) return;
+            disposed = true; clearInterval(timer); clearTimeout(deferred);
+            subs.forEach(function (s) { hls.off(s[0],s[1]); });
+            if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+        }
+        function on(name, fn) { if (name) { hls.on(name,fn); subs.push([name,fn]); } }
+        on(Hls.Events.MANIFEST_PARSED, function () {
+            clearTimeout(deferred);
+            deferred = setTimeout(function () {
+                if (!active() || !hls.media) return;
+                if (!initialized) { hls.loadLevel = -1; initialized = true; }
+                publish(true);
+            },0);
+        });
+        on(Hls.Events.FRAG_CHANGED, function () {
+            clearTimeout(deferred);
+            deferred = setTimeout(function () { publish(true); },0);
+        });
+        on(Hls.Events.DESTROYING, dispose);
+        timer = setInterval(sample,1000);
+        return {dispose:dispose};
+    }
+
+    function hookCollapsHlsUI() {
+        if (COLLAPS_NATIVE_HLS.uiInstalled || !global.Hls || !Hls.prototype.loadSource) return;
+        var original = Hls.prototype.loadSource;
+        Hls.prototype.loadSource = function (url) {
+            if (COLLAPS_NATIVE_HLS.urlMap[stripHash(url)]) {
+                if (COLLAPS_NATIVE_HLS.ui) COLLAPS_NATIVE_HLS.ui.dispose();
+                COLLAPS_NATIVE_HLS.ui = installCollapsHlsUI(this);
+            }
+            return original.apply(this,arguments);
+        };
+        COLLAPS_NATIVE_HLS.uiInstalled = true;
+    }
+
     function configureCollapsNativeHls(rawUrl, clientUrl, unixTime, key, headers) {
         COLLAPS_NATIVE_HLS.unixTime = parseInt(unixTime || 0, 10) || 0;
         COLLAPS_NATIVE_HLS.key = String(key || '');
@@ -754,6 +870,7 @@
         COLLAPS_NATIVE_HLS.urlMap = {};
         COLLAPS_NATIVE_HLS.urlMap[stripHash(clientUrl)] = normalizeDirectUrl(rawUrl);
 
+        hookCollapsHlsUI();
         if (COLLAPS_NATIVE_HLS.installed) return true;
 
         /*
@@ -767,6 +884,7 @@
 
         function CollapsNativeLoader(config) {
             this.serial = 0;
+            this.completed = false;
             this.config = config;
             this.context = null;
             this.stats = hlsNativeStats();
@@ -775,14 +893,21 @@
         }
 
         CollapsNativeLoader.prototype.destroy = function () {
-            this.abort();
+            if (this.fallback) {
+                this.serial++;
+                if (this.fallback.destroy) this.fallback.destroy();
+                this.fallback = null;
+            }
+            else this.abort();
             this.context = null;
             this.config = null;
         };
 
         CollapsNativeLoader.prototype.abort = function () {
             this.serial++;
-            this.stats.aborted = true;
+            // Hls.js destroys the loader inside onSuccess before ABR samples stats.
+            // Cleanup of a completed request must not retroactively cancel it.
+            if (!this.completed) this.stats.aborted = true;
             try { if (this.network && this.network.clear) this.network.clear(); } catch (e) {}
             try { if (this.fallback && this.fallback.abort) this.fallback.abort(); } catch (e2) {}
         };
@@ -792,6 +917,7 @@
 
         CollapsNativeLoader.prototype.load = function (context, config, callbacks) {
             var serial = ++this.serial;
+            this.completed = false;
             this.context = context;
             var initialStats = hlsNativeStats();
             var stats = this.stats;
@@ -886,13 +1012,17 @@
                     function (response) {
                         if (stale()) return;
                         var now = (window.performance && performance.now) ? performance.now() : Date.now();
-                        self.stats.loading.first = self.stats.loading.first || now;
+                        // Native bridge returns the complete response, not first-byte timing.
+                        // Use the full wall time as a conservative throughput sample.
+                        self.stats.loading.first = self.stats.loading.start;
                         self.stats.loading.end = now;
                         try {
                             var data;
                             if (isBinary) {
                                 data = base64ToArrayBuffer(response);
                                 self.stats.loaded = self.stats.total = data.byteLength || 0;
+                                var elapsed = Math.max(1, now - self.stats.loading.start);
+                                COLLAPS_NATIVE_HLS.lastSegment = {bytes:data.byteLength,ms:elapsed,bps:data.byteLength*8000/elapsed,ttfbKnown:false};
                                 COLLAPS_NATIVE_HLS.lastError = null;
                                 log('Collaps native fragment success', {
                                     bytes: self.stats.loaded,
@@ -903,11 +1033,17 @@
                             else {
                                 data = typeof response === 'string' ? response : String(response || '');
                                 if (/^(manifest|level|audioTrack|subtitleTrack)$/i.test(String(context && context.type || ''))) {
+                                    var originalLevels = hlsManifestLevels(data);
                                     data = rewriteCollapsNativePlaylist(data, logicalUrl);
+                                    if (originalLevels.length) {
+                                        COLLAPS_NATIVE_HLS.originalLevels = originalLevels;
+                                        COLLAPS_NATIVE_HLS.rewrittenLevels = hlsManifestLevels(data);
+                                    }
                                 }
                                 self.stats.loaded = self.stats.total = data.length || 0;
                             }
                             self.stats.chunkCount = 1;
+                            self.completed = true;
                             callbacks.onSuccess({ url: context.url, data: data }, self.stats, context, null);
                         }
                         catch (decodeError) {
@@ -2672,6 +2808,12 @@
 
         function resetSession(reason) {
             try {
+                if (COLLAPS_NATIVE_HLS.ui) COLLAPS_NATIVE_HLS.ui.dispose();
+                COLLAPS_NATIVE_HLS.ui = null;
+                COLLAPS_NATIVE_HLS.originalLevels = [];
+                COLLAPS_NATIVE_HLS.rewrittenLevels = [];
+                COLLAPS_NATIVE_HLS.playbackTelemetry = null;
+                COLLAPS_NATIVE_HLS.lastSegment = null;
                 COLLAPS_NATIVE_HLS.generation++;
                 COLLAPS_NATIVE_HLS.rangeRecovery = {paths: {}};
                 COLLAPS_NATIVE_HLS.unixTime = 0;
@@ -2761,7 +2903,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.13-collaps';
+    var VERSION = '5.0.16-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
