@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.20-collaps | CollapsAdapter SHA-256: 4e5ea03f333467b3e623a99c1a74cf19fc3a8a5356edb593cd1b1430f2720d2d */
+/* MnogoTV/Lampa 5.0.21-collaps | CollapsAdapter SHA-256: 4e5ea03f333467b3e623a99c1a74cf19fc3a8a5356edb593cd1b1430f2720d2d */
 (function (global) {
     'use strict';
 
@@ -2904,7 +2904,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.20-collaps';
+    var VERSION = '5.0.21-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3259,7 +3259,11 @@
     function addCss() {
         if (document.getElementById('mnogotv-v5-style')) return;
         var css = `
-.mnogotv-v5{box-sizing:border-box;display:flex;height:calc(100vh - 7em);min-height:24em;padding:1.2em 2em 1.5em;color:#f4f7f8;background:radial-gradient(ellipse at 90% 25%,#075c65 0%,#102b36 45%,#111720 85%);overflow:hidden}
+body.mnogotv-v5-page{background:radial-gradient(ellipse at 90% 25%,#075c65 0%,#102b36 45%,#111720 85%)!important}
+body.mnogotv-v5-page .background{background:radial-gradient(ellipse at 90% 25%,#075c65 0%,#102b36 45%,#111720 85%)!important}
+body.mnogotv-v5-page .background>*{visibility:hidden!important}
+body.mnogotv-v5-page .head{background:transparent!important}
+.mnogotv-v5{box-sizing:border-box;display:flex;height:calc(100vh - 7em);min-height:24em;padding:1.2em 2em 1.5em;color:#f4f7f8;background:transparent;overflow:hidden}
 .mnogotv-v5 *{box-sizing:border-box}
 .mnogotv-v5__sidebar{width:29%;flex-shrink:0;padding-right:2em;overflow:hidden}
 .mnogotv-v5__identity{display:flex;align-items:center;margin-bottom:1.4em}
@@ -3312,40 +3316,11 @@
         var bar = $('<div class="mnogotv-v5__bar"></div>');
         var sourceButton = $('<div class="mnogotv-v5__pill selector">Источник: Collaps</div>');
         var seasonButton = $('<div class="mnogotv-v5__pill selector">Сезон 1</div>');
-        var voiceButton = $('<div class="mnogotv-v5__pill selector">Озвучка: Авто</div>');
-        var qualityButton = $('<div class="mnogotv-v5__pill selector">Качество: AUTO</div>');
         var formatButton = $('<div class="mnogotv-v5__pill selector">Формат: DASH</div>');
         var streamButton = $('<div class="mnogotv-v5__pill selector">Поток: основной</div>');
         var status = $('<div class="mnogotv-v5__status">Collaps готов</div>');
         var list = $('<div class="mnogotv-v5__list"></div>');
         var last = seasonButton[0];
-
-        function resolveCurrent(ok, fail) {
-            var ep = focus || episodes[0] || {};
-            adapter.resolve({ source: source, imdb: imdb, season: isSeries(movie) ? season : null, episode: isSeries(movie) ? parseInt(ep.episode_number || 0, 10) : null, dashMode: dashMode, format: formatMode }, ok, fail);
-        }
-
-        function chooseVoice() {
-            status.text('Получаю реальные дорожки Collaps…');
-            resolveCurrent(function (resolved) {
-                status.text('Collaps готов');
-                var items = [{ title: 'Авто', index: -1, label: 'Авто', selected: voice.index < 0 }];
-                (resolved.tracks || []).forEach(function (track, index) {
-                    var label = track.label || track.language || ('Дорожка ' + (index + 1));
-                    items.push({ title: label, label: label, index: Number(track.index), selected: voice.index === Number(track.index) });
-                });
-                items.push({ title: '← Назад', back: true });
-                Lampa.Select.show({ title: 'Collaps — озвучка', items: items, onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
-                    if (!item.back) { voice = { index: item.index, label: item.label }; voiceButton.text('Озвучка: ' + voice.label); }
-                    Lampa.Controller.toggle('content');
-                }});
-            }, function (e) { status.text('Озвучка: ' + errText(e)); });
-        }
-
-        function chooseQuality() {
-            notify('Collaps: AUTO и ручной выбор доступны в штатном меню качества Lampa.Player');
-            Lampa.Controller.toggle('content');
-        }
 
         function imageUrl(path, size) {
             if (!path) return '';
@@ -3463,7 +3438,7 @@
                 var items = seasons.map(function (n) { return { title: 'Сезон ' + n, season: n, selected: n === season }; });
                 items.push({ title: '← Назад', back: true });
                 Lampa.Select.show({ title: 'Collaps — сезон', items: items, onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
-                    if (!item.back) { season = item.season; seasonButton.text('Сезон ' + season); voice = { index: -1, label: 'Авто' }; voiceButton.text('Озвучка: Авто'); renderList(); }
+                    if (!item.back) { season = item.season; seasonButton.text('Сезон ' + season); voice = { index: -1, label: 'Авто' }; renderList(); }
                     Lampa.Controller.toggle('content');
                 }});
             }, function (e) { status.text(errText(e)); });
@@ -3503,17 +3478,16 @@
             }});
         });
         seasonButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseSeason);
-        voiceButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseVoice);
-        qualityButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseQuality);
 
         this.create = function () { return this.render(); };
         this.render = function () { return root; };
         this.start = function () {
+            document.body.classList.add('mnogotv-v5-page');
             if (!initialized) {
                 initialized = true; addCss();
                 bar.append(sourceButton);
                 if (isSeries(movie)) bar.append(seasonButton); else seasonButton.hide();
-                bar.append(voiceButton).append(qualityButton).append(streamButton).append(formatButton);
+                bar.append(streamButton).append(formatButton);
                 var main = $('<div class="mnogotv-v5__main"></div>');
                 main.append(bar).append(status).append(list);
                 root.append(sidebar()).append(main);
@@ -3533,8 +3507,8 @@
             Lampa.Controller.toggle('content');
         };
         this.pause = function () {};
-        this.stop = function () {};
-        this.destroy = function () { destroyed = true; listGeneration++; playbackSequence++; adapter.cleanup('component-destroy'); root.remove(); };
+        this.stop = function () { document.body.classList.remove('mnogotv-v5-page'); };
+        this.destroy = function () { document.body.classList.remove('mnogotv-v5-page'); destroyed = true; listGeneration++; playbackSequence++; adapter.cleanup('component-destroy'); root.remove(); };
     }
 
     function register() { try { Lampa.Component.add(COMPONENT, Component); return true; } catch (e) { log(e); return false; } }
