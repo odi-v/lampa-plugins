@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.21-collaps | CollapsAdapter SHA-256: 4e5ea03f333467b3e623a99c1a74cf19fc3a8a5356edb593cd1b1430f2720d2d */
+/* MnogoTV/Lampa 5.0.22-collaps | CollapsAdapter SHA-256: 4e5ea03f333467b3e623a99c1a74cf19fc3a8a5356edb593cd1b1430f2720d2d */
 (function (global) {
     'use strict';
 
@@ -2904,7 +2904,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.21-collaps';
+    var VERSION = '5.0.22-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3149,6 +3149,42 @@
         currentPlayback = adapter;
     }
 
+    function installNextEpisodeHint() {
+        if (!Lampa.Player.listener || !Lampa.Controller.listener || !Lampa.PlayerPanel ||
+            typeof Lampa.PlayerPanel.render !== 'function' || typeof MutationObserver === 'undefined') return;
+        var observer = null, panel = null, active = false;
+        var style = document.createElement('style');
+        style.textContent = 'body.mnogotv-next-context:not(.mnogotv-next-focused) .player-next{display:none!important}';
+        document.head.appendChild(style);
+        function clear() {
+            active = false;
+            if (observer) observer.disconnect();
+            observer = null; panel = null;
+            document.body.classList.remove('mnogotv-next-context', 'mnogotv-next-focused');
+        }
+        function update() {
+            if (!active || !panel) return;
+            var controller = Lampa.Controller.enabled();
+            var next = panel.querySelector('.player-panel__next.focus');
+            var visible = !!(controller && controller.name === 'player_panel' && next && !next.classList.contains('hide'));
+            document.body.classList.toggle('mnogotv-next-focused', visible);
+        }
+        Lampa.Player.listener.follow('start', function (data) {
+            clear();
+            if (!data || !data.mnogotv_next_hint) return;
+            var render = Lampa.PlayerPanel.render();
+            panel = render && render[0];
+            if (!panel) return;
+            active = true;
+            document.body.classList.add('mnogotv-next-context');
+            observer = new MutationObserver(update);
+            observer.observe(panel, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+            update();
+        });
+        Lampa.Controller.listener.follow('toggle', update);
+        Lampa.Player.listener.follow('destroy', clear);
+    }
+
     function play(movie, source, imdb, season, episode, epMeta, voice, status, dashMode, formatMode, episodeList) {
         var sequence = ++playbackSequence;
         var busy = false;
@@ -3169,7 +3205,8 @@
             var title = titleOf(movie);
             if (season !== null && number !== null) title += ' • S' + season + 'E' + number + (meta && meta.name ? ' • ' + meta.name : '');
             return { title: title, season: season, episode: number,
-                timeline: timeline(movie, season, number), isonline: true, launch_player: 'lampa' };
+                timeline: timeline(movie, season, number), isonline: true, launch_player: 'lampa',
+                mnogotv_next_hint: season !== null && number !== null };
         }
         function applyResolved(item, resolved) {
             item.url = resolved.url;
@@ -3537,6 +3574,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         if (!global.Lampa || !Lampa.Listener || !Lampa.Player || !global.MnogoTVCollapsAdapter) return setTimeout(start, 500);
         adapter = new global.MnogoTVCollapsAdapter(core);
         register();
+        installNextEpisodeHint();
         Lampa.Listener.follow('full', addButton);
         global.__mnogotv_v5_diagnostics = function () { return { version: VERSION, core: core.hlsRouter.diagnostics(), collaps: adapter.diagnostics() }; };
         notify('MnogoTV v' + VERSION);
