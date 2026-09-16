@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.19-collaps | CollapsAdapter SHA-256: 4e5ea03f333467b3e623a99c1a74cf19fc3a8a5356edb593cd1b1430f2720d2d */
+/* MnogoTV/Lampa 5.0.20-collaps | CollapsAdapter SHA-256: 4e5ea03f333467b3e623a99c1a74cf19fc3a8a5356edb593cd1b1430f2720d2d */
 (function (global) {
     'use strict';
 
@@ -2904,7 +2904,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.19-collaps';
+    var VERSION = '5.0.20-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3249,6 +3249,8 @@
                 return { zone: 'bar', index: Math.max(0, Math.min(buttons - 1, remembered || 0)) };
             return { zone: 'rows', index: Math.max(0, Math.min(rows - 1, index + (direction === 'down' ? 1 : direction === 'up' ? -1 : 0))) };
         }
+        if (direction === 'up') return { zone: 'head', index: 0 };
+        if (direction === 'left' && index === 0) return { zone: 'menu', index: 0 };
         if (rows && (direction === 'down' || direction === 'right' && index === buttons - 1))
             return { zone: 'rows', index: Math.max(0, Math.min(rows - 1, remembered || 0)) };
         return { zone: 'bar', index: Math.max(0, Math.min(buttons - 1, index + (direction === 'right' ? 1 : direction === 'left' ? -1 : 0))) };
@@ -3262,16 +3264,16 @@
 .mnogotv-v5__sidebar{width:29%;flex-shrink:0;padding-right:2em;overflow:hidden}
 .mnogotv-v5__identity{display:flex;align-items:center;margin-bottom:1.4em}
 .mnogotv-v5__poster{width:42%;border-radius:.45em;background:#203543;object-fit:cover;max-height:15em}
-.mnogotv-v5__facts{padding-left:1em;font-size:.85em;line-height:1.7;color:#d2e3e7}
+.mnogotv-v5__facts{padding-left:1em;font-size:1em;line-height:1.7;color:#d2e3e7}
 .mnogotv-v5__rating{font-size:1.5em;color:#fff;margin:.6em 0}
 .mnogotv-v5__title{font-size:1.8em;line-height:1.15;margin:0 0 .5em;font-weight:700}
-.mnogotv-v5__genres{font-size:.8em;color:#a6c9cc;margin-bottom:1.5em}
-.mnogotv-v5__overview{font-size:.9em;line-height:1.5;color:#cfdbdf;display:-webkit-box;-webkit-line-clamp:10;-webkit-box-orient:vertical;overflow:hidden}
+.mnogotv-v5__genres{font-size:.95em;color:#a6c9cc;margin-bottom:1.5em}
+.mnogotv-v5__overview{font-size:1.05em;line-height:1.5;color:#cfdbdf;display:-webkit-box;-webkit-line-clamp:10;-webkit-box-orient:vertical;overflow:hidden}
 .mnogotv-v5__main{flex:1;min-width:0;display:flex;flex-direction:column}
 .mnogotv-v5__bar{display:flex;flex-wrap:wrap;align-items:center;flex-shrink:0;margin:0 -.25em}
-.mnogotv-v5__pill{padding:.6em .8em;margin:.25em;border-radius:.4em;background:rgba(0,0,0,.22);font-size:.85em;max-width:20em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:2px solid transparent}
+.mnogotv-v5__pill{padding:.6em .8em;margin:.25em;border-radius:.4em;background:rgba(0,0,0,.22);font-size:1em;max-width:20em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:2px solid transparent}
 .mnogotv-v5__pill.focus{background:#eefafa;color:#12323b;border-color:#fff}
-.mnogotv-v5__status{font-size:.75em;color:#a7c7ca;margin:.6em .3em 1em;min-height:1.2em;flex-shrink:0}
+.mnogotv-v5__status{font-size:.9em;color:#a7c7ca;margin:.6em .3em 1em;min-height:1.2em;flex-shrink:0}
 .mnogotv-v5__list{flex:1;min-height:0;overflow-y:auto;padding:.3em .5em .8em .25em;scrollbar-width:none}
 .mnogotv-v5__list::-webkit-scrollbar{display:none}
 .mnogotv-v5__item{display:flex;align-items:stretch;margin-bottom:.7em;padding:.35em;border:3px solid transparent;border-radius:.6em;background:rgba(0,0,0,.24);min-height:7.6em}
@@ -3281,13 +3283,13 @@
 .mnogotv-v5__number{position:absolute;bottom:.3em;left:.5em;font-size:1.4em;font-weight:bold;text-shadow:0 2px 5px #000}
 .mnogotv-v5__details{flex:1;min-width:0;padding:.6em 1em;display:flex;flex-direction:column;justify-content:center}
 .mnogotv-v5__rowhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:.7em}
-.mnogotv-v5__name{font-size:1.15em;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:1em}
-.mnogotv-v5__runtime{font-size:.75em;white-space:nowrap;color:#d5e5e6}
+.mnogotv-v5__name{font-size:1.3em;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:1em}
+.mnogotv-v5__runtime{font-size:.9em;white-space:nowrap;color:#d5e5e6}
 .mnogotv-v5__progress{height:.22em;border-radius:1em;background:rgba(220,240,240,.25);overflow:hidden;width:100%;margin-bottom:.7em}
 .mnogotv-v5__fill{height:100%;width:0;background:#9ff8e5;border-radius:1em}
-.mnogotv-v5__meta{font-size:.72em;color:#c4dfe0;display:flex;justify-content:space-between;flex-wrap:wrap}
+.mnogotv-v5__meta{font-size:.9em;color:#c4dfe0;display:flex;justify-content:space-between;flex-wrap:wrap}
 .mnogotv-v5__watched{margin-left:.6em;color:#a7efde}
-@media(max-width:900px){.mnogotv-v5{padding:1em;height:calc(100vh - 6em)}.mnogotv-v5__sidebar{width:27%;padding-right:1em}.mnogotv-v5__thumb{width:9em}.mnogotv-v5__title{font-size:1.4em}.mnogotv-v5__facts{font-size:.7em}}
+@media(max-width:900px){.mnogotv-v5{padding:1em;height:calc(100vh - 6em)}.mnogotv-v5__sidebar{width:27%;padding-right:1em}.mnogotv-v5__thumb{width:9em}.mnogotv-v5__title{font-size:1.4em}.mnogotv-v5__facts{font-size:.85em}}
 `;
         $('body').append('<style id="mnogotv-v5-style">' + css + '</style>');
     }
@@ -3308,6 +3310,7 @@
         var zone = 'bar', rowIndex = 0, buttonIndex = 0;
         var root = $('<div class="mnogotv-v5"></div>');
         var bar = $('<div class="mnogotv-v5__bar"></div>');
+        var sourceButton = $('<div class="mnogotv-v5__pill selector">Источник: Collaps</div>');
         var seasonButton = $('<div class="mnogotv-v5__pill selector">Сезон 1</div>');
         var voiceButton = $('<div class="mnogotv-v5__pill selector">Озвучка: Авто</div>');
         var qualityButton = $('<div class="mnogotv-v5__pill selector">Качество: AUTO</div>');
@@ -3396,6 +3399,10 @@
         function navigate(direction) {
             var target = episodeFocusTarget(zone, zone === 'rows' ? rowIndex : buttonIndex,
                 direction, buttonNodes.length, rowNodes.length, zone === 'rows' ? buttonIndex : rowIndex);
+            if (target.zone === 'head' || target.zone === 'menu') {
+                Lampa.Controller.toggle(target.zone);
+                return;
+            }
             zone = target.zone;
             if (zone === 'rows') { rowIndex = target.index; focusNode(rowNodes[rowIndex]); }
             else { buttonIndex = target.index; focusNode(buttonNodes[buttonIndex]); }
@@ -3485,6 +3492,16 @@
                 Lampa.Controller.toggle('content');
             }});
         });
+        sourceButton.on('hover:enter click', function () {
+            Lampa.Select.show({ title: 'Источник', items: [
+                { title: 'Collaps', selected: true },
+                { title: 'Другие источники — вернуться к карточке', card: true }
+            ], onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
+                if (Lampa.Select.close) Lampa.Select.close();
+                if (item.card) Lampa.Activity.backward();
+                else Lampa.Controller.toggle('content');
+            }});
+        });
         seasonButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseSeason);
         voiceButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseVoice);
         qualityButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseQuality);
@@ -3494,7 +3511,7 @@
         this.start = function () {
             if (!initialized) {
                 initialized = true; addCss();
-                bar.append($('<div class="mnogotv-v5__pill">Источник: Collaps</div>'));
+                bar.append(sourceButton);
                 if (isSeries(movie)) bar.append(seasonButton); else seasonButton.hide();
                 bar.append(voiceButton).append(qualityButton).append(streamButton).append(formatButton);
                 var main = $('<div class="mnogotv-v5__main"></div>');
