@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.16-collaps | CollapsAdapter SHA-256: d5b0c987495cfb34a34f764acf6b8cc38a3bef3a2baaa9d930b0649e3a982f97 */
+/* MnogoTV/Lampa 5.0.18-collaps | CollapsAdapter SHA-256: 4e5ea03f333467b3e623a99c1a74cf19fc3a8a5356edb593cd1b1430f2720d2d */
 (function (global) {
     'use strict';
 
@@ -778,9 +778,10 @@
                 Object.defineProperty(item, 'enabled', { configurable: true, get: function () { return item.selected; }, set: function (value) {
                     if (!value || !active()) return;
                     requested = index === -1 ? null : index;
-                    // Let the stream controller replace future buffered fragments sooner.
-                    // AUTO releases the manual lock without forcing any rendition.
-                    if (index === -1) hls.loadLevel = -1;
+                    // AUTO releases the lock. Locking the currently playing rendition
+                    // must also preserve buffered media: nextLevel triggers a switch
+                    // even when the chosen rendition is already playing.
+                    if (index === -1 || index === hls.currentLevel) hls.loadLevel = index;
                     else hls.nextLevel = index;
                     publish(true);
                 }});
@@ -2903,7 +2904,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.16-collaps';
+    var VERSION = '5.0.18-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3128,6 +3129,7 @@
 
     var adapter = null;
     var currentPlayback = null;
+    var playbackSequence = 0;
 
     function findCollapsSource(imdb, ok, fail) {
         requestJson(resolverUrl('/sources', { imdb: imdb }), function (response) {
@@ -3147,34 +3149,89 @@
         currentPlayback = adapter;
     }
 
-    function play(movie, source, imdb, season, episode, epMeta, voice, status, dashMode, formatMode) {
+    function play(movie, source, imdb, season, episode, epMeta, voice, status, dashMode, formatMode, episodeList) {
+        var sequence = ++playbackSequence;
+        var busy = false;
+        var playlist = [];
+        var selectedVoice = voice ? { index: voice.index, label: voice.label } : { index: -1, label: 'Авто' };
         activatePlayback();
-        adapter.resolve({ source: source, imdb: imdb, season: season, episode: episode, voice: voice, dashMode: dashMode, format: formatMode }, function (resolved) {
-            var title = titleOf(movie);
-            if (season !== null && episode !== null) title += ' • S' + season + 'E' + episode + (epMeta && epMeta.name ? ' • ' + epMeta.name : '');
-            var item = {
-                url: resolved.url,
-                title: title,
-                subtitles: freshSubtitles(resolved.subtitles),
-                translate: { tracks: freshTracks(resolved.tracks) },
-                timeline: timeline(movie, season, episode),
-                headers: resolved.headers || {},
-                isonline: true
-            };
-            var launchPlayer = 'lampa';
-            item.launch_player = launchPlayer;
-            try { Lampa.Player.runas(launchPlayer); } catch (e) {}
+
+        function active() { return sequence === playbackSequence; }
+        function prepareVoice() {
             try {
                 if (Lampa.PlayerVideo) {
                     if (Lampa.PlayerVideo.clearParamas) Lampa.PlayerVideo.clearParamas();
-                    if (voice && voice.index >= 0 && Lampa.PlayerVideo.setParams) Lampa.PlayerVideo.setParams({ track: voice.index });
-                    else if (Lampa.PlayerVideo.clearParamas) Lampa.PlayerVideo.clearParamas();
+                    if (selectedVoice.index >= 0 && Lampa.PlayerVideo.setParams) Lampa.PlayerVideo.setParams({ track: selectedVoice.index });
                 }
-            } catch (e2) {}
+            } catch (e) {}
+        }
+        function makeItem(number, meta) {
+            var title = titleOf(movie);
+            if (season !== null && number !== null) title += ' • S' + season + 'E' + number + (meta && meta.name ? ' • ' + meta.name : '');
+            return { title: title, season: season, episode: number,
+                timeline: timeline(movie, season, number), isonline: true, launch_player: 'lampa' };
+        }
+        function applyResolved(item, resolved) {
+            item.url = resolved.url;
+            item.subtitles = freshSubtitles(resolved.subtitles);
+            item.translate = { tracks: freshTracks(resolved.tracks) };
+            item.headers = resolved.headers || {};
+            prepareVoice();
             status.text('Collaps • ' + resolved.transport + ' • AUTO');
-            Lampa.Player.play(item);
-            Lampa.Player.playlist([item]);
-        }, function (e) { status.text('Ошибка: ' + errText(e)); notify('MnogoTV: ' + errText(e)); });
+        }
+        function resolveItem(item, done) {
+            if (!active() || busy) return;
+            busy = true;
+            status.text('Получаю Collaps • S' + season + 'E' + item.episode + '…');
+            adapter.resolve({ source: source, imdb: imdb, season: season, episode: item.episode,
+                voice: selectedVoice, dashMode: dashMode, format: formatMode }, function (resolved) {
+                busy = false;
+                if (!active()) return;
+                applyResolved(item, resolved);
+                // Other episodes must be resolved again on return: signed URLs and
+                // provider transport state belong to the newly selected episode.
+                playlist.forEach(function (other) { if (other !== item) arm(other); });
+                done();
+            }, function (e) {
+                busy = false;
+                if (!active()) return;
+                item.url = '';
+                status.text('Ошибка: ' + errText(e));
+                notify('MnogoTV: ' + errText(e));
+                done();
+            });
+        }
+        function arm(item) {
+            item.url = function (done) { resolveItem(item, done); };
+        }
+        var first = makeItem(episode, epMeta);
+        adapter.resolve({ source: source, imdb: imdb, season: season, episode: episode,
+            voice: selectedVoice, dashMode: dashMode, format: formatMode }, function (resolved) {
+            if (!active()) return;
+            applyResolved(first, resolved);
+            var seen = {};
+            if (season !== null && episode !== null) {
+                (episodeList || []).slice().sort(function (a, b) { return Number(a.episode_number) - Number(b.episode_number); }).forEach(function (ep) {
+                    var n = Number(ep.episode_number);
+                    if (!(n > 0) || n % 1 || seen[n]) return;
+                    seen[n] = true;
+                    var item = n === Number(episode) ? first : makeItem(n, ep);
+                    if (item !== first) arm(item);
+                    playlist.push(item);
+                });
+            }
+            if (playlist.indexOf(first) < 0) {
+                playlist.push(first);
+                playlist.sort(function (a, b) { return Number(a.episode) - Number(b.episode); });
+            }
+            if (playlist.length > 1) first.playlist = playlist;
+            try { Lampa.Player.runas('lampa'); } catch (e) {}
+            Lampa.Player.play(first);
+            Lampa.Player.playlist(playlist);
+        }, function (e) {
+            if (!active()) return;
+            status.text('Ошибка: ' + errText(e)); notify('MnogoTV: ' + errText(e));
+        });
     }
 
     function addCss() {
@@ -3250,7 +3307,7 @@
                     row.find('span').first().text(('0' + n).slice(-2) + ' • ' + (ep.name || ('Серия ' + n)));
                     row.find('.mnogotv-v5__meta').text(ep.air_date || '');
                     row.on('hover:focus', function (e) { focus = ep; last = e.target; });
-                    row.on('hover:enter click', function () { play(movie, source, imdb, season, n, ep, voice, status, dashMode, formatMode); });
+                    row.on('hover:enter click', function () { play(movie, source, imdb, season, n, ep, voice, status, dashMode, formatMode, episodes); });
                     list.append(row);
                 });
             }, function (e) { status.text('Ошибка серий: ' + errText(e)); });
@@ -3310,7 +3367,7 @@
         };
         this.pause = function () {};
         this.stop = function () {};
-        this.destroy = function () { adapter.cleanup('component-destroy'); root.remove(); };
+        this.destroy = function () { playbackSequence++; adapter.cleanup('component-destroy'); root.remove(); };
     }
 
     function register() { try { Lampa.Component.add(COMPONENT, Component); return true; } catch (e) { log(e); return false; } }
