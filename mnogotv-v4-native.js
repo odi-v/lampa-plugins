@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.24-collaps | CollapsAdapter SHA-256: 1dd3e4064e61e7a8c2dec5b01f748f7fd4f33924955bdf8dd56b5e585049a844 */
+/* MnogoTV/Lampa 5.0.25-collaps | CollapsAdapter SHA-256: 44c0f05e7ea192c7ac4476749a25ce98597f1c7d77ffa8dbebe588a684d3a4c6 */
 (function (global) {
     'use strict';
 
@@ -716,8 +716,8 @@
             function pump() {
                 if (inactive() || pumping) return;
                 pumping = true;
-                // At most two unconsumed parts, including out-of-order completed requests.
-                while (!inactive() && inflight < 2 && issued - consumed < 2) {
+                // At most four unconsumed parts, including out-of-order completed requests.
+                while (!inactive() && inflight < 4 && issued - consumed < 4) {
                     var a = start + issued * stride, b = a + chunkSize - 1;
                     if (end !== null) { if (a > end) break; b = Math.min(b, end); }
                     if (a - start >= maxBytes) { error('Collaps Range: превышен предел сборки 64 MiB'); break; }
@@ -2971,7 +2971,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.24-collaps';
+    var VERSION = '5.0.25-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
