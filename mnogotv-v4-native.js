@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.23-collaps | CollapsAdapter SHA-256: 33c1f3ab62745471c85e073f2d2ac68464822a4a14d5e5345b7bd20a29120757 */
+/* MnogoTV/Lampa 5.0.24-collaps | CollapsAdapter SHA-256: 1dd3e4064e61e7a8c2dec5b01f748f7fd4f33924955bdf8dd56b5e585049a844 */
 (function (global) {
     'use strict';
 
@@ -551,7 +551,8 @@
     // Per-request recovery for the Android bridge's oversized-response marker.
     // No provider state is shared and normal successful requests are unchanged.
     function collapsDashRequest(network, url, complete, fail, post, options, stale, budget, recovery) {
-        var ended = false, deadline = Date.now() + Math.max(10000, Number(budget) || 30000);
+        var ended = false, partBudget = Math.max(10000, Number(budget) || 30000);
+        var deadline = Date.now() + partBudget, rangeMode = false;
         var telemetry = null, requestId = null, started = Date.now();
         var detail = { phase: 'direct', issued: 0, received: 0, assembled: 0,
             pending: {}, parts: [], started: started, budgetMs: deadline - started };
@@ -585,9 +586,9 @@
             if (telemetry.completed.length > 64) telemetry.completed.shift();
         }
         function inactive() { return ended || stale(); }
-        function error(message) {
+        function error(message, reason) {
             if (inactive()) return;
-            keepFailure(message.indexOf('истекло') >= 0 ? 'deadline' : 'range-error');
+            keepFailure(reason || (message.indexOf('истекло') >= 0 ? 'deadline' : 'range-error'));
             ended = true;
             if (telemetry) delete telemetry.active[requestId];
             try { if (network.clear) network.clear(); } catch (e) {}
@@ -603,17 +604,34 @@
             if (inactive()) return;
             var remaining = deadline - Date.now();
             if (remaining <= 0) return error('Collaps Range: истекло время загрузки фрагмента');
-            if (network.timeout) network.timeout(remaining);
+            // Each part has its own bounded wait; successful parts may continue
+            // beyond the original fragment budget, up to the hard deadline.
+            var requestBudget = rangeMode ? Math.min(partBudget, remaining) : remaining;
+            var requestDeadline = Date.now() + requestBudget;
+            if (network.timeout) network.timeout(requestBudget);
+            function expired() {
+                if (Date.now() >= deadline) {
+                    error('Collaps Range: истекло общее время загрузки фрагмента', 'deadline'); return true;
+                }
+                if (rangeMode && Date.now() >= requestDeadline) {
+                    error('Collaps Range: часть не поступила вовремя', 'part-timeout'); return true;
+                }
+                return false;
+            }
             try {
                 network.native(url, function (value) {
-                    if (!inactive()) ok(value);
+                    if (!inactive() && !expired()) ok(value);
                 }, function (value) {
-                    if (!inactive()) bad(value);
+                    if (!inactive() && !expired()) bad(value);
                 }, post, params);
             } catch (e) { error('Collaps Range: ' + errText(e)); }
         }
         var rangeKey = collapsDashRangeKey(url);
         function recover() {
+            rangeMode = true;
+            deadline = started + Math.max(120000, partBudget);
+            detail.budgetMs = deadline - started;
+            detail.partBudgetMs = partBudget;
             detail.phase = 'probe';
             detail.directMs = Date.now() - started;
             var headers = {}, start = 0, end = null, rawRange = '';
@@ -740,6 +758,7 @@
         return 'Range ' + detail.phase + ': ' + detail.received + '/' + detail.issued +
             ' частей' + (detail.cancelled ? ' | отменено ' + detail.cancelled : '') + ' | собрано ' + (detail.assembled / 1048576).toFixed(2) + ' МБ' +
             ' | ' + ((detail.elapsedMs === undefined ? now - detail.started : detail.elapsedMs) / 1000).toFixed(1) + '/' + (detail.budgetMs / 1000).toFixed(0) + 'с' +
+            (detail.partBudgetMs ? ' | часть ≤' + (detail.partBudgetMs / 1000).toFixed(0) + 'с' : '') +
             (detail.directMs !== undefined ? ' | до Range ' + (detail.directMs / 1000).toFixed(1) + 'с' : '') +
             (pending ? '\nОжидают: ' + pending : '') + (parts ? '\nЧасти: ' + parts : '') +
             (detail.reason ? ' | ошибка: ' + detail.reason : '');
@@ -2952,7 +2971,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.23-collaps';
+    var VERSION = '5.0.24-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
