@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.22-collaps | CollapsAdapter SHA-256: 4e5ea03f333467b3e623a99c1a74cf19fc3a8a5356edb593cd1b1430f2720d2d */
+/* MnogoTV/Lampa 5.0.23-collaps | CollapsAdapter SHA-256: 33c1f3ab62745471c85e073f2d2ac68464822a4a14d5e5345b7bd20a29120757 */
 (function (global) {
     'use strict';
 
@@ -553,11 +553,19 @@
     function collapsDashRequest(network, url, complete, fail, post, options, stale, budget, recovery) {
         var ended = false, deadline = Date.now() + Math.max(10000, Number(budget) || 30000);
         var telemetry = null, requestId = null, started = Date.now();
+        var detail = { phase: 'direct', issued: 0, received: 0, assembled: 0,
+            pending: {}, parts: [], started: started, budgetMs: deadline - started };
         if (recovery && options.dataType === 'base64') {
             telemetry = recovery.telemetry || (recovery.telemetry = {seq: 0, active: {}, completed: []});
             Object.keys(telemetry.active).forEach(function (id) { if (!telemetry.active[id].alive()) delete telemetry.active[id]; });
             requestId = ++telemetry.seq;
-            telemetry.active[requestId] = {started: started, alive: function () { return !ended && !stale(); }};
+            telemetry.active[requestId] = {started: started, detail: detail, alive: function () { return !ended && !stale(); }};
+        }
+        function keepFailure(reason) {
+            if (!recovery) return;
+            detail.elapsedMs = Date.now() - started;
+            detail.reason = reason;
+            recovery.lastFailure = detail;
         }
         function record(value) {
             if (!telemetry) return;
@@ -579,6 +587,7 @@
         function inactive() { return ended || stale(); }
         function error(message) {
             if (inactive()) return;
+            keepFailure(message.indexOf('истекло') >= 0 ? 'deadline' : 'range-error');
             ended = true;
             if (telemetry) delete telemetry.active[requestId];
             try { if (network.clear) network.clear(); } catch (e) {}
@@ -586,6 +595,8 @@
         }
         function done(value) {
             if (inactive()) return;
+            detail.elapsedMs = Date.now() - started;
+            if (recovery && detail.phase !== 'direct') recovery.lastRange = detail;
             ended = true; record(value); complete(value);
         }
         function request(params, ok, bad) {
@@ -603,6 +614,8 @@
         }
         var rangeKey = collapsDashRangeKey(url);
         function recover() {
+            detail.phase = 'probe';
+            detail.directMs = Date.now() - started;
             var headers = {}, start = 0, end = null, rawRange = '';
             Object.keys(options.headers || {}).forEach(function (key) {
                 if (key.toLowerCase() === 'range') rawRange = options.headers[key];
@@ -621,6 +634,9 @@
             function finish() {
                 if (inactive()) return;
                 if (!total) return error('Collaps Range: пустой фрагмент');
+                detail.phase = 'assemble';
+                detail.cancelled = Object.keys(detail.pending).length;
+                detail.pending = {};
                 var out = new Uint8Array(total), offset = 0;
                 chunks.forEach(function (chunk) { out.set(chunk, offset); offset += chunk.length; });
                 chunks = []; ready = {};
@@ -654,6 +670,7 @@
                     var piece = bytes.subarray(keep);
                     if (total + piece.length > maxBytes) return error('Collaps Range: превышен предел сборки 64 MiB');
                     chunks.push(piece); total += piece.length; consumed++;
+                    detail.assembled = total;
                     if (bytes.length < item.length || end !== null && start + total > end) return finish();
                     if (!piece.length) return error('Collaps Range: нет продвижения');
                     tail = bytes.subarray(bytes.length - Math.min(overlap, bytes.length));
@@ -661,8 +678,17 @@
             }
             function launch(index, a, b) {
                 inflight++;
+                detail.phase = 'parts'; detail.issued++;
+                var partStarted = Date.now();
+                detail.pending[index] = { from: a, to: b, started: partStarted };
                 function receive(item) {
                     if (inactive()) return;
+                    delete detail.pending[index];
+                    if (!item.error) detail.received++;
+                    detail.parts.push({ index: index, from: a, to: b,
+                        bytes: item.bytes ? item.bytes.length : 0,
+                        ms: Date.now() - partStarted, error: !!item.error });
+                    if (detail.parts.length > 8) detail.parts.shift();
                     inflight--; ready[index] = item; drain(); pump();
                 }
                 get(a, b, function (bytes) { receive({bytes: bytes, length: b - a + 1}); }, function (e) {
@@ -695,10 +721,28 @@
             else done(value);
         }, function (e) {
             if (inactive()) return;
+            keepFailure('native-error');
             ended = true;
             if (telemetry) delete telemetry.active[requestId];
             fail(e);
         });
+    }
+
+    function rangeDiagnosticText(detail, now) {
+        if (!detail) return '';
+        var pending = Object.keys(detail.pending || {}).map(function (id) {
+            var p = detail.pending[id];
+            return '#' + (Number(id) + 1) + ' ' + ((now - p.started) / 1000).toFixed(1) + 'с';
+        }).join(', ');
+        var parts = (detail.parts || []).slice(-3).map(function (p) {
+            return '#' + (p.index + 1) + ':' + (p.bytes / 1024).toFixed(0) + 'КБ/' + (p.ms / 1000).toFixed(1) + 'с' + (p.error ? '!' : '');
+        }).join(' ');
+        return 'Range ' + detail.phase + ': ' + detail.received + '/' + detail.issued +
+            ' частей' + (detail.cancelled ? ' | отменено ' + detail.cancelled : '') + ' | собрано ' + (detail.assembled / 1048576).toFixed(2) + ' МБ' +
+            ' | ' + ((detail.elapsedMs === undefined ? now - detail.started : detail.elapsedMs) / 1000).toFixed(1) + '/' + (detail.budgetMs / 1000).toFixed(0) + 'с' +
+            (detail.directMs !== undefined ? ' | до Range ' + (detail.directMs / 1000).toFixed(1) + 'с' : '') +
+            (pending ? '\nОжидают: ' + pending : '') + (parts ? '\nЧасти: ' + parts : '') +
+            (detail.reason ? ' | ошибка: ' + detail.reason : '');
     }
 
     function hlsNativeStats() {
@@ -1773,7 +1817,7 @@
                             self._emit('error', { error: decodeError });
                             self._emit('loadend', {});
                             notify(
-                                'Collaps 5.0.10 DASH: decode • ' +
+                                'Collaps DASH: decode • ' +
                                 payloadInfo.summary
                             );
                             return;
@@ -1839,7 +1883,7 @@
                         self._emit('loadend', {});
 
                         notify(
-                            'Collaps 5.0.10 DASH: ' +
+                            'Collaps DASH: ' +
                             (a && /^Collaps Range:/.test(a.responseText || '')
                                 ? a.responseText : 'native HTTP ' + (self.status || 0))
                         );
@@ -2135,12 +2179,13 @@
             if (!active()) return dispose();
             if (!video) return;
             var now = Date.now(), recovery = COLLAPS_NATIVE_DASH.rangeRecovery;
-            var network = recovery && recovery.telemetry, count = 0, oldest = 0, largest = null;
+            var network = recovery && recovery.telemetry, count = 0, oldest = 0, largest = null, rangeDetail = null;
             if (network) {
                 Object.keys(network.active).forEach(function (id) {
                     var item = network.active[id];
                     if (!item.alive()) { delete network.active[id]; return; }
                     count++; oldest = Math.max(oldest, (now - item.started) / 1000);
+                    if (item.detail && (!rangeDetail || item.started < rangeDetail.started)) rangeDetail = item.detail;
                 });
                 network.completed.forEach(function (item) {
                     if (now - item.finished < 15000 && (!largest || item.bytes > largest.bytes)) largest = item;
@@ -2177,12 +2222,15 @@
                 if (rep.height === Number(video.videoHeight) && codecs.indexOf(rep.codec) < 0) codecs.push(rep.codec);
             });
             var codec = codecs.length ? codecs.map(collapsCodecLabel).join(' / ') : 'н/д';
-            var text = 'Collaps 5.0.10 | ' + (video.videoHeight || '?') + 'p | ' + (video.paused ? 'пауза' : phase) + '\n' +
+            var text = 'Collaps DASH | ' + (video.videoHeight || '?') + 'p | ' + (video.paused ? 'пауза' : phase) + '\n' +
                 'Поток: ' + COLLAPS_NATIVE_DASH.selectedPath + ' | кодек: ' + codec + '\n' +
                 'Разрешения MPD: ' + (heights.sort(function (a, b) { return a - b; }).join(', ') || 'н/д') + '\n' +
                 'Буфер видео ' + buffer('video') + ' | звук ' + buffer('audio') + ' | общий ' + av.toFixed(1) + 'с\n' +
                 'Пропуски кадров: ' + frames + ' | запросов ' + count + ' | ожидание ' + oldest.toFixed(1) + 'с\n' +
                 'Крупный фрагм. за 15с: ' + (largest ? (largest.bytes / 1048576).toFixed(2) + ' МБ / ' + (largest.ms / 1000).toFixed(2) + 'с' : 'нет данных');
+            var rangeText = rangeDiagnosticText(rangeDetail || recovery && recovery.lastRange, now);
+            if (rangeText) text += '\n' + rangeText;
+            if (recovery && recovery.lastFailure) text += '\nПоследний сбой: ' + rangeDiagnosticText(recovery.lastFailure, recovery.lastFailure.started + recovery.lastFailure.elapsedMs);
             COLLAPS_NATIVE_DASH.playbackTelemetry = {time: now, text: text};
             if (panel) panel.textContent = text;
         }
@@ -2904,7 +2952,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.22-collaps';
+    var VERSION = '5.0.23-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3296,9 +3344,8 @@
     function addCss() {
         if (document.getElementById('mnogotv-v5-style')) return;
         var css = `
-body.mnogotv-v5-page{background:radial-gradient(ellipse at 90% 25%,#075c65 0%,#102b36 45%,#111720 85%)!important}
-body.mnogotv-v5-page .background{background:radial-gradient(ellipse at 90% 25%,#075c65 0%,#102b36 45%,#111720 85%)!important}
-body.mnogotv-v5-page .background>*{visibility:hidden!important}
+body.mnogotv-v5-page{background:#111720!important}
+
 body.mnogotv-v5-page .head{background:transparent!important}
 .mnogotv-v5{box-sizing:border-box;display:flex;height:calc(100vh - 7em);min-height:24em;padding:1.2em 2em 1.5em;color:#f4f7f8;background:transparent;overflow:hidden}
 .mnogotv-v5 *{box-sizing:border-box}
@@ -3520,6 +3567,8 @@ body.mnogotv-v5-page .head{background:transparent!important}
         this.render = function () { return root; };
         this.start = function () {
             document.body.classList.add('mnogotv-v5-page');
+            var art = imageUrl(movie.backdrop_path || movie.poster_path, 'w300');
+            if (art && Lampa.Background && Lampa.Background.change) Lampa.Background.change(art);
             if (!initialized) {
                 initialized = true; addCss();
                 bar.append(sourceButton);
