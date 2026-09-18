@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.26-collaps | CollapsAdapter SHA-256: 3bedf9eceb1cb57e1daf6c033c973eaecb63eec2926656b86234860155610ea2 */
+/* MnogoTV/Lampa 5.0.27-collaps | CollapsAdapter SHA-256: 2f13866e58ce9d628b4778698cdbf0bd02d1b1aa6bed3a5f7a54b3ef0022cde9 */
 (function (global) {
     'use strict';
 
@@ -1756,6 +1756,15 @@
                 return;
             }
 
+            var gate = COLLAPS_NATIVE_DASH.bufferProbe;
+            if (gate && gate.holding) {
+                var xhr = this, serial = this._requestSerial, gen = COLLAPS_NATIVE_DASH.generation;
+                gate.queue.push(function () {
+                    if (!xhr._aborted && serial === xhr._requestSerial && gen === COLLAPS_NATIVE_DASH.generation && COLLAPS_NATIVE_DASH.active) xhr.send(body);
+                });
+                return;
+            }
+
             var self = this;
             var network = null;
 
@@ -2195,6 +2204,23 @@
         var phase = 'запуск', subscriptions = [], generation = COLLAPS_NATIVE_DASH.generation;
         var history = [], expectedTick = 0, lagMs = 0;
         var summary = { samples: 0, totalFrames: 0, droppedFrames: 0, maxLagMs: 0, minBuffer: null, waits: 0 };
+        var probe = {holding:false, queue:[], status:'ожидание запаса 30с', done:false};
+        COLLAPS_NATIVE_DASH.bufferProbe = probe;
+        var probeTimer = null;
+        function finishProbe(reason, flush) {
+            if (!probe.holding) return;
+            probe.holding = false; probe.done = true; probe.status = reason;
+            probe.elapsed = Date.now() - probe.started;
+            try {
+                var q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : {totalVideoFrames:video.webkitDecodedFrameCount,droppedVideoFrames:video.webkitDroppedFrameCount};
+                probe.frames = Math.max(0, q.totalVideoFrames - probe.total);
+                probe.drops = Math.max(0, q.droppedVideoFrames - probe.dropped);
+            } catch (e) {}
+            if (probeTimer !== null) clearTimeout(probeTimer);
+            probeTimer = null;
+            var queued = probe.queue; probe.queue = [];
+            if (flush) queued.forEach(function (resume) { resume(); });
+        }
         function active() { return !disposed && COLLAPS_NATIVE_DASH.active && generation === COLLAPS_NATIVE_DASH.generation; }
         function sample() {
             if (!active()) return dispose();
@@ -2241,6 +2267,18 @@
                     previous = {total: total, dropped: dropped, time: now, paused: video.paused};
                 }
             } catch (e2) {}
+            if (probe.holding) {
+                probe.maxLag = Math.max(probe.maxLag, lagMs);
+                if (av < 15 || video.paused || video.seeking || video.videoHeight !== probe.height)
+                    finishProbe('досрочно: буфер/пауза/переключение', true);
+            } else if (!probe.done && !video.paused && !video.seeking && phase === 'воспроизведение' &&
+                av >= 30 && count === 0 && summary.samples >= 10 && typeof total === 'number' && typeof dropped === 'number') {
+                probe.holding = true; probe.status = 'без новых DASH-запросов';
+                probe.started = now; probe.total = total; probe.dropped = dropped;
+                probe.height = video.videoHeight; probe.maxLag = 0;
+                probe.baseline = {frames:summary.totalFrames, drops:summary.droppedFrames};
+                probeTimer = setTimeout(function () { finishProbe('завершён', active()); }, 10000);
+            }
             if (!video.paused) {
                 summary.samples++;
                 summary.minBuffer = summary.minBuffer === null ? av : Math.min(summary.minBuffer, av);
@@ -2248,7 +2286,7 @@
                     buffer: av, total: total, dropped: dropped, lagMs: lagMs, phase: phase});
                 if (history.length > 120) history.shift();
             }
-            COLLAPS_NATIVE_DASH.playbackTelemetry = {time: now, summary: summary, history: history, panelMode: 'pause-only'};
+            COLLAPS_NATIVE_DASH.playbackTelemetry = {time: now, summary: summary, history: history, panelMode: 'pause-only', bufferProbe: probe};
             // No text formatting or DOM text updates while video is running.
             if (!video.paused && phase !== 'конец') {
                 if (panel && panel.style.display !== 'none') panel.style.display = 'none';
@@ -2272,10 +2310,15 @@
             text += '\nСводка просмотра: пропуски ' + summary.droppedFrames + '/' + summary.totalFrames +
                 ' | waiting ' + summary.waits + ' | мин. буфер ' + (summary.minBuffer === null ? '?' : summary.minBuffer.toFixed(1)) + 'с' +
                 '\nЗадержка таймера JS: максимум ' + summary.maxLagMs.toFixed(0) + ' мс';
+            text += '\nТест буфера: ' + probe.status;
+            if (probe.done) text += ' | ' + (probe.elapsed / 1000).toFixed(1) + 'с | пропуски ' + probe.drops + '/' + probe.frames +
+                ' | JS ≤' + probe.maxLag.toFixed(0) + ' мс' + '\nДо теста: ' + probe.baseline.drops + '/' + probe.baseline.frames;
             COLLAPS_NATIVE_DASH.playbackTelemetry.text = text;
             if (panel) { panel.style.display = 'block'; panel.textContent = text; }
         }
         function dispose() {
+            finishProbe('отмена сессии', false);
+            if (COLLAPS_NATIVE_DASH.bufferProbe === probe) COLLAPS_NATIVE_DASH.bufferProbe = null;
             disposed = true;
             if (timer !== null) clearInterval(timer);
             timer = null;
@@ -2292,6 +2335,7 @@
             ['waiting', 'playing', 'seeking', 'seeked', 'pause', 'ended'].forEach(function (name) {
                 var fn = function () {
                     if (name === 'waiting') summary.waits++;
+                    if (name === 'seeking' || name === 'pause' || name === 'ended') finishProbe('досрочно: ' + name, true);
                     phase = {waiting:'загрузка',playing:'воспроизведение',seeking:'перемотка',seeked:'после перемотки',pause:'пауза',ended:'конец'}[name];
                     sample();
                 };
@@ -2999,7 +3043,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.26-collaps';
+    var VERSION = '5.0.27-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
