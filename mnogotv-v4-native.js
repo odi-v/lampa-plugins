@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.25-collaps | CollapsAdapter SHA-256: 44c0f05e7ea192c7ac4476749a25ce98597f1c7d77ffa8dbebe588a684d3a4c6 */
+/* MnogoTV/Lampa 5.0.26-collaps | CollapsAdapter SHA-256: 3bedf9eceb1cb57e1daf6c033c973eaecb63eec2926656b86234860155610ea2 */
 (function (global) {
     'use strict';
 
@@ -2193,6 +2193,8 @@
     function installCollapsMonitor(player) {
         var video = null, panel = null, timer = null, disposed = false, previous = null;
         var phase = 'запуск', subscriptions = [], generation = COLLAPS_NATIVE_DASH.generation;
+        var history = [], expectedTick = 0, lagMs = 0;
+        var summary = { samples: 0, totalFrames: 0, droppedFrames: 0, maxLagMs: 0, minBuffer: null, waits: 0 };
         function active() { return !disposed && COLLAPS_NATIVE_DASH.active && generation === COLLAPS_NATIVE_DASH.generation; }
         function sample() {
             if (!active()) return dispose();
@@ -2230,11 +2232,28 @@
                     var quality = video.getVideoPlaybackQuality(); total = quality.totalVideoFrames; dropped = quality.droppedVideoFrames;
                 } else { total = video.webkitDecodedFrameCount; dropped = video.webkitDroppedFrameCount; }
                 if (typeof total === 'number' && typeof dropped === 'number') {
+                    if (previous && !previous.paused && !video.paused && total >= previous.total && dropped >= previous.dropped) {
+                        summary.totalFrames += total - previous.total;
+                        summary.droppedFrames += dropped - previous.dropped;
+                    }
                     frames = previous && total >= previous.total && dropped >= previous.dropped
                         ? '+' + (dropped - previous.dropped) + '/' + (total - previous.total) + ' за ' + ((now - previous.time) / 1000).toFixed(1) + 'с' : 'сбор данных';
-                    previous = {total: total, dropped: dropped, time: now};
+                    previous = {total: total, dropped: dropped, time: now, paused: video.paused};
                 }
             } catch (e2) {}
+            if (!video.paused) {
+                summary.samples++;
+                summary.minBuffer = summary.minBuffer === null ? av : Math.min(summary.minBuffer, av);
+                history.push({time: now, position: video.currentTime, height: video.videoHeight,
+                    buffer: av, total: total, dropped: dropped, lagMs: lagMs, phase: phase});
+                if (history.length > 120) history.shift();
+            }
+            COLLAPS_NATIVE_DASH.playbackTelemetry = {time: now, summary: summary, history: history, panelMode: 'pause-only'};
+            // No text formatting or DOM text updates while video is running.
+            if (!video.paused && phase !== 'конец') {
+                if (panel && panel.style.display !== 'none') panel.style.display = 'none';
+                return;
+            }
             var manifest = COLLAPS_NATIVE_DASH.manifestInfo || [], codecs = [], heights = [];
             manifest.forEach(function (rep) {
                 if (rep.height && heights.indexOf(rep.height) < 0) heights.push(rep.height);
@@ -2250,8 +2269,11 @@
             var rangeText = rangeDiagnosticText(rangeDetail || recovery && recovery.lastRange, now);
             if (rangeText) text += '\n' + rangeText;
             if (recovery && recovery.lastFailure) text += '\nПоследний сбой: ' + rangeDiagnosticText(recovery.lastFailure, recovery.lastFailure.started + recovery.lastFailure.elapsedMs);
-            COLLAPS_NATIVE_DASH.playbackTelemetry = {time: now, text: text};
-            if (panel) panel.textContent = text;
+            text += '\nСводка просмотра: пропуски ' + summary.droppedFrames + '/' + summary.totalFrames +
+                ' | waiting ' + summary.waits + ' | мин. буфер ' + (summary.minBuffer === null ? '?' : summary.minBuffer.toFixed(1)) + 'с' +
+                '\nЗадержка таймера JS: максимум ' + summary.maxLagMs.toFixed(0) + ' мс';
+            COLLAPS_NATIVE_DASH.playbackTelemetry.text = text;
+            if (panel) { panel.style.display = 'block'; panel.textContent = text; }
         }
         function dispose() {
             disposed = true;
@@ -2269,6 +2291,7 @@
             if (!video || !video.addEventListener) return;
             ['waiting', 'playing', 'seeking', 'seeked', 'pause', 'ended'].forEach(function (name) {
                 var fn = function () {
+                    if (name === 'waiting') summary.waits++;
                     phase = {waiting:'загрузка',playing:'воспроизведение',seeking:'перемотка',seeked:'после перемотки',pause:'пауза',ended:'конец'}[name];
                     sample();
                 };
@@ -2279,7 +2302,12 @@
                 panel.style.cssText = 'position:fixed;left:3%;top:3%;z-index:2147483646;background:rgba(0,0,0,.8);color:#fff;padding:10px 14px;font:18px/1.4 sans-serif;white-space:pre-line;pointer-events:none;';
                 document.body.appendChild(panel);
             }
-            timer = setInterval(sample, 1000); sample();
+            expectedTick = Date.now() + 1000;
+            timer = setInterval(function () {
+                var now = Date.now(); lagMs = Math.max(0, now - expectedTick); expectedTick = now + 1000;
+                if (video && !video.paused) summary.maxLagMs = Math.max(summary.maxLagMs, lagMs);
+                sample();
+            }, 1000); sample();
         }, dispose: dispose};
     }
 
@@ -2971,7 +2999,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.25-collaps';
+    var VERSION = '5.0.26-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
