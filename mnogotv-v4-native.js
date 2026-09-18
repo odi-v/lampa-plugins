@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.27-collaps | CollapsAdapter SHA-256: 2f13866e58ce9d628b4778698cdbf0bd02d1b1aa6bed3a5f7a54b3ef0022cde9 */
+/* MnogoTV/Lampa 5.0.28-collaps | CollapsAdapter SHA-256: 067af4c5ff9d714bff29258bb9f60d3f6026b110e8b9a30955b202e51a5d7683 */
 (function (global) {
     'use strict';
 
@@ -553,6 +553,11 @@
     function collapsDashRequest(network, url, complete, fail, post, options, stale, budget, recovery) {
         var ended = false, partBudget = Math.max(10000, Number(budget) || 30000);
         var deadline = Date.now() + partBudget, rangeMode = false;
+        var watchdogs = [];
+        function clearWatchdogs() {
+            watchdogs.forEach(function (timer) { clearTimeout(timer); });
+            watchdogs = [];
+        }
         var telemetry = null, requestId = null, started = Date.now();
         var detail = { phase: 'direct', issued: 0, received: 0, assembled: 0,
             pending: {}, parts: [], started: started, budgetMs: deadline - started };
@@ -590,6 +595,7 @@
             if (inactive()) return;
             keepFailure(reason || (message.indexOf('истекло') >= 0 ? 'deadline' : 'range-error'));
             ended = true;
+            clearWatchdogs();
             if (telemetry) delete telemetry.active[requestId];
             try { if (network.clear) network.clear(); } catch (e) {}
             fail({status: 0, responseText: message});
@@ -598,7 +604,7 @@
             if (inactive()) return;
             detail.elapsedMs = Date.now() - started;
             if (recovery && detail.phase !== 'direct') recovery.lastRange = detail;
-            ended = true; record(value); complete(value);
+            ended = true; clearWatchdogs(); record(value); complete(value);
         }
         function request(params, ok, bad) {
             if (inactive()) return;
@@ -618,11 +624,31 @@
                 }
                 return false;
             }
+            // The Android bridge may never call either callback. Enforce the
+            // deadline ourselves, and ignore late/duplicate bridge responses.
+            var settled = false;
+            var timer = setTimeout(function () {
+                if (settled) return;
+                settled = true;
+                if (inactive()) { clearWatchdogs(); return; }
+                error(rangeMode ? 'Collaps Range: часть не поступила вовремя' :
+                    'Collaps Range: истекло время загрузки фрагмента',
+                    Date.now() >= deadline ? 'deadline' : 'part-timeout');
+            }, requestBudget);
+            watchdogs.push(timer);
+            function receive(value, callback) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                watchdogs = watchdogs.filter(function (item) { return item !== timer; });
+                if (inactive()) { clearWatchdogs(); return; }
+                if (!expired()) callback(value);
+            }
             try {
                 network.native(url, function (value) {
-                    if (!inactive() && !expired()) ok(value);
+                    receive(value, ok);
                 }, function (value) {
-                    if (!inactive() && !expired()) bad(value);
+                    receive(value, bad);
                 }, post, params);
             } catch (e) { error('Collaps Range: ' + errText(e)); }
         }
@@ -741,6 +767,7 @@
             if (inactive()) return;
             keepFailure('native-error');
             ended = true;
+            clearWatchdogs();
             if (telemetry) delete telemetry.active[requestId];
             fail(e);
         });
@@ -3043,7 +3070,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.27-collaps';
+    var VERSION = '5.0.28-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
