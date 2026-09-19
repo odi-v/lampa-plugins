@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.28-collaps | CollapsAdapter SHA-256: 067af4c5ff9d714bff29258bb9f60d3f6026b110e8b9a30955b202e51a5d7683 */
+/* MnogoTV/Lampa 5.0.29-collaps | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -890,6 +890,7 @@
             var v = hls.media;
             if (!v) return;
             publish(false);
+            if (!(global.MnogoTVDiagnostics === true)) return;
             var buffer = 0, frames = 'н/д', now = Date.now();
             try { for (var i=0; i<v.buffered.length; i++) if (v.currentTime >= v.buffered.start(i) && v.currentTime <= v.buffered.end(i)) buffer = v.buffered.end(i)-v.currentTime; } catch (e) {}
             try {
@@ -928,7 +929,11 @@
             clearTimeout(deferred);
             deferred = setTimeout(function () {
                 if (!active() || !hls.media) return;
-                if (!initialized) { hls.loadLevel = -1; initialized = true; }
+                if (!initialized) {
+                    var chosen = -1;
+                    (hls.levels || []).forEach(function (l,i) { if (l.height > 0 && l.height <= 720 && (chosen < 0 || l.height > hls.levels[chosen].height)) chosen = i; });
+                    requested = chosen < 0 ? null : chosen; hls.loadLevel = chosen; initialized = true;
+                }
                 publish(true);
             },0);
         });
@@ -2068,33 +2073,45 @@
     function collapsDashTrackNumber(track, fallbackIndex) {
         track = track || {};
 
-        var explicit = [
-            track.index,
-            track.id,
-            track.mediaInfo && track.mediaInfo.index,
-            track.mediaInfo && track.mediaInfo.id
-        ];
+        var lang = String(track.lang || track.language || track.mediaInfo && track.mediaInfo.lang || '');
+        var suffix = lang.match(/(\d+)$/);
+        if (suffix) return Number(suffix[1]);
+        var index = track.index;
+        return typeof index === 'number' ? index : fallbackIndex;
+    }
 
-        for (var i = 0; i < explicit.length; i++) {
-            var n = parseInt(explicit[i], 10);
-            if (!isNaN(n)) return n;
-        }
-
-        /*
-         * Collaps MPD uses language tags rus0, rus1, ..., ukr7, eng8.
-         * The trailing number is the physical audio AdaptationSet number.
-         */
-        var lang = String(
-            track.lang ||
-            track.language ||
-            track.mediaInfo && track.mediaInfo.lang ||
-            ''
-        );
-
-        var m = lang.match(/(\d+)$/);
-        if (m) return parseInt(m[1], 10);
-
-        return fallbackIndex;
+    function installCollapsDashAudioMap(player) {
+        if (!player.getTracksFor || !player.setCurrentTrack) return;
+        var get = player.getTracksFor, set = player.setCurrentTrack;
+        var generation = COLLAPS_NATIVE_DASH.generation;
+        var names = COLLAPS_NATIVE_DASH.audioNames || [];
+        player.getTracksFor = function (type) {
+            var tracks = get.apply(player, arguments) || [];
+            if (type !== 'audio') return tracks;
+            var labels = [];
+            var copies = tracks.map(function (track, i) {
+                var number = collapsDashTrackNumber(track, i), name = null, copy = {};
+                names.some(function (n) { if (n.index === number) { name = n; return true; } return false; });
+                Object.keys(track).forEach(function (key) { if (key !== 'enabled') copy[key] = track[key]; });
+                Object.defineProperty(copy, '__collapsOriginal', {value:track});
+                labels.push({language:name ? name.label : String(track.lang || 'Дорожка ' + (i + 1))});
+                return copy;
+            });
+            if (generation === COLLAPS_NATIVE_DASH.generation && Lampa.PlayerPanel && Lampa.PlayerPanel.setTranslate)
+                Lampa.PlayerPanel.setTranslate({tracks:labels});
+            return copies;
+        };
+        player.setCurrentTrack = function (track) {
+            if (generation !== COLLAPS_NATIVE_DASH.generation || !COLLAPS_NATIVE_DASH.active) return;
+            var original = track && track.__collapsOriginal || track;
+            var result = set.call(player, original);
+            // A user's choice must not be overwritten by delayed startup retries.
+            if (original && original.type === 'audio') {
+                COLLAPS_NATIVE_DASH.audioIndex = -1;
+                COLLAPS_NATIVE_DASH.audioAppliedKey = '';
+            }
+            return result;
+        };
     }
 
     function applyCollapsDashAudioChoice(player, reason) {
@@ -2227,6 +2244,7 @@
     }
 
     function installCollapsMonitor(player) {
+        if (!(global.MnogoTVDiagnostics === true)) return {start:function(){}, dispose:function(){}};
         var video = null, panel = null, timer = null, disposed = false, previous = null;
         var phase = 'запуск', subscriptions = [], generation = COLLAPS_NATIVE_DASH.generation;
         var history = [], expectedTick = 0, lagMs = 0;
@@ -2385,7 +2403,7 @@
     function installCollapsDashQuality(player, events) {
         if (!player || !player.getBitrateInfoListFor || !player.setQualityFor ||
             !player.updateSettings || !player.getSettings) return null;
-        var alive = true, automatic = true, requested = null, rendered = null;
+        var alive = true, automatic = false, requested = null, rendered = null, startup = true;
         var subscriptions = [];
         var generation = COLLAPS_NATIVE_DASH.generation;
         var nativeLevels = player.getBitrateInfoListFor;
@@ -2471,6 +2489,16 @@
         }
         on(events.STREAM_INITIALIZED, function () {
             if (!active()) return;
+            if (startup) {
+                var list = levels(), chosen = null;
+                list.forEach(function (level, i) {
+                    if (level.height > 0 && level.height <= 720 && (!chosen || level.height > chosen.height))
+                        chosen = {height:level.height,index:Number(level.qualityIndex === undefined ? i : level.qualityIndex)};
+                });
+                if (chosen) { requested = chosen.index; automatic = false; player.setQualityFor('video', requested, false); }
+                else automatic = true;
+                startup = false;
+            }
             setAuto(automatic);
             publish();
         });
@@ -2483,8 +2511,8 @@
         return {
             start: function () {
                 if (!active()) return;
-                automatic = true; requested = null; rendered = null;
-                setAuto(true);
+                automatic = false; requested = null; rendered = null; startup = true;
+                setAuto(false);
             },
             dispose: function () {
                 alive = false;
@@ -2536,6 +2564,7 @@
                     var unix = COLLAPS_NATIVE_DASH.unixTime;
                     if (COLLAPS_NATIVE_DASH.qualityControl) COLLAPS_NATIVE_DASH.qualityControl.dispose();
                     if (COLLAPS_NATIVE_DASH.monitor) COLLAPS_NATIVE_DASH.monitor.dispose();
+                    installCollapsDashAudioMap(player);
                     var monitor = installCollapsMonitor(player);
                     COLLAPS_NATIVE_DASH.monitor = monitor;
                     var qualityControl = installCollapsDashQuality(player, factory.events || dashjs.MediaPlayer.events || {});
@@ -2842,13 +2871,17 @@
                                 return;
                             }
                         }
-                        else if (dashMode === 'alternative') {
-                            if (!dashStream || !dashaStream || !av1 || dashStream === dashaStream) {
-                                fail(new Error('Collaps: отдельный альтернативный DASH для этого видео отсутствует'));
+                        else if (dashMode === 'alternative' || format === 'vp9') {
+                            if (!dashStream) {
+                                fail(new Error('Collaps-VP9: DASH-поток для этого видео отсутствует'));
                                 return;
                             }
                             selectedDash = dashStream;
-                            selectedDashLabel = 'DASH / альтернативный';
+                            selectedDashLabel = 'DASH / VP9';
+                        }
+                        else if (format === 'av1') {
+                            if (!dashaStream || !av1) { fail(new Error('Collaps-AV1: поток отсутствует или AV1 не поддерживается плеером')); return; }
+                            selectedDash = dashaStream; selectedDashLabel = 'DASHA/AV1';
                         }
                         else if (dashaStream && av1) {
                             selectedDash = dashaStream;
@@ -2883,6 +2916,7 @@
                             }
 
                             COLLAPS_NATIVE_DASH.selectedPath = selectedDashLabel;
+                            COLLAPS_NATIVE_DASH.audioNames = normalizeTracks(item.audio || {});
                             ok({
                                 provider: 'Collaps',
                                 directUrl: stripHash(clientDashUrl) + '#manifest.mpd',
@@ -3017,6 +3051,7 @@
 
         this.resolve = function (request, ok, fail) {
             resetSession('new-playback-session');
+            COLLAPS_NATIVE_DASH.audioNames = [];
             try { setCollapsDashAudioChoice(request.voice || null); } catch (e) {}
             resolveCollaps(request.source, request.imdb, request.season, request.episode, function (result) {
                 ok({
@@ -3070,7 +3105,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.0.28-collaps';
+    var VERSION = '5.0.29-collaps';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3315,6 +3350,28 @@
         currentPlayback = adapter;
     }
 
+    function installPlayerAutoHide() {
+        if (!Lampa.Player.listener || !Lampa.Controller.listener) return;
+        var active = false, timer = null;
+        function schedule() {
+            clearTimeout(timer);
+            if (!active) return;
+            timer = setTimeout(function () {
+                if (!active) return;
+                var controller = Lampa.Controller.enabled();
+                if (!controller || ['player','player_panel','player_rewind'].indexOf(controller.name) < 0) return;
+                if (Lampa.PlayerPanel && Lampa.PlayerPanel.toPlayer &&
+                    (!Lampa.PlayerPanel.visibleStatus || Lampa.PlayerPanel.visibleStatus())) Lampa.PlayerPanel.toPlayer();
+            }, 5000);
+        }
+        Lampa.Player.listener.follow('start', function (data) { active = !!(data && data.mnogotv_collaps); schedule(); });
+        Lampa.Player.listener.follow('destroy', function () { active = false; clearTimeout(timer); });
+        Lampa.Controller.listener.follow('toggle', schedule);
+        document.addEventListener('keydown', schedule, true);
+        document.addEventListener('pointermove', schedule, true);
+        document.addEventListener('pause', function (e) { if (e.target && e.target.tagName === 'VIDEO') schedule(); }, true);
+    }
+
     function installNextEpisodeHint() {
         if (!Lampa.Player.listener || !Lampa.Controller.listener || !Lampa.PlayerPanel ||
             typeof Lampa.PlayerPanel.render !== 'function' || typeof MutationObserver === 'undefined') return;
@@ -3372,7 +3429,7 @@
             if (season !== null && number !== null) title += ' • S' + season + 'E' + number + (meta && meta.name ? ' • ' + meta.name : '');
             return { title: title, season: season, episode: number,
                 timeline: timeline(movie, season, number), isonline: true, launch_player: 'lampa',
-                mnogotv_next_hint: season !== null && number !== null };
+                mnogotv_collaps: true, mnogotv_next_hint: season !== null && number !== null };
         }
         function applyResolved(item, resolved) {
             item.url = resolved.url;
@@ -3380,7 +3437,7 @@
             item.translate = { tracks: freshTracks(resolved.tracks) };
             item.headers = resolved.headers || {};
             prepareVoice();
-            status.text('Collaps • ' + resolved.transport + ' • AUTO');
+            status.text('Collaps • ' + resolved.transport + ' • старт до 720p');
         }
         function resolveItem(item, done) {
             if (!active() || busy) return;
@@ -3509,17 +3566,24 @@ body.mnogotv-v5-page .head{background:transparent!important}
         var focus = null;
         var voice = { index: -1, label: 'Авто' };
         var dashMode = 'default';
-        var formatMode = 'dash';
+        var formatMode = 'hls';
         var initialized = false;
         var destroyed = false, listGeneration = 0;
         var progressRows = [], rowNodes = [], buttonNodes = [];
         var zone = 'bar', rowIndex = 0, buttonIndex = 0;
         var root = $('<div class="mnogotv-v5"></div>');
         var bar = $('<div class="mnogotv-v5__bar"></div>');
-        var sourceButton = $('<div class="mnogotv-v5__pill selector">Источник: Collaps</div>');
+        var sourceButton = $('<div class="mnogotv-v5__pill selector">Источник: Collaps-HLS</div>');
         var seasonButton = $('<div class="mnogotv-v5__pill selector">Сезон 1</div>');
-        var formatButton = $('<div class="mnogotv-v5__pill selector">Формат: DASH</div>');
-        var streamButton = $('<div class="mnogotv-v5__pill selector">Поток: основной</div>');
+        
+        var diagnosticButton = $('<div class="mnogotv-v5__pill selector"></div>');
+        function diagnosticLabel() { diagnosticButton.text('Диагностика: ' + (global.MnogoTVDiagnostics === true ? 'вкл' : 'выкл')); }
+        diagnosticLabel();
+        diagnosticButton.on('hover:enter click', function () {
+            global.MnogoTVDiagnostics = global.MnogoTVDiagnostics !== true;
+            diagnosticLabel();
+            status.text('Режим диагностики применится при следующем запуске видео.');
+        });
         var status = $('<div class="mnogotv-v5__status">Collaps готов</div>');
         var list = $('<div class="mnogotv-v5__list"></div>');
         var last = seasonButton[0];
@@ -3646,37 +3710,19 @@ body.mnogotv-v5-page .head{background:transparent!important}
             }, function (e) { status.text(errText(e)); });
         }
 
-        streamButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', function () {
-            if (formatMode === 'hls') { notify('Выбор основного или альтернативного потока доступен в формате DASH'); return; }
-            Lampa.Select.show({title: 'Collaps — поток для следующего запуска', items: [
-                {title: 'Основной', mode: 'default', selected: dashMode === 'default'},
-                {title: 'Альтернативный DASH — проверить кодек и качества', mode: 'alternative', selected: dashMode === 'alternative'}
-            ], onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
-                dashMode = item.mode;
-                streamButton.text('Поток: ' + (dashMode === 'alternative' ? 'альтернативный' : 'основной'));
-                status.text('Запустите фильм или серию. Кодек и качества появятся на панели плеера.');
-                Lampa.Controller.toggle('content');
-            }});
-        });
-        formatButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', function () {
-            Lampa.Select.show({ title: 'Collaps — формат для следующего запуска', items: [
-                { title: 'DASH', mode: 'dash', selected: formatMode === 'dash' },
-                { title: 'HLS', mode: 'hls', selected: formatMode === 'hls' }
-            ], onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
-                formatMode = item.mode === 'hls' ? 'hls' : 'dash';
-                formatButton.text('Формат: ' + formatMode.toUpperCase());
-                status.text('Запустите фильм или серию.');
-                Lampa.Controller.toggle('content');
-            }});
-        });
         sourceButton.on('hover:enter click', function () {
-            Lampa.Select.show({ title: 'Источник', items: [
-                { title: 'Collaps', selected: true },
-                { title: 'Другие источники — вернуться к карточке', card: true }
-            ], onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
+            Lampa.Select.show({title:'Источник Collaps', items:[
+                {title:'Collaps-HLS', mode:'hls', selected:formatMode === 'hls'},
+                {title:'Collaps-AV1', mode:'av1', selected:formatMode === 'av1'},
+                {title:'Collaps-VP9', mode:'vp9', selected:formatMode === 'vp9'},
+                {title:'Другие источники — вернуться к карточке', card:true}
+            ], onBack:function(){ Lampa.Controller.toggle('content'); }, onSelect:function(item){
                 if (Lampa.Select.close) Lampa.Select.close();
-                if (item.card) Lampa.Activity.backward();
-                else Lampa.Controller.toggle('content');
+                if (item.card) { Lampa.Activity.backward(); return; }
+                formatMode = item.mode; dashMode = 'default';
+                sourceButton.text('Источник: ' + item.title);
+                status.text('Запустите фильм или серию. Доступность выбранного потока проверяется при запуске.');
+                Lampa.Controller.toggle('content');
             }});
         });
         seasonButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseSeason);
@@ -3691,7 +3737,8 @@ body.mnogotv-v5-page .head{background:transparent!important}
                 initialized = true; addCss();
                 bar.append(sourceButton);
                 if (isSeries(movie)) bar.append(seasonButton); else seasonButton.hide();
-                bar.append(streamButton).append(formatButton);
+                bar.append(diagnosticButton);
+
                 var main = $('<div class="mnogotv-v5__main"></div>');
                 main.append(bar).append(status).append(list);
                 root.append(sidebar()).append(main);
@@ -3742,6 +3789,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         adapter = new global.MnogoTVCollapsAdapter(core);
         register();
         installNextEpisodeHint();
+        installPlayerAutoHide();
         Lampa.Listener.follow('full', addButton);
         global.__mnogotv_v5_diagnostics = function () { return { version: VERSION, core: core.hlsRouter.diagnostics(), collaps: adapter.diagnostics() }; };
         notify('MnogoTV v' + VERSION);
