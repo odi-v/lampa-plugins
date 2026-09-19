@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.0.29-collaps | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+/* MnogoTV/Lampa 5.1.0-veoveo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -3104,8 +3104,469 @@
 
 (function (global) {
     'use strict';
+    /* ADAPTER:VEOVEO:BEGIN */
+    function VeoVeoAdapter(core) {
+        var Lampa = global.Lampa, generation = 0, session = null;
+        var probes = [], last = {phase:'idle'};
+        function group() { return {closed:false, requests:[]}; }
+        function close(g) {
+            if (!g || g.closed) return;
+            g.closed = true;
+            g.requests.forEach(function (r) { clearTimeout(r.timer); try { r.network.clear(); } catch (e) {} });
+            g.requests = [];
+        }
+        function url(value, base) {
+            try { var u = new URL(String(value || ''), base); return /^https?:$/.test(u.protocol) ? u.href : ''; }
+            catch (e) { return ''; }
+        }
+        function request(g, address, json, ok, fail) {
+            if (g.closed) return;
+            var network;
+            try { network = new (Lampa.Reguest || Lampa.Request)(); } catch (e) { fail(e); return; }
+            var slot = {network:network,timer:null}, ended = false;
+            g.requests.push(slot);
+            function done(error, data) {
+                if (ended || g.closed) return;
+                ended = true; clearTimeout(slot.timer);
+                g.requests = g.requests.filter(function (r) { return r !== slot; });
+                if (error) return fail(error);
+                try { if (json && typeof data === 'string') data = JSON.parse(data); }
+                catch (e) { fail(new Error('VeoVeo: некорректный JSON')); return; }
+                ok(data);
+            }
+            slot.timer = setTimeout(function () {
+                done(new Error('VeoVeo: время ожидания истекло'));
+                try { network.clear(); } catch (e) {}
+            },15000);
+            try {
+                network.timeout(15000);
+                var method = network.native || network.silent;
+                if (!method) throw new Error('VeoVeo: сетевой API недоступен');
+                method.call(network,address,function (data) { done(null,data); },function () {
+                    done(new Error('VeoVeo: запрос не выполнен'));
+                },false,{dataType:json?'json':'text'});
+            } catch (e) { done(e); }
+        }
+    function veoMovieIdFromHtml(html, iframeUrl) {
+        html = String(html || '');
 
-    var VERSION = '5.0.29-collaps';
+        var m =
+            html.match(/window\.MOVIE_ID\s*=\s*["']?(\d+)/i) ||
+            html.match(/\bMOVIE_ID\s*[:=]\s*["']?(\d+)/i);
+
+        if (m && m[1]) return m[1];
+
+        try {
+            var u = new URL(String(iframeUrl || ''));
+
+            return (
+                u.searchParams.get('movieid') ||
+                u.searchParams.get('content-id') ||
+                u.searchParams.get('content_id') ||
+                ''
+            );
+        } catch (e) {}
+
+        return '';
+    }
+    function chooseVeoCatalogItem(catalog, season, episode) {
+        if (!Array.isArray(catalog)) return null;
+
+        if (season === null || episode === null) {
+            for (var i = 0; i < catalog.length; i++) {
+                var item = catalog[i];
+                var s =
+                    item &&
+                    item.season &&
+                    parseInt(item.season.order, 10);
+
+                if (!s) return item;
+            }
+
+            return catalog[0] || null;
+        }
+
+        for (var j = 0; j < catalog.length; j++) {
+            var ep = catalog[j];
+
+            var epSeason =
+                ep &&
+                ep.season &&
+                parseInt(ep.season.order, 10);
+
+            var epNumber =
+                parseInt(
+                    ep && (
+                        ep.order ||
+                        ep.episode ||
+                        ep.episodeNumber
+                    ),
+                    10
+                );
+
+            if (
+                Number(epSeason) === Number(season) &&
+                Number(epNumber) === Number(episode)
+            ) {
+                return ep;
+            }
+        }
+
+        return null;
+    }
+    function normalizeVeoVariants(item) {
+        if (!item) return [];
+
+        var variants =
+            item.episodeVariants ||
+            item.variants ||
+            [];
+
+        if (!Array.isArray(variants)) variants = [];
+
+        if (!variants.length && item.filepath) {
+            variants = [{
+                filepath: item.filepath,
+                title: item.title || ''
+            }];
+        }
+
+        return variants.filter(function (v) {
+            return v && v.filepath;
+        });
+    }
+    function veoVariantLabel(variant) {
+        if (!variant) return 'Авто';
+
+        var title = String(
+            variant.title ||
+            variant.name ||
+            variant.quality ||
+            ''
+        ).trim();
+
+        if (title) return title;
+
+        var file = String(
+            variant.filepath ||
+            ''
+        );
+
+        var q =
+            file.match(
+                /(?:^|[_\/.-])(2160|1440|1080|720|480|360)p?(?:[_\/.-]|$)/i
+            );
+
+        if (q && q[1]) return q[1] + 'p';
+
+        return 'Вариант';
+    }
+    function chooseVeoVariant(item, qualityLabel) {
+        var variants =
+            normalizeVeoVariants(item);
+
+        if (!variants.length) return null;
+
+        qualityLabel =
+            String(
+                qualityLabel ||
+                'Авто'
+            ).trim();
+
+        if (
+            qualityLabel &&
+            qualityLabel !== 'Авто'
+        ) {
+            var wanted =
+                qualityLabel.toLowerCase();
+
+            for (var i = 0; i < variants.length; i++) {
+                if (
+                    veoVariantLabel(
+                        variants[i]
+                    ).toLowerCase() === wanted
+                ) {
+                    return variants[i];
+                }
+            }
+
+            /*
+             * На другой серии названия качества могут чуть отличаться.
+             * Пробуем совпадение по 1080/720/etc.
+             */
+            var wantedQ =
+                wanted.match(
+                    /(2160|1440|1080|720|480|360)/
+                );
+
+            if (wantedQ) {
+                for (
+                    var q = 0;
+                    q < variants.length;
+                    q++
+                ) {
+                    if (
+                        veoVariantLabel(
+                            variants[q]
+                        ).indexOf(
+                            wantedQ[1]
+                        ) >= 0
+                    ) {
+                        return variants[q];
+                    }
+                }
+            }
+        }
+
+        /*
+         * Авто: сохраняем поведение рабочей 3.7.0.
+         * Сначала m3u8, затем первый доступный вариант.
+         */
+        var preferred = variants[0];
+
+        variants.forEach(function (v) {
+            if (
+                String(v.filepath)
+                    .toLowerCase()
+                    .indexOf('.m3u8') >= 0
+            ) {
+                preferred = v;
+            }
+        });
+
+        return preferred;
+    }
+    function veoContext(iframe) {
+        var result = {
+            origin: '',
+            token: ''
+        };
+
+        try {
+            var u = new URL(String(iframe || ''));
+            result.origin = u.origin;
+
+            result.token =
+                u.searchParams.get('token') ||
+                u.searchParams.get('access_token') ||
+                '';
+        } catch (e) {}
+
+        /*
+         * Некоторые iframe URL кодируют параметры внутри вложенного URL.
+         * Декодируем несколько раз и ищем token вручную.
+         */
+        if (!result.token) {
+            var raw = String(iframe || '');
+
+            for (var i = 0; i < 3; i++) {
+                var m = raw.match(
+                    /[?&](?:token|access_token)=([^&#]+)/i
+                );
+
+                if (m && m[1]) {
+                    try {
+                        result.token =
+                            decodeURIComponent(m[1]);
+                    } catch (e2) {
+                        result.token = m[1];
+                    }
+
+                    break;
+                }
+
+                try {
+                    var decoded =
+                        decodeURIComponent(raw);
+
+                    if (decoded === raw) break;
+                    raw = decoded;
+                } catch (e3) {
+                    break;
+                }
+            }
+        }
+
+        return result;
+    }
+    function veoMovieIdEndpoint(
+        origin,
+        key,
+        value,
+        token
+    ) {
+        var url =
+            origin +
+            '/balancer-api/iframe?' +
+            encodeURIComponent(key) +
+            '=' +
+            encodeURIComponent(value);
+
+        if (token) {
+            url +=
+                '&token=' +
+                encodeURIComponent(token);
+        }
+
+        return url;
+    }
+    function hlsAttributes(line) {
+        var out = {};
+        var raw = String(line || '');
+        var re = /([A-Z0-9-]+)=(\"[^\"]*\"|[^,]*)/ig;
+        var m;
+
+        while ((m = re.exec(raw))) {
+            var value = String(m[2] || '').trim();
+            if (value.charAt(0) === '"' && value.charAt(value.length - 1) === '"') {
+                value = value.slice(1, -1);
+            }
+            out[String(m[1] || '').toUpperCase()] = value;
+        }
+
+        return out;
+    }
+    function parseHlsMeta(manifest, manifestUrl) {
+        var lines = String(manifest || '').split(/\r?\n/);
+        var tracks = [];
+        var qualities = [];
+        var seenQ = {};
+
+        lines.forEach(function (line) {
+            line = String(line || '').trim();
+
+            if (line.indexOf('#EXT-X-MEDIA:') === 0) {
+                var a = hlsAttributes(line.slice('#EXT-X-MEDIA:'.length));
+                if (String(a.TYPE || '').toUpperCase() === 'AUDIO') {
+                    var language = String(a.LANGUAGE || '').trim();
+                    var name = String(a.NAME || '').trim();
+                    var label = name && name !== language ? name : '';
+
+                    tracks.push({
+                        index: tracks.length,
+                        language: language || name || ('Дорожка ' + (tracks.length + 1)),
+                        name: name || language || ('Дорожка ' + (tracks.length + 1)),
+                        label: label,
+                        default: String(a.DEFAULT || '').toUpperCase() === 'YES'
+                    });
+                }
+            }
+
+            if (line.indexOf('#EXT-X-STREAM-INF:') === 0) {
+                var qattr = hlsAttributes(line.slice('#EXT-X-STREAM-INF:'.length));
+                var res = String(qattr.RESOLUTION || '').match(/\d+x(\d+)/i);
+                var height = res ? parseInt(res[1], 10) : 0;
+                if (height && !seenQ[height]) {
+                    seenQ[height] = true;
+                    qualities.push(height);
+                }
+            }
+        });
+
+        qualities.sort(function (a, b) { return b - a; });
+
+        return {
+            tracks: tracks,
+            qualities: qualities,
+            bestQuality: qualities.length ? (qualities[0] + 'p') : ''
+        };
+    }
+        function catalog(g, req, ok, fail) {
+            var iframe = url(req.source && req.source.iframeUrl);
+            if (!iframe) return fail(new Error('VeoVeo: iframe отсутствует'));
+            var context = veoContext(iframe), attempts = [];
+            if (req.source.kinopoiskId) attempts.push(veoMovieIdEndpoint(context.origin,'kp',req.source.kinopoiskId,context.token));
+            if (req.imdb) attempts.push(veoMovieIdEndpoint(context.origin,'imdb',req.imdb,context.token));
+            attempts.push(iframe);
+            function next() {
+                if (!attempts.length) return fail(new Error('VeoVeo: идентификатор видео не найден'));
+                var endpoint = attempts.shift();
+                request(g,endpoint,false,function (html) {
+                    var id = veoMovieIdFromHtml(html,endpoint);
+                    if (!id) return next();
+                    var address = context.origin + '/balancer-api/proxy/playlists/catalog-api/episodes?content-id=' + encodeURIComponent(id);
+                    if (context.token) address += '&token=' + encodeURIComponent(context.token);
+                    request(g,address,true,function (data) {
+                        if (!Array.isArray(data)) return fail(new Error('VeoVeo: каталог не получен'));
+                        ok(data,context.origin);
+                    },fail);
+                },next);
+            }
+            next();
+        }
+        function media(g, item, base, quality, ok, fail) {
+            var variant = chooseVeoVariant(item,quality || 'Авто');
+            var file = url(variant && variant.filepath,base);
+            if (!file) return fail(new Error('VeoVeo: видео отсутствует'));
+            function playlist(address) {
+                address = url(address,file);
+                if (!address) return fail(new Error('VeoVeo: неверный адрес видео'));
+                request(g,address,false,function (text) {
+                    if (String(text).trim().indexOf('#EXTM3U') !== 0) return fail(new Error('VeoVeo: HLS не подтверждён'));
+                    var meta = parseHlsMeta(text,address);
+                    var subtitles = [];
+                    String(text).split(/\r?\n/).forEach(function (line) {
+                        if (line.indexOf('#EXT-X-MEDIA:') !== 0) return;
+                        var attr = hlsAttributes(line.slice(13));
+                        if (attr.TYPE === 'SUBTITLES' && attr.URI) subtitles.push({label:attr.NAME || attr.LANGUAGE || 'Субтитры',url:url(attr.URI,address)});
+                    });
+                    ok({provider:'VeoVeo',url:address,headers:{},tracks:meta.tracks,subtitles:subtitles,transport:'HLS',qualityMode:'native-auto',qualities:meta.qualities});
+                },fail);
+            }
+            if (/\.json(?:[?#]|$)/i.test(file)) {
+                request(g,file,true,function (data) {
+                    var sources = data && data.sources || [];
+                    var chosen = null;
+                    sources.some(function (s) { var link = s.link || s.file || s.url; if (link) { chosen = link; return true; } return false; });
+                    if (!chosen) return fail(new Error('VeoVeo: ссылка на HLS не найдена'));
+                    playlist(chosen);
+                },fail);
+            } else playlist(file);
+        }
+        this.availability = function (req, ok, fail) {
+            var g = group(); probes.push(g);
+            function finish(error, available) {
+                close(g); probes = probes.filter(function (p) { return p !== g; });
+                if (error) fail(error); else ok(available);
+            }
+            catalog(g,req,function (items,base) {
+                var candidates = items.filter(function (item) { return normalizeVeoVariants(item).length > 0; });
+                function next() {
+                    if (!candidates.length) return finish(null,false);
+                    media(g,candidates.shift(),base,null,function () { finish(null,true); },next);
+                }
+                next();
+            },function (e) { finish(e); });
+        };
+        this.resolve = function (req, ok, fail) {
+            close(session); session = group(); var g = session, id = ++generation;
+            last = {phase:'resolving',generation:id};
+            function bad(e) { if (g.closed) return; close(g); last = {phase:'error',generation:id}; fail(e); }
+            catalog(g,req,function (items,base) {
+                var item = chooseVeoCatalogItem(items,req.season,req.episode);
+                // Never substitute another episode for a missing requested one.
+                if (!item) return bad(new Error('VeoVeo: выбранная серия отсутствует'));
+                media(g,item,base,req.quality,function (result) {
+                    if (g.closed || generation !== id) return;
+                    last = {phase:'ready',generation:id,transport:'HLS',qualities:result.qualities.slice(),tracks:result.tracks.length};
+                    ok(result);
+                },bad);
+            },bad);
+        };
+        this.cleanup = function () { ++generation; close(session); session = null; last = {phase:'idle',generation:generation}; };
+        this.diagnostics = function () { return {adapter:'VeoVeoAdapter',session:last,probes:probes.length}; };
+        this.quality = function () { return {auto:true,manual:'native HLS levels'}; };
+        this.audio = function (resolved) { return resolved.tracks || []; };
+        this.subtitles = function (resolved) { return resolved.subtitles || []; };
+    }
+    /* ADAPTER:VEOVEO:END */
+    global.MnogoTVVeoVeoAdapter = VeoVeoAdapter;
+})(window);
+
+(function (global) {
+    'use strict';
+
+    var VERSION = '5.1.0-veoveo';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3329,6 +3790,7 @@
     };
 
     var adapter = null;
+    var adapters = {};
     var currentPlayback = null;
     var playbackSequence = 0;
 
@@ -3345,9 +3807,10 @@
         }, fail);
     }
 
-    function activatePlayback() {
-        if (currentPlayback && currentPlayback !== adapter) currentPlayback.cleanup('provider-switch');
-        currentPlayback = adapter;
+    function activatePlayback(next) {
+        next = next || adapter;
+        if (currentPlayback && currentPlayback !== next) currentPlayback.cleanup('provider-switch');
+        currentPlayback = next;
     }
 
     function installPlayerAutoHide() {
@@ -3408,12 +3871,13 @@
         Lampa.Player.listener.follow('destroy', clear);
     }
 
-    function play(movie, source, imdb, season, episode, epMeta, voice, status, dashMode, formatMode, episodeList) {
+    function play(movie, source, imdb, season, episode, epMeta, voice, status, dashMode, formatMode, episodeList, playbackAdapter) {
+        var sessionAdapter = playbackAdapter || adapter;
         var sequence = ++playbackSequence;
         var busy = false;
         var playlist = [];
         var selectedVoice = voice ? { index: voice.index, label: voice.label } : { index: -1, label: 'Авто' };
-        activatePlayback();
+        activatePlayback(sessionAdapter);
 
         function active() { return sequence === playbackSequence; }
         function prepareVoice() {
@@ -3429,7 +3893,7 @@
             if (season !== null && number !== null) title += ' • S' + season + 'E' + number + (meta && meta.name ? ' • ' + meta.name : '');
             return { title: title, season: season, episode: number,
                 timeline: timeline(movie, season, number), isonline: true, launch_player: 'lampa',
-                mnogotv_collaps: true, mnogotv_next_hint: season !== null && number !== null };
+                mnogotv_collaps: sessionAdapter === adapter, mnogotv_next_hint: season !== null && number !== null };
         }
         function applyResolved(item, resolved) {
             item.url = resolved.url;
@@ -3437,13 +3901,13 @@
             item.translate = { tracks: freshTracks(resolved.tracks) };
             item.headers = resolved.headers || {};
             prepareVoice();
-            status.text('Collaps • ' + resolved.transport + ' • старт до 720p');
+            status.text((resolved.provider || 'Collaps') + ' • ' + resolved.transport);
         }
         function resolveItem(item, done) {
             if (!active() || busy) return;
             busy = true;
             status.text('Получаю Collaps • S' + season + 'E' + item.episode + '…');
-            adapter.resolve({ source: source, imdb: imdb, season: season, episode: item.episode,
+            sessionAdapter.resolve({ source: source, imdb: imdb, season: season, episode: item.episode,
                 voice: selectedVoice, dashMode: dashMode, format: formatMode }, function (resolved) {
                 busy = false;
                 if (!active()) return;
@@ -3465,7 +3929,7 @@
             item.url = function (done) { resolveItem(item, done); };
         }
         var first = makeItem(episode, epMeta);
-        adapter.resolve({ source: source, imdb: imdb, season: season, episode: episode,
+        sessionAdapter.resolve({ source: source, imdb: imdb, season: season, episode: episode,
             voice: selectedVoice, dashMode: dashMode, format: formatMode }, function (resolved) {
             if (!active()) return;
             applyResolved(first, resolved);
@@ -3558,6 +4022,9 @@ body.mnogotv-v5-page .head{background:transparent!important}
     }
 
     function Component(object) {
+        var provider = object.provider || 'collaps';
+        var providerTitle = provider === 'veoveo' ? 'VeoVeo' : 'Collaps';
+        var adapter = adapters[provider] || adapters.collaps;
         var movie = object.movie || {};
         var source = object.source;
         var imdb = object.imdb;
@@ -3573,7 +4040,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         var zone = 'bar', rowIndex = 0, buttonIndex = 0;
         var root = $('<div class="mnogotv-v5"></div>');
         var bar = $('<div class="mnogotv-v5__bar"></div>');
-        var sourceButton = $('<div class="mnogotv-v5__pill selector">Источник: Collaps-HLS</div>');
+        var sourceButton = $('<div class="mnogotv-v5__pill selector"></div>').text('Источник: ' + (provider === 'veoveo' ? 'VeoVeo-HLS' : 'Collaps-HLS'));
         var seasonButton = $('<div class="mnogotv-v5__pill selector">Сезон 1</div>');
         
         var diagnosticButton = $('<div class="mnogotv-v5__pill selector"></div>');
@@ -3584,7 +4051,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
             diagnosticLabel();
             status.text('Режим диагностики применится при следующем запуске видео.');
         });
-        var status = $('<div class="mnogotv-v5__status">Collaps готов</div>');
+        var status = $('<div class="mnogotv-v5__status"></div>').text(providerTitle + ' готов');
         var list = $('<div class="mnogotv-v5__list"></div>');
         var last = seasonButton[0];
 
@@ -3608,7 +4075,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
             var year = String(movie.release_date || movie.first_air_date || '').slice(0, 4);
             facts.append($('<div></div>').text([year, (movie.origin_country || []).join(', ')].filter(Boolean).join(' • ')));
             if (Number(movie.vote_average) > 0) facts.append($('<div class="mnogotv-v5__rating"></div>').text('★ ' + Number(movie.vote_average).toFixed(1)));
-            facts.append($('<div></div>').text('MnogoTV • Collaps'));
+            facts.append($('<div></div>').text('MnogoTV • ' + (provider === 'veoveo' ? 'VeoVeo' : 'Collaps')));
             identity.append(facts); side.append(identity);
             side.append($('<h2 class="mnogotv-v5__title"></h2>').text(titleOf(movie)));
             side.append($('<div class="mnogotv-v5__genres"></div>').text((movie.genres || []).map(function (g) { return g.name; }).filter(Boolean).join(', ')));
@@ -3662,13 +4129,13 @@ body.mnogotv-v5-page .head{background:transparent!important}
             var fill = $('<div class="mnogotv-v5__fill"></div>');track.append(fill);
             var meta = $('<div class="mnogotv-v5__meta"></div>');
             var rating = Number(ep.vote_average) > 0 ? '★ ' + Number(ep.vote_average).toFixed(1) : '';
-            meta.append($('<span></span>').text([rating, ep.air_date || '', number === null ? 'Collaps' : 'S' + rowSeason + ' • E' + number].filter(Boolean).join('  •  ')));
+            meta.append($('<span></span>').text([rating, ep.air_date || '', number === null ? providerTitle : 'S' + rowSeason + ' • E' + number].filter(Boolean).join('  •  ')));
             var watched = $('<span class="mnogotv-v5__watched"></span>');meta.append(watched);
             details.append(head).append(track).append(meta);row.append(thumb).append(details);
             var index = rowNodes.length; rowNodes.push(row[0]);
             progressRows.push({ season: rowSeason, episode: number, fill: fill, track: track, label: watched });
             row.on('hover:focus', function () { zone = 'rows'; rowIndex = index; focus = ep; last = row[0]; revealRow(last); refreshProgress(); });
-            row.on('hover:enter click', function () { focus = ep; last = row[0]; play(movie, source, imdb, rowSeason, number, ep, voice, status, dashMode, formatMode, episodes); });
+            row.on('hover:enter click', function () { focus = ep; last = row[0]; play(movie, source, imdb, rowSeason, number, ep, voice, status, dashMode, formatMode, episodes, adapter); });
             list.append(row);
         }
         function renderList() {
@@ -3685,7 +4152,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
             getEpisodes(movie, requestedSeason, function (items) {
                 if (destroyed || generation !== listGeneration) return;
                 episodes = items.slice().sort(function (a, b) { return Number(a.episode_number) - Number(b.episode_number); });
-                status.text('Collaps • ↓ Серии • ↑ Фильтры • Назад — выход');
+                status.text(providerTitle + ' • ↓ Серии • ↑ Фильтры • Назад — выход');
                 episodes.forEach(function (ep) { makeRow(ep, parseInt(ep.episode_number || 0, 10), requestedSeason); });
                 refreshProgress();
                 // Refresh the controller collection after asynchronous rendering.
@@ -3703,7 +4170,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
             getSeasons(movie, function (seasons) {
                 var items = seasons.map(function (n) { return { title: 'Сезон ' + n, season: n, selected: n === season }; });
                 items.push({ title: '← Назад', back: true });
-                Lampa.Select.show({ title: 'Collaps — сезон', items: items, onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
+                Lampa.Select.show({ title: providerTitle + ' — сезон', items: items, onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
                     if (!item.back) { season = item.season; seasonButton.text('Сезон ' + season); voice = { index: -1, label: 'Авто' }; renderList(); }
                     Lampa.Controller.toggle('content');
                 }});
@@ -3711,6 +4178,10 @@ body.mnogotv-v5-page .head{background:transparent!important}
         }
 
         sourceButton.on('hover:enter click', function () {
+            if (provider === 'veoveo') {
+                Lampa.Select.show({title:'Источник VeoVeo',items:[{title:'VeoVeo-HLS',selected:true},{title:'Вернуться к карточке',card:true}],onBack:function(){Lampa.Controller.toggle('content');},onSelect:function(item){if(Lampa.Select.close)Lampa.Select.close();if(item.card)Lampa.Activity.backward();else Lampa.Controller.toggle('content');}});
+                return;
+            }
             Lampa.Select.show({title:'Источник Collaps', items:[
                 {title:'Collaps-HLS', mode:'hls', selected:formatMode === 'hls'},
                 {title:'Collaps-AV1', mode:'av1', selected:formatMode === 'av1'},
@@ -3737,7 +4208,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
                 initialized = true; addCss();
                 bar.append(sourceButton);
                 if (isSeries(movie)) bar.append(seasonButton); else seasonButton.hide();
-                bar.append(diagnosticButton);
+                if (provider === 'collaps') bar.append(diagnosticButton);
 
                 var main = $('<div class="mnogotv-v5__main"></div>');
                 main.append(bar).append(status).append(list);
@@ -3784,14 +4255,42 @@ body.mnogotv-v5-page .head{background:transparent!important}
         }, function () {});
     }
 
+    function addVeoButton(e) {
+        if (!e || e.type !== 'complite') return;
+        var page = e.object && e.object.activity && e.object.activity.render ? e.object.activity.render() : null;
+        if (!page || !page.length || page[0].__mnogotvVeoProbe) return;
+        page[0].__mnogotvVeoProbe = true;
+        var movie = e.data && e.data.movie || e.movie || e.object.card || {};
+        getImdb(movie,function(imdb){
+            requestJson(resolverUrl('/sources',{imdb:imdb}),function(response){
+                var found = null;
+                (response.sources || []).some(function(source){
+                    if (/^(veoveo|veo)$/i.test(String(source.type || ''))) { found = source; return true; } return false;
+                });
+                if (!found) return;
+                var source = {}; Object.keys(found).forEach(function(k){source[k]=found[k];});
+                source.kinopoiskId = response.kp || '';
+                adapters.veoveo.availability({source:source,imdb:imdb},function(available){
+                    if (!available) return;
+                    var button = $('<div class="full-start__button selector view--online mnogotv-v5-veoveo-button"><span>MnogoTV • VeoVeo</span></div>');
+                    button.on('hover:enter click',function(){Lampa.Activity.push({title:'MnogoTV • VeoVeo',component:COMPONENT,provider:'veoveo',movie:movie,imdb:imdb,source:source,page:1,noinfo:true});});
+                    page.find('.full-start-new__buttons, .full-start__buttons').first().append(button);
+                },function(error){log('VeoVeo availability',errText(error));});
+            },function(error){log('VeoVeo sources',errText(error));});
+        },function(){});
+    }
+
     function start() {
-        if (!global.Lampa || !Lampa.Listener || !Lampa.Player || !global.MnogoTVCollapsAdapter) return setTimeout(start, 500);
+        if (!global.Lampa || !Lampa.Listener || !Lampa.Player || !global.MnogoTVCollapsAdapter || !global.MnogoTVVeoVeoAdapter) return setTimeout(start, 500);
         adapter = new global.MnogoTVCollapsAdapter(core);
+        adapters.collaps = adapter;
+        adapters.veoveo = new global.MnogoTVVeoVeoAdapter(core);
         register();
         installNextEpisodeHint();
         installPlayerAutoHide();
         Lampa.Listener.follow('full', addButton);
-        global.__mnogotv_v5_diagnostics = function () { return { version: VERSION, core: core.hlsRouter.diagnostics(), collaps: adapter.diagnostics() }; };
+        Lampa.Listener.follow('full', addVeoButton);
+        global.__mnogotv_v5_diagnostics = function () { return { version: VERSION, core: core.hlsRouter.diagnostics(), collaps: adapter.diagnostics(), veoveo: adapters.veoveo.diagnostics() }; };
         notify('MnogoTV v' + VERSION);
         log('started', { resolver: CONFIG.resolver });
     }
