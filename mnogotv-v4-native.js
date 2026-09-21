@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.1.4-veoveo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+/* MnogoTV/Lampa 5.1.5-veoveo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -3574,7 +3574,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.1.4-veoveo';
+    var VERSION = '5.1.5-veoveo';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4155,7 +4155,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
             var fill = $('<div class="mnogotv-v5__fill"></div>');track.append(fill);
             var meta = $('<div class="mnogotv-v5__meta"></div>');
             var rating = Number(ep.vote_average) > 0 ? '★ ' + Number(ep.vote_average).toFixed(1) : '';
-            meta.append($('<span></span>').text([rating, ep.air_date || '', number === null ? providerTitle : 'S' + rowSeason + ' • E' + number].filter(Boolean).join('  •  ')));
+            meta.append($('<span></span>').text([rating, ep.air_date || '', number === null ? (source ? providerTitle : 'Источник не выбран') : 'S' + rowSeason + ' • E' + number].filter(Boolean).join('  •  ')));
             var watched = $('<span class="mnogotv-v5__watched"></span>');meta.append(watched);
             details.append(head).append(track).append(meta);row.append(thumb).append(details);
             var index = rowNodes.length; rowNodes.push(row[0]);
@@ -4334,11 +4334,21 @@ body.mnogotv-v5-page .head{background:transparent!important}
         });
         Lampa.Select.show({
             title: 'MnogoTV-test — источники', items: items,
-            onBack: function () { closed = true; serial++; if (options.back) options.back(); },
+            onBack: function () {
+                // Select.close also invokes onBack during a programmatic close.
+                if (!menuVisible) return;
+                menuVisible = false; closed = true; serial++;
+                if (options.back) options.back();
+            },
             onSelect: function (item) {
                 var ticket = ++serial;
                 function alive() { return !closed && ticket === serial && (!options.alive || options.alive()); }
-                function close(keepRequest) { if (!keepRequest) closed = true; if (menuVisible && Lampa.Select.close) Lampa.Select.close(); menuVisible = false; }
+                function close(keepRequest) {
+                    if (!keepRequest) closed = true;
+                    var wasVisible = menuVisible;
+                    menuVisible = false;
+                    if (wasVisible && Lampa.Select.close) Lampa.Select.close();
+                }
                 if (item.provider === options.provider && options.selectCurrent) {
                     close(); options.selectCurrent(item); return;
                 }
