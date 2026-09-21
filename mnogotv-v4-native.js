@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.1.3-veoveo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+/* MnogoTV/Lampa 5.1.4-veoveo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -3574,7 +3574,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.1.3-veoveo';
+    var VERSION = '5.1.4-veoveo';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -3879,7 +3879,16 @@
         Lampa.Player.listener.follow('destroy', clear);
     }
 
-    function play(movie, source, imdb, season, episode, epMeta, voice, status, dashMode, formatMode, episodeList, playbackAdapter) {
+    function playbackTarget(mode) {
+        if (mode !== 'external') return 'lampa';
+        if (Lampa.Platform && Lampa.Platform.is('android')) return 'android';
+        if (Lampa.Platform && Lampa.Platform.is('webos')) return 'webos';
+        return '';
+    }
+
+    function play(movie, source, imdb, season, episode, epMeta, voice, status, dashMode, formatMode, episodeList, playbackAdapter, playerMode) {
+        var targetPlayer = playbackTarget(playerMode);
+        if (!targetPlayer) { status.text('Внешний плеер недоступен в этой версии Лампы на устройстве.'); return; }
         var sessionAdapter = playbackAdapter || adapter;
         var sequence = ++playbackSequence;
         var busy = false;
@@ -3900,8 +3909,8 @@
             var title = titleOf(movie);
             if (season !== null && number !== null) title += ' • S' + season + 'E' + number + (meta && meta.name ? ' • ' + meta.name : '');
             return { title: title, season: season, episode: number,
-                timeline: timeline(movie, season, number), isonline: true, launch_player: 'lampa',
-                mnogotv_player: true, mnogotv_collaps: sessionAdapter === adapter, mnogotv_next_hint: season !== null && number !== null };
+                timeline: timeline(movie, season, number), isonline: true, launch_player: targetPlayer,
+                mnogotv_player: targetPlayer === 'lampa', mnogotv_collaps: targetPlayer === 'lampa' && sessionAdapter === adapter, mnogotv_next_hint: season !== null && number !== null };
         }
         function applyResolved(item, resolved) {
             item.url = resolved.url;
@@ -3957,7 +3966,7 @@
                 playlist.sort(function (a, b) { return Number(a.episode) - Number(b.episode); });
             }
             if (playlist.length > 1) first.playlist = playlist;
-            try { Lampa.Player.runas('lampa'); } catch (e) {}
+            try { Lampa.Player.runas(targetPlayer); } catch (e) {}
             Lampa.Player.play(first);
             Lampa.Player.playlist(playlist);
         }, function (e) {
@@ -4005,8 +4014,9 @@ body.mnogotv-v5-page .head{background:transparent!important}
 .mnogotv-v5__genres{font-size:.95em;color:#a6c9cc;margin-bottom:1.5em}
 .mnogotv-v5__overview{font-size:1.05em;line-height:1.5;color:#cfdbdf;display:-webkit-box;-webkit-line-clamp:10;-webkit-box-orient:vertical;overflow:hidden}
 .mnogotv-v5__main{flex:1;min-width:0;display:flex;flex-direction:column}
-.mnogotv-v5__bar{display:flex;flex-wrap:wrap;align-items:center;flex-shrink:0;margin:0 -.25em}
-.mnogotv-v5__pill{padding:.6em .8em;margin:.25em;border-radius:.4em;background:rgba(0,0,0,.22);font-size:1em;max-width:20em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:2px solid transparent}
+.mnogotv-v5__bar{display:flex;flex-wrap:nowrap;overflow-x:auto;align-items:center;flex-shrink:0;margin:0 -.25em;scrollbar-width:none}
+.mnogotv-v5__bar::-webkit-scrollbar{display:none}
+.mnogotv-v5__pill{flex-shrink:0;padding:.6em .8em;margin:.25em;border-radius:.4em;background:rgba(0,0,0,.22);font-size:1em;max-width:20em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:2px solid transparent}
 .mnogotv-v5__pill.focus{background:#eefafa;color:#12323b;border-color:#fff}
 .mnogotv-v5__status{font-size:.9em;color:#a7c7ca;margin:.6em .3em 1em;min-height:1.2em;flex-shrink:0}
 .mnogotv-v5__list{flex:1;min-height:0;overflow-y:auto;padding:.3em .5em .8em .25em;scrollbar-width:none}
@@ -4036,6 +4046,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         var movie = object.movie || {};
         var source = object.source;
         var providerViews = {};
+        var playerMode = 'internal', sourceBusy = false, sourceCheckSequence = 0;
         var imdb = object.imdb;
         var season = 1;
         var episodes = [];
@@ -4050,6 +4061,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         var root = $('<div class="mnogotv-v5"></div>');
         var bar = $('<div class="mnogotv-v5__bar"></div>');
         var sourceButton = $('<div class="mnogotv-v5__pill selector"></div>').text(source ? 'Источник: ' + (provider === 'veoveo' ? 'VeoVeo-HLS' : 'Collaps-' + formatMode.toUpperCase()) : 'Источник: выберите');
+        var playerButton = $('<div class="mnogotv-v5__pill selector">Плеер: встроенный</div>');
         var seasonButton = $('<div class="mnogotv-v5__pill selector">Сезон 1</div>');
         
         var diagnosticButton = $('<div class="mnogotv-v5__pill selector"></div>');
@@ -4112,6 +4124,11 @@ body.mnogotv-v5-page .head{background:transparent!important}
             Lampa.Controller.collectionSet(root);
             Lampa.Controller.collectionFocus(node, root);
             if (zone === 'rows') revealRow(node);
+            else {
+                var rect = node.getBoundingClientRect(), bounds = bar[0].getBoundingClientRect();
+                if (rect.right > bounds.right) bar[0].scrollLeft += rect.right - bounds.right + 8;
+                else if (rect.left < bounds.left) bar[0].scrollLeft -= bounds.left - rect.left + 8;
+            }
         }
         function navigate(direction) {
             var target = episodeFocusTarget(zone, zone === 'rows' ? rowIndex : buttonIndex,
@@ -4144,7 +4161,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
             var index = rowNodes.length; rowNodes.push(row[0]);
             progressRows.push({ season: rowSeason, episode: number, fill: fill, track: track, label: watched });
             row.on('hover:focus', function () { zone = 'rows'; rowIndex = index; focus = ep; last = row[0]; revealRow(last); refreshProgress(); });
-            row.on('hover:enter click', function () { focus = ep; last = row[0]; if (!source) { chooseSource(); return; } play(movie, source, imdb, rowSeason, number, ep, voice, status, dashMode, formatMode, episodes, adapter); });
+            row.on('hover:enter click', function () { focus = ep; last = row[0]; if (sourceBusy) return; if (!source) { chooseSource(); return; } play(movie, source, imdb, rowSeason, number, ep, voice, status, dashMode, formatMode, episodes, adapter, playerMode); });
             list.append(row);
         }
         function renderList() {
@@ -4156,18 +4173,18 @@ body.mnogotv-v5-page .head{background:transparent!important}
                 makeRow({}, null, null); refreshProgress();
                 zone = source ? 'rows' : 'bar';last = source ? rowNodes[0] : sourceButton[0];return;
             }
-            status.text('Загрузка серий…');
+            if (!sourceBusy) status.text('Загрузка серий…');
             var requestedSeason = season;
             getEpisodes(movie, requestedSeason, function (items) {
                 if (destroyed || generation !== listGeneration) return;
                 episodes = items.slice().sort(function (a, b) { return Number(a.episode_number) - Number(b.episode_number); });
-                status.text(source ? providerTitle + ' • ↓ Серии • ↑ Фильтры • Назад — выход' : 'Выберите источник вверху карточки.');
+                if (!sourceBusy) status.text(source ? providerTitle + ' • подключено • ↓ Серии • ↑ Кнопки' : 'Выберите источник вверху карточки.');
                 episodes.forEach(function (ep) { makeRow(ep, parseInt(ep.episode_number || 0, 10), requestedSeason); });
                 refreshProgress();
                 // Refresh the controller collection after asynchronous rendering.
                 // Preserve a menu/dialog focus if it is currently open.
                 var enabled = Lampa.Controller.enabled && Lampa.Controller.enabled();
-                if (enabled && enabled.name === 'content') {
+                if (!sourceBusy && enabled && enabled.name === 'content') {
                     zone = source ? 'rows' : 'bar';rowIndex = 0;focusNode(source ? rowNodes[0] : sourceButton[0]);
                 }
             }, function (e) {
@@ -4187,12 +4204,24 @@ body.mnogotv-v5-page .head{background:transparent!important}
         }
 
         function chooseSource() {
+            var check = ++sourceCheckSequence;
+            sourceBusy = false;
             showSourceMenu(movie, imdb, {
                 provider: source ? provider : null, mode: formatMode,
-                alive: function () { return !destroyed; },
+                alive: function () { return !destroyed && check === sourceCheckSequence; },
                 back: function () { Lampa.Controller.toggle('content'); },
+                onPending: function (item) {
+                    sourceBusy = true;
+                    status.text('Подключение к ' + item.title + '…');
+                    Lampa.Controller.toggle('content');
+                },
+                onError: function (error) {
+                    sourceBusy = false;
+                    status.text('Не удалось подключиться: ' + errText(error));
+                },
                 onReady: function (item, nextSource, id) {
-                    providerViews[provider] = { voice: voice, dashMode: dashMode };
+                    sourceBusy = false;
+                    providerViews[provider] = { voice: voice, dashMode: dashMode, playerMode: playerMode };
                     if (provider !== item.provider) {
                         playbackSequence++;
                         adapter.cleanup('source-switch');
@@ -4204,6 +4233,8 @@ body.mnogotv-v5-page .head{background:transparent!important}
                     var saved = providerViews[provider];
                     voice = saved ? saved.voice : {index:-1,label:'Авто'};
                     dashMode = saved ? saved.dashMode : 'default';
+                    playerMode = saved && saved.playerMode || 'internal';
+                    playerButton.text('Плеер: ' + (playerMode === 'external' ? 'внешний' : 'встроенный'));
                     sourceButton.text('Источник: ' + item.title);
                     status.text(providerTitle + ' готов');
                     root.find('.mnogotv-v5__provider').text('MnogoTV • ' + providerTitle);
@@ -4218,6 +4249,22 @@ body.mnogotv-v5-page .head{background:transparent!important}
                 }
             });
         }
+        playerButton.on('hover:enter click', function () {
+            Lampa.Select.show({title:'Плеер',items:[
+                {title:'Встроенный — Lampa',mode:'internal',selected:playerMode === 'internal'},
+                {title:'Внешний',mode:'external',selected:playerMode === 'external',
+                 subtitle:'Запуск средствами устройства. Совместимость потока зависит от плеера.'}
+            ],onBack:function(){Lampa.Controller.toggle('content');},onSelect:function(item){
+                if (Lampa.Select.close) Lampa.Select.close();
+                if (!playbackTarget(item.mode)) status.text('На этом устройстве внешний плеер недоступен.');
+                else {
+                    playerMode = item.mode;
+                    playerButton.text('Плеер: ' + (playerMode === 'external' ? 'внешний' : 'встроенный'));
+                    status.text(playerMode === 'external' ? 'Следующий запуск — во внешнем плеере устройства.' : 'Следующий запуск — во встроенном плеере Lampa.');
+                }
+                Lampa.Controller.toggle('content');
+            }});
+        });
         sourceButton.on('hover:enter click', chooseSource);
         seasonButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseSeason);
 
@@ -4231,7 +4278,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
                 initialized = true; addCss();
                 bar.append(sourceButton);
                 if (isSeries(movie)) bar.append(seasonButton); else seasonButton.hide();
-                bar.append(diagnosticButton);
+                bar.append(playerButton).append(diagnosticButton);
 
                 var main = $('<div class="mnogotv-v5__main"></div>');
                 main.append(bar).append(status).append(list);
@@ -4264,7 +4311,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         if (!page || !page.length || page.find('.mnogotv-v5-button').length) return;
         var movie = e.data && e.data.movie || e.movie || e.object && e.object.card || {};
         // The launcher never depends on resolver availability or a provider probe.
-        var button = $('<div class="full-start__button selector view--online mnogotv-v5-button" data-subtitle="MnogoTV-test"><span>MnogoTV-test</span></div>');
+        var button = $('<div class="full-start__button selector view--online mnogotv-v5-button" data-subtitle="MnogoTV-test"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 8L17 12L10 16Z" fill="currentColor"/></svg><span>MnogoTV-test</span></div>');
         button.on('hover:enter click', function () {
             Lampa.Activity.push({title:'MnogoTV-test',component:COMPONENT,movie:movie,page:1,noinfo:true});
         });
@@ -4275,7 +4322,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
 
     function showSourceMenu(movie, imdb, options) {
         options = options || {};
-        var serial = 0, closed = false;
+        var serial = 0, closed = false, menuVisible = true;
         var items = [
             {title:'Collaps-HLS', provider:'collaps', mode:'hls'},
             {title:'Collaps-AV1', provider:'collaps', mode:'av1'},
@@ -4291,12 +4338,15 @@ body.mnogotv-v5-page .head{background:transparent!important}
             onSelect: function (item) {
                 var ticket = ++serial;
                 function alive() { return !closed && ticket === serial && (!options.alive || options.alive()); }
-                function close() { closed = true; if (Lampa.Select.close) Lampa.Select.close(); }
+                function close(keepRequest) { if (!keepRequest) closed = true; if (menuVisible && Lampa.Select.close) Lampa.Select.close(); menuVisible = false; }
                 if (item.provider === options.provider && options.selectCurrent) {
                     close(); options.selectCurrent(item); return;
                 }
-                notify('Проверяю ' + item.title + '…');
-                function failed(error) { if (alive()) notify(errText(error)); }
+                if (options.onPending) { close(true); options.onPending(item); }
+                function failed(error) {
+                    if (!alive()) return;
+                    if (options.onError) options.onError(error); else notify(errText(error));
+                }
                 function lookup(id) {
                     if (!alive()) return;
                     if (!id) return failed(new Error('Не найден IMDb ID фильма/сериала'));
