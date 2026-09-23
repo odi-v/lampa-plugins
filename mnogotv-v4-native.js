@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.2.0-turbo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+/* MnogoTV/Lampa 5.2.1-turbo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -3576,7 +3576,7 @@
     /* ADAPTER:TURBO:BEGIN */
     function TurboAdapter(core) {
         var Lampa = global.Lampa, session = null, generation = 0, probes = [];
-        var last = {phase:'idle'}, preference = {voice:'',quality:'720p'};
+        var last = {phase:'idle'}, lastProbe = null, preference = {voice:'',quality:'720p'};
         function group() { return {closed:false,requests:[],switchId:0}; }
         function close(g) {
             if (!g || g.closed) return;
@@ -3588,25 +3588,33 @@
             try { var u = new URL(String(value || '').trim(), base); return /^https?:$/.test(u.protocol) ? u.href : ''; }
             catch(e){return '';}
         }
-        function request(g, url, ok, fail) {
+        function request(g, url, ok, fail, phase) {
+            phase = phase || 'HLS';
+            var headers = {
+                'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36',
+                'Accept': phase === 'страница' ? 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8' : '*/*',
+                'Referer': phase === 'страница' ? 'https://mnogotv.com/' : (g.origin || '') + '/'
+            };
+            if (phase !== 'страница' && g.origin) headers.Origin = g.origin;
+            function error(message) { return new Error('Turbo • ' + phase + ': ' + message); }
             if (g.closed) return;
             var net;
-            try { net = new (Lampa.Reguest || Lampa.Request)(); } catch(e){return fail(new Error('Turbo: сетевой API недоступен'));}
+            try { net = new (Lampa.Reguest || Lampa.Request)(); } catch(e){return fail(error('сетевой API недоступен'));}
             var slot={net:net,timer:null},ended=false;g.requests.push(slot);
             function done(error,text) {
                 if(ended || g.closed)return;ended=true;clearTimeout(slot.timer);
                 g.requests=g.requests.filter(function(x){return x!==slot;});
                 if(error)fail(error);else ok(String(text || ''));
             }
-            slot.timer=setTimeout(function(){done(new Error('Turbo: время ожидания истекло'));try{net.clear();}catch(e){}},15000);
+            slot.timer=setTimeout(function(){done(error('время ожидания истекло'));try{net.clear();}catch(e){}},15000);
             try {
                 net.timeout(15000);
                 var method=net.native || net.silent;
                 if(!method)throw new Error('network');
                 method.call(net,url,function(text){done(null,text);},function(e){
-                    var status=Number(e && e.status);done(new Error('Turbo: '+(status>=100 && status<=599?'HTTP '+status:'нет ответа сети')));
-                },false,{dataType:'text',headers:{'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36','Accept':'*/*'}});
-            }catch(e){done(new Error('Turbo: запрос не выполнен'));}
+                    var status=Number(e && e.status);done(error(status>=100 && status<=599?'HTTP '+status:'нет ответа сети'));
+                },false,{dataType:'text',headers:headers});
+            }catch(e){done(error('запрос не выполнен'));}
         }
         function parse(html) {
             var match=String(html).match(/new\s+Player\s*\(\s*("(?:[^"\\]|\\.)*")\s*\)/);
@@ -3645,10 +3653,11 @@
         function catalog(g,req,ok,fail){
             var url=address(req.source && req.source.iframeUrl);
             if(!url)return fail(new Error('Turbo: iframe отсутствует'));
+            g.origin = new URL(url).origin;
             request(g,url,function(html){
                 var data;try{data=parse(html);}catch(e){return fail(new Error('Turbo: не удалось разобрать конфигурацию провайдера'));}
                 ok(data,url);
-            },fail);
+            },fail,'страница');
         }
         function probeMedia(g,urls,ok,fail){
             var queue=urls.slice(),error=null;
@@ -3677,7 +3686,7 @@
         }
         this.availability=function(req,ok,fail){
             var g=group();probes.push(g);
-            function finish(e){close(g);probes=probes.filter(function(x){return x!==g;});if(e)fail(e);else ok(true);}
+            function finish(e){lastProbe={available:!e,error:e?e.message:'',time:Date.now()};close(g);probes=probes.filter(function(x){return x!==g;});if(e)fail(e);else ok(true);}
             catalog(g,req,function(data,base){
                 var candidates=leafs(data).slice(0,3),lastError=null;
                 function next(){
@@ -3735,7 +3744,7 @@
             },bad);
         };
         this.cleanup=function(){++generation;close(session);session=null;probes.forEach(close);probes=[];last={phase:'idle'};};
-        this.diagnostics=function(){return {adapter:'TurboAdapter',session:last,probes:probes.length,quality:preference.quality,voice:preference.voice};};
+        this.diagnostics=function(){return {adapter:'TurboAdapter',session:last,probes:probes.length,availability:lastProbe,quality:preference.quality,voice:preference.voice};};
         this.quality=function(){return {auto:false,manual:true};};
         this.audio=function(result){return result.voiceovers || [];};
         this.subtitles=function(result){return result.subtitles || [];};
@@ -3747,7 +3756,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.2.0-turbo';
+    var VERSION = '5.2.1-turbo';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
