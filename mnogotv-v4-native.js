@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.2.1-turbo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+/* MnogoTV/Lampa 5.2.2-turbo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -3629,12 +3629,20 @@
             if(!data || !Array.isArray(data.file))throw new Error('Turbo: неизвестная структура каталога');
             return data;
         }
+        function folderNumber(title, kind) {
+            title = String(title || '').trim();
+            var word = kind === 'season' ? '(?:сезон|season)' : '(?:эпизод|серия|episode)';
+            var before = new RegExp('^(\\d+)\\s+' + word + '$','i').exec(title);
+            var after = new RegExp('^' + word + '\\s+(\\d+)$','i').exec(title);
+            var match = before || after;
+            return match ? Number(match[1]) : null;
+        }
         function variants(data, season, episode) {
             var list=data.file;
             if(season!==null && season!==undefined && episode!==null && episode!==undefined){
                 var s=null,ep=null;
-                list.some(function(x){if(/^\s*\d+\s+сезон\s*$/i.test(x.title || '') && parseInt(x.title,10)===Number(season)){s=x;return true;}return false;});
-                if(s && Array.isArray(s.folder))s.folder.some(function(x){if(/^\s*\d+\s+(?:эпизод|серия)\s*$/i.test(x.title || '') && parseInt(x.title,10)===Number(episode)){ep=x;return true;}return false;});
+                list.some(function(x){if(folderNumber(x.title,'season')===Number(season)){s=x;return true;}return false;});
+                if(s && Array.isArray(s.folder))s.folder.some(function(x){if(folderNumber(x.title,'episode')===Number(episode)){ep=x;return true;}return false;});
                 list=ep && ep.folder || [];
             }
             return list.filter(function(x){return x && typeof x.file==='string' && !x.folder;});
@@ -3702,7 +3710,7 @@
             function bad(e){if(g.closed)return;close(g);last={phase:'error',error:e.message};fail(e);}
             catalog(g,req,function(data,base){
                 var voices=variants(data,req.season,req.episode);
-                if(!voices.length)return bad(new Error('Turbo: выбранный фильм или серия отсутствует'));
+                if(!voices.length)return bad(new Error('Turbo: ' + (req.season != null && req.episode != null ? 'S' + req.season + 'E' + req.episode : 'фильм') + ' отсутствует в каталоге'));
                 var selected=voices[0];voices.some(function(v){if(v.title===preference.voice){selected=v;return true;}return false;});
                 var map=qualities(selected,base),q=chooseQuality(map,preference.quality);
                 if(!q)return bad(new Error('Turbo: качества отсутствуют'));
@@ -3756,7 +3764,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.2.1-turbo';
+    var VERSION = '5.2.2-turbo';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
