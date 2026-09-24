@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.2.2-turbo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+/* MnogoTV/Lampa 5.2.3-turbo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -3577,12 +3577,13 @@
     function TurboAdapter(core) {
         var Lampa = global.Lampa, session = null, generation = 0, probes = [];
         var last = {phase:'idle'}, lastProbe = null, preference = {voice:'',quality:'720p'};
-        function group() { return {closed:false,requests:[],switchId:0}; }
+        function group() { return {closed:false,requests:[],switchId:0,manifests:{}}; }
         function close(g) {
             if (!g || g.closed) return;
             g.closed = true;
             g.requests.forEach(function(r){clearTimeout(r.timer);try{r.net.clear();}catch(e){}});
             g.requests = [];
+            g.manifests = {};
         }
         function address(value, base) {
             try { var u = new URL(String(value || '').trim(), base); return /^https?:$/.test(u.protocol) ? u.href : ''; }
@@ -3604,7 +3605,18 @@
             function done(error,text) {
                 if(ended || g.closed)return;ended=true;clearTimeout(slot.timer);
                 g.requests=g.requests.filter(function(x){return x!==slot;});
-                if(error)fail(error);else ok(String(text || ''));
+                if(error)return fail(error);
+                var meta = null;
+                if (phase !== 'страница') {
+                    try { meta = typeof text === 'string' && /^\s*\{/.test(text) ? JSON.parse(text) : text; } catch(e) {}
+                    if (meta && typeof meta === 'object' && typeof meta.body === 'string') {
+                        var finalUrl = address(meta.currentUrl);
+                        if (!finalUrl) return fail(new Error('Turbo: native bridge не вернул конечный адрес HLS'));
+                        return ok(meta.body, finalUrl);
+                    }
+                    if (Lampa.Platform && Lampa.Platform.is('android')) return fail(new Error('Turbo: для HLS требуется Android bridge с returnHeaders/currentUrl'));
+                }
+                ok(String(text || ''), '');
             }
             slot.timer=setTimeout(function(){done(error('время ожидания истекло'));try{net.clear();}catch(e){}},15000);
             try {
@@ -3613,7 +3625,7 @@
                 if(!method)throw new Error('network');
                 method.call(net,url,function(text){done(null,text);},function(e){
                     var status=Number(e && e.status);done(error(status>=100 && status<=599?'HTTP '+status:'нет ответа сети'));
-                },false,{dataType:'text',headers:headers});
+                },false,{dataType:'text',headers:headers,returnHeaders:phase !== 'страница'});
             }catch(e){done(error('запрос не выполнен'));}
         }
         function parse(html) {
@@ -3667,17 +3679,55 @@
                 ok(data,url);
             },fail,'страница');
         }
+        function mediaKey(url) { return String(url || '').split('#')[0]; }
+        function installManifestRoute() {
+            if (!core.hlsRouter) return false;
+            function now() { return global.performance && global.performance.now ? global.performance.now() : Date.now(); }
+            function ManifestLoader() {
+                this.timer = null;
+                this.stats = {aborted:false,loaded:0,total:0,retry:0,chunkCount:0,bwEstimate:0,
+                    loading:{start:0,first:0,end:0},parsing:{start:0,end:0},buffering:{start:0,first:0,end:0}};
+            }
+            ManifestLoader.prototype.load = function(context, config, callbacks) {
+                var self = this, g = session, entry = g && g.manifests[mediaKey(context.url)];
+                this.stats.loading.start = now();
+                this.timer = setTimeout(function() {
+                    if (self.stats.aborted || !g || g.closed || session !== g) return;
+                    if (!entry) return callbacks.onError({code:0,text:'Turbo: HLS session expired'},context,null,self.stats);
+                    var stats = self.stats;
+                    stats.loading.first = stats.loading.end = now();
+                    stats.loaded = stats.total = entry.text.length; stats.chunkCount = 1;
+                    // Hls.js resolves relative segments against response.url, NOT the embed or redirect URL.
+                    callbacks.onSuccess({url:entry.url,data:entry.text},stats,context,null);
+                },0);
+            };
+            ManifestLoader.prototype.abort = function() { this.stats.aborted = true; clearTimeout(this.timer); };
+            ManifestLoader.prototype.destroy = ManifestLoader.prototype.abort;
+            ManifestLoader.prototype.getCacheAge = function() { return null; };
+            ManifestLoader.prototype.getResponseHeader = function() { return null; };
+            return core.hlsRouter.register('turbo', {
+                owns:function(url) { return !!(session && !session.closed && session.manifests[mediaKey(url)]); },
+                loader:ManifestLoader
+            });
+        }
         function probeMedia(g,urls,ok,fail){
             var queue=urls.slice(),error=null;
             function next(){
                 if(g.closed)return;
                 if(!queue.length)return fail(error || new Error('Turbo: поток отсутствует'));
                 var url=queue.shift();
-                request(g,url,function(text){
+                request(g,url,function(text,finalUrl){
                     if(text.trim().indexOf('#EXTM3U')!==0){error=new Error('Turbo: HLS не подтверждён');return next();}
-                    // Let stock Hls.js follow redirects and resolve relative segments
-                    // against responseURL. Never use the embed as the playlist base.
-                    ok(url.split('#')[0]+'#.m3u8');
+                    var playable = finalUrl || url;
+                    if (finalUrl && g === session) {
+                        // Only cache VOD/media or master playlists; live playlists must refresh normally.
+                        if (/#EXT-X-ENDLIST|#EXT-X-PLAYLIST-TYPE:VOD|#EXT-X-STREAM-INF/.test(text)) {
+                            g.manifests[mediaKey(finalUrl)] = {text:text,url:finalUrl};
+                            if (!installManifestRoute()) delete g.manifests[mediaKey(finalUrl)];
+                        }
+                    }
+                    // External players also receive the final CDN address, not the header-protected redirect.
+                    ok(mediaKey(playable)+'#.m3u8');
                 },function(e){error=e;next();});
             }next();
         }
@@ -3751,7 +3801,7 @@
                 },bad);
             },bad);
         };
-        this.cleanup=function(){++generation;close(session);session=null;probes.forEach(close);probes=[];last={phase:'idle'};};
+        this.cleanup=function(){if(core.hlsRouter)core.hlsRouter.unregister('turbo');++generation;close(session);session=null;probes.forEach(close);probes=[];last={phase:'idle'};};
         this.diagnostics=function(){return {adapter:'TurboAdapter',session:last,probes:probes.length,availability:lastProbe,quality:preference.quality,voice:preference.voice};};
         this.quality=function(){return {auto:false,manual:true};};
         this.audio=function(result){return result.voiceovers || [];};
@@ -3764,7 +3814,7 @@
 (function (global) {
     'use strict';
 
-    var VERSION = '5.2.2-turbo';
+    var VERSION = '5.2.3-turbo';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
