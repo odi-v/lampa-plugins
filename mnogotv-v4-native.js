@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.3.2-alloha | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+/* MnogoTV/Lampa 5.3.3-alloha | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -4051,6 +4051,71 @@ function subtitles(response) {
         var out=new Uint8Array(text.length);for(var i=0;i<text.length;i++)out[i]=text.charCodeAt(i);
         return out.buffer;
     }
+    function mediaRequest(g,url,headers,ok,fail){
+        var ended=false,cancels=[],timer,parts=[],ready={},issued=0,consumed=0,total=0,tail=null;
+        var size=262144,overlap=32,stride=size-overlap,start=0,limit=null,pumping=false,probe=null;
+        function inactive(){return ended||g.closed;}
+        function stop(){ended=true;clearTimeout(timer);cancels.forEach(function(f){if(f)f();});cancels=[];}
+        function bad(e){if(inactive())return;stop();fail(e);}
+        function done(buffer){if(inactive())return;stop();ok(buffer);}
+        function ranged(a,b,success,failure){
+            var h={};Object.keys(headers).forEach(function(k){if(k.toLowerCase()!=='range')h[k]=headers[k];});h.Range='bytes='+a+'-'+b;
+            cancels.push(request(g,url,'HLS Range',false,h,function(raw){
+                if(inactive())return;
+                var bytes;try{bytes=new Uint8Array(decodeMedia(raw));}catch(e){return failure(error('HLS Range',e.message));}
+                if(bytes.length>b-a+1)return failure(error('HLS Range','сервер проигнорировал диапазон'));
+                success(bytes);
+            },function(e){if(!inactive())failure(e);},true));
+        }
+        function finish(){
+            var out=new Uint8Array(total),offset=0;
+            parts.forEach(function(p){out.set(p,offset);offset+=p.length;});parts=[];ready={};done(out.buffer);
+        }
+        function drain(){
+            while(!inactive()&&ready[consumed]){
+                var item=ready[consumed];delete ready[consumed];
+                if(item.error)return bad(item.error);
+                var bytes=item.bytes,skip=tail?tail.length:0;
+                if(bytes.length<skip)return bad(error('HLS Range','обрезанный фрагмент'));
+                if(!consumed&&(!bytes.length||bytes[0]!==probe))return bad(error('HLS Range','начало фрагмента изменилось'));
+                for(var j=0;j<skip;j++)if(bytes[j]!==tail[j])return bad(error('HLS Range','части фрагмента не совпадают'));
+                var piece=bytes.subarray(skip);parts.push(piece);total+=piece.length;consumed++;
+                if(total>67108864)return bad(error('HLS Range','превышен предел 64 МиБ'));
+                if(bytes.length<item.length||(limit!==null&&start+total>limit))return finish();
+                if(!piece.length)return bad(error('HLS Range','нет продвижения'));
+                tail=bytes.subarray(bytes.length-Math.min(overlap,bytes.length));
+            }
+        }
+        function pump(){
+            if(inactive()||pumping)return;pumping=true;
+            while(!inactive()&&issued-consumed<4){
+                var a=start+issued*stride,b=a+size-1;
+                if(limit!==null){if(a>limit)break;b=Math.min(b,limit);}
+                if(a-start>=67108864){bad(error('HLS Range','превышен предел 64 МиБ'));break;}
+                launch(issued++,a,b);
+            }
+            pumping=false;
+        }
+        function launch(index,a,b){
+            function receive(item){if(inactive())return;ready[index]=item;drain();pump();}
+            ranged(a,b,function(bytes){receive({bytes:bytes,length:b-a+1});},function(e){receive({error:e});});
+        }
+        function recover(){
+            var range=headers.Range;
+            if(range){var m=/^bytes=(\d+)-(\d*)$/.exec(range);if(!m)return bad(error('HLS Range','неверный диапазон'));start=Number(m[1]);limit=m[2]?Number(m[2]):null;}
+            ranged(start,start,function(bytes){
+                if(bytes.length!==1)return bad(error('HLS Range','проверка диапазона не пройдена'));
+                probe=bytes[0];pump();
+            },bad);
+        }
+        timer=setTimeout(function(){bad(error('HLS Range','тайм-аут сборки 120 с'));},120000);g.timers.push(timer);
+        cancels.push(request(g,url,'HLS фрагмент',false,headers,function(raw){
+            if(inactive())return;
+            if(raw==='[Response too large, skipped]')return recover();
+            var buffer;try{buffer=decodeMedia(raw);}catch(e){return bad(error('HLS фрагмент',e.message));}done(buffer);
+        },bad,true));
+        return stop;
+    }
     function route(g){
         var Stock=core.hlsRouter && core.hlsRouter.stockLoader();if(!Stock)return false;
         function Loader(config){this.config=config;this.delegate=null;this.stats={aborted:false,loaded:0,total:0,retry:0,chunkCount:0,bwEstimate:0,loading:{start:0,first:0,end:0},parsing:{start:0,end:0},buffering:{start:0,first:0,end:0}};}
@@ -4082,16 +4147,14 @@ function subtitles(response) {
                 headers.Range='bytes='+Number(ctx.rangeStart||0)+'-'+(Number(ctx.rangeEnd)-1);
             headers['Accept-Encoding']='identity';
             self.stats.loading.start=global.performance&&global.performance.now?global.performance.now():Date.now();
-            self.cancel=request(g,clean,'HLS фрагмент',false,headers,function(body){
+            self.cancel=mediaRequest(g,clean,headers,function(buffer){
                 if(g.closed||self.stats.aborted)return;
-                var buffer;
-                try{buffer=decodeMedia(body);}catch(e){return failedMedia(error('HLS фрагмент',e.message));}
                 var end=global.performance&&global.performance.now?global.performance.now():Date.now();
                 self.stats.loading.first=self.stats.loading.end=end;
                 self.stats.loaded=self.stats.total=buffer.byteLength;self.stats.chunkCount=1;
                 last={phase:'HLS фрагмент получен',bytes:buffer.byteLength};
                 cb.onSuccess({url:clean,data:buffer},self.stats,ctx,null);
-            },failedMedia,true);
+            },failedMedia);
             function failedMedia(e){
                 if(g.closed||self.stats.aborted)return;
                 last={phase:'HLS фрагмент',error:e.message};
@@ -4160,7 +4223,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.2-alloha';
+    var VERSION = '5.3.3-alloha';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
