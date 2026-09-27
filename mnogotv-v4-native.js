@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.3.1-alloha | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+/* MnogoTV/Lampa 5.3.2-alloha | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -3895,7 +3895,7 @@ function subtitles(response) {
         g.timers.forEach(clearTimeout);g.timers=[];clearInterval(g.heartbeat);
         if(g.socket){g.socket.onopen=null;g.socket.onclose=null;g.socket.onmessage=null;g.socket.onerror=null;try{g.socket.close();}catch(e){}}g.socket=null;g.media={};
     }
-    function request(g,url,phase,post,extra,ok,fail){
+    function request(g,url,phase,post,extra,ok,fail,binary){
         if(g.closed)return;
         last={phase:phase};var net,ended=false;
         try{net=new (Lampa.Reguest || Lampa.Request)();}catch(e){return fail(error(phase,'сетевой API недоступен'));}
@@ -3906,12 +3906,13 @@ function subtitles(response) {
         function end(err,body){
             if(ended || g.closed)return;ended=true;clearTimeout(slot.timer);g.requests=g.requests.filter(function(r){return r!==slot;});
             if(err)return fail(err);
+            if(binary)return ok(body,url,{});
             var meta;try{meta=typeof body==='string' && /^\s*\{/.test(body)?JSON.parse(body):body;}catch(e){}
             if(meta && typeof meta.body==='string')return ok(meta.body,meta.currentUrl || url,meta.headers || {});
             ok(typeof body==='string'?body:JSON.stringify(body),url,{});
         }
         slot.timer=setTimeout(function(){end(error(phase,'тайм-аут 20 с'));try{net.clear();}catch(e){}},20000);
-        try{net.timeout(20000);(net.native || net.silent).call(net,url,function(b){end(null,b);},function(e){end(error(phase,'HTTP '+(Number(e && e.status)||0)));},post || false,{dataType:'text',headers:headers,returnHeaders:true});}
+        try{net.timeout(20000);(net.native || net.silent).call(net,url,function(b){end(null,b);},function(e){end(error(phase,'HTTP '+(Number(e && e.status)||0)));},post || false,{dataType:binary?'base64':'text',headers:headers,returnHeaders:!binary});}
         catch(e){end(error(phase,'запрос не выполнен'));}
         return function(){if(ended)return;ended=true;clearTimeout(slot.timer);g.requests=g.requests.filter(function(r){return r!==slot;});try{net.clear();}catch(e){}};
     }
@@ -4032,6 +4033,24 @@ function subtitles(response) {
             },fail);
         },fail);
     }
+    function decodeMedia(raw){
+        for(var depth=0;depth<8;depth++){
+            if(Object.prototype.toString.call(raw)==='[object ArrayBuffer]')return raw;
+            if(typeof ArrayBuffer!=='undefined'&&ArrayBuffer.isView&&ArrayBuffer.isView(raw))return raw.buffer.slice(raw.byteOffset,raw.byteOffset+raw.byteLength);
+            if(typeof raw==='string'&&/^\s*[{"[]/.test(raw)){
+                if(raw==='[Response too large, skipped]')throw new Error('ответ превышает лимит native bridge');
+                try{raw=JSON.parse(raw);}catch(e){throw new Error('вместо видеоданных получен некорректный ответ');}
+            }
+            if(!raw||typeof raw!=='object')break;
+            if(raw.error||raw.success===false||Number(raw.status||raw.statusCode)>=400)throw new Error('native bridge вернул ошибку HTTP '+(Number(raw.status||raw.statusCode)||0));
+            raw=raw.base64!==undefined?raw.base64:raw.body!==undefined?raw.body:raw.data!==undefined?raw.data:raw.response!==undefined?raw.response:raw.result;
+        }
+        raw=String(raw||'').replace(/^data:[^,]*;base64,/,'').replace(/\s/g,'');
+        if(!raw||!/^[A-Za-z0-9+/]*={0,2}$/.test(raw)||raw.length%4===1)throw new Error('ответ не является Base64-видеоданными');
+        var text;try{text=global.atob(raw);}catch(e){throw new Error('Base64 не декодируется');}
+        var out=new Uint8Array(text.length);for(var i=0;i<text.length;i++)out[i]=text.charCodeAt(i);
+        return out.buffer;
+    }
     function route(g){
         var Stock=core.hlsRouter && core.hlsRouter.stockLoader();if(!Stock)return false;
         function Loader(config){this.config=config;this.delegate=null;this.stats={aborted:false,loaded:0,total:0,retry:0,chunkCount:0,bwEstimate:0,loading:{start:0,first:0,end:0},parsing:{start:0,end:0},buffering:{start:0,first:0,end:0}};}
@@ -4057,9 +4076,28 @@ function subtitles(response) {
                 },failed);
                 return;
             }
-            var conf={};Object.keys(this.config||{}).forEach(function(k){conf[k]=self.config[k];});
-            conf.xhrSetup=function(xhr){var headers=mediaHeaders(g);Object.keys(headers).forEach(function(k){xhr.setRequestHeader(k,headers[k]);});};
-            this.delegate=new Stock(conf);this.delegate.stats=this.stats;this.delegate.load(ctx,cfg,cb);
+            // Media and keys use the same device transport as playlists.
+            var headers=mediaHeaders(g);
+            if(Number(ctx.rangeEnd)>Number(ctx.rangeStart)&&Number(ctx.rangeEnd)>0)
+                headers.Range='bytes='+Number(ctx.rangeStart||0)+'-'+(Number(ctx.rangeEnd)-1);
+            headers['Accept-Encoding']='identity';
+            self.stats.loading.start=global.performance&&global.performance.now?global.performance.now():Date.now();
+            self.cancel=request(g,clean,'HLS фрагмент',false,headers,function(body){
+                if(g.closed||self.stats.aborted)return;
+                var buffer;
+                try{buffer=decodeMedia(body);}catch(e){return failedMedia(error('HLS фрагмент',e.message));}
+                var end=global.performance&&global.performance.now?global.performance.now():Date.now();
+                self.stats.loading.first=self.stats.loading.end=end;
+                self.stats.loaded=self.stats.total=buffer.byteLength;self.stats.chunkCount=1;
+                last={phase:'HLS фрагмент получен',bytes:buffer.byteLength};
+                cb.onSuccess({url:clean,data:buffer},self.stats,ctx,null);
+            },failedMedia,true);
+            function failedMedia(e){
+                if(g.closed||self.stats.aborted)return;
+                last={phase:'HLS фрагмент',error:e.message};
+                if(core.notify)core.notify(e.message);
+                cb.onError({code:Number((e.message.match(/HTTP (\d+)/)||[])[1])||0,text:e.message},ctx,null,self.stats);
+            }
         };
         Loader.prototype.abort=function(){this.stats.aborted=true;clearTimeout(this.timer);if(this.cancel)this.cancel();if(this.delegate)this.delegate.abort();};
         Loader.prototype.destroy=function(){this.abort();if(this.delegate&&this.delegate.destroy)this.delegate.destroy();};
@@ -4122,7 +4160,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.1-alloha';
+    var VERSION = '5.3.2-alloha';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
