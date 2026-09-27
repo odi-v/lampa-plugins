@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.2.3-turbo | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+/* MnogoTV/Lampa 5.3.0-alloha | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -3811,10 +3811,296 @@
     global.MnogoTVTurboAdapter=TurboAdapter;
 })(window);
 
+(function(global) {
+'use strict';
+/* ADAPTER:ALLOHA:BEGIN */
+function AllohaAdapter(core) {
+var Lampa=global.Lampa;
+
+// Pure permutation from the captured Alloha client. No session values stored here.
+function regroup(text, group, descending) {
+    var counts = [], buckets = [], offsets = [], i, k, cursor = 0, out = [];
+    for (i = 0; i < text.length; i++) { k = group(i); counts[k] = (counts[k] || 0) + 1; }
+    for (i = 0; i < counts.length; i++) {
+        k = descending ? counts.length - i - 1 : i;
+        buckets[k] = text.slice(cursor, cursor + (counts[k] || 0));
+        cursor += counts[k] || 0; offsets[k] = 0;
+    }
+    for (i = 0; i < text.length; i++) { k = group(i); out.push(buckets[k].charAt(offsets[k]++)); }
+    return out.join('');
+}
+function challenge(value) {
+    if (typeof value !== 'string' || !value.length || value.length > 4096) throw new Error('Invalid Alloha challenge');
+    if (value.length < 2) return value;
+    var n = value.length, bits = 0;
+    while (Math.pow(2, bits) < n) bits++;
+    var text = regroup(value, function(i) { var count = 0; while(i > 0) { count++; i >>>= 1; } return count; }, true);
+    text = regroup(text, function(i) { if (!i) return bits; var count = 0; while (!(i & 1)) {count++; i >>= 1;} return count; }, false);
+    function prime(x) { if (x < 2) return false; for (var d = 2; d*d <= x; d++) if (x % d === 0) return false; return true; }
+    var modulus = n + 1, pos = 0, seen = [], order = [], out = [];
+    while (!prime(modulus)) modulus++;
+    while (order.length < n) { pos = (pos + 2) % modulus; if(pos < n && !seen[pos]) {seen[pos] = true; order.push(pos);} }
+    for (var i = 0; i < n; i++) out[order[i]] = text[i];
+    return out.join('');
+}
+
+
+function records(catalog, season, episode) {
+    if (!catalog || !catalog.all) throw new Error('Alloha: каталог отсутствует');
+    var node = catalog.all, out = [];
+    if (catalog.type === 'serial') {
+        if (!(isFinite(Number(season)) && Math.floor(Number(season)) === Number(season)) || !(isFinite(Number(episode)) && Math.floor(Number(episode)) === Number(episode)) || Number(season) < 1 || Number(episode) < 1) throw new Error('Alloha: укажите сезон и серию');
+        node = node[String(Number(season))]; node = node && node[String(Number(episode))];
+        if (!node) return [];
+    } else if (catalog.type !== 'movie') throw new Error('Alloha: неизвестный тип каталога');
+    function walk(value, depth) {
+        if (!value || typeof value !== 'object' || depth > 4) return;
+        if (value.id && typeof value.translation === 'string') {
+            // id_file is NOT the identifier used by /bnsi/movies/.
+            out.push({id:String(value.id),label:value.translation,translationId:String(value.id_translation),edition:value.typeList || '',sourceQuality:value.quality || ''});
+            return;
+        }
+        Object.keys(value).forEach(function(k){walk(value[k], depth+1);});
+    }
+    walk(node,0); return out;
+}
+function safeURL(url) {try {var u=new URL(url);return /^https?:$/.test(u.protocol)?u.href:'';}catch(e){return '';}}
+function voices(response, catalogRecord, film) {
+    var counts = Object.create(null);
+    return (Array.isArray(response.hlsSource) ? response.hlsSource : []).map(function(v){
+        var map = {};
+        Object.keys(v.quality || {}).forEach(function(k){if(/^\d{3,4}$/.test(k) && safeURL(v.quality[k])) map[k+'p']=safeURL(v.quality[k]);});
+        var name = film && catalogRecord ? catalogRecord.label : String(v.label || 'Озвучка');
+        var ordinal = counts[name] || 0; counts[name] = ordinal+1;
+        return {name:name,ordinal:ordinal,label:name+(ordinal?' ('+(ordinal+1)+')':''),audioId:String(v.audioId),quality:map,default:!!v.default};
+    }).filter(function(v){return Object.keys(v.quality).length;});
+}
+function pickVoice(list, preference) {
+    return list.filter(function(v){return preference && v.name === preference.name && v.ordinal === preference.ordinal;})[0] || list.filter(function(v){return v.default;})[0] || list[0] || null;
+}
+function quality(map, wanted) {
+    if (Object.prototype.hasOwnProperty.call(map,wanted)) return wanted;
+    var names=Object.keys(map).sort(function(a,b){return parseInt(a)-parseInt(b);});
+    var low=names.filter(function(k){return parseInt(k)<=720;});return low[low.length-1] || names[0] || '';
+}
+function subtitles(response) {
+    return (Array.isArray(response.tracks)?response.tracks:[]).filter(function(t){return t && t.kind==='captions' && safeURL(t.src);}).map(function(t){return {label:String(t.label || t.language || 'Субтитры'),url:safeURL(t.src),language:String(t.language || '')};});
+}
+    var session=null, probes=[], pref={name:'',ordinal:0,quality:'720p'}, last={phase:'idle'};
+    function group(){return {closed:false,requests:[],socket:null,timers:[],media:{},challenge:'',fingerprint:'',guard:'',edge:'',busy:false};}
+    function error(phase,message){return new Error('Alloha • '+phase+': '+message);}
+    function close(g){
+        if(!g || g.closed)return;g.closed=true;
+        g.requests.forEach(function(r){clearTimeout(r.timer);try{r.net.clear();}catch(e){}});g.requests=[];
+        g.timers.forEach(clearTimeout);g.timers=[];clearInterval(g.heartbeat);
+        if(g.socket){g.socket.onopen=null;g.socket.onclose=null;g.socket.onmessage=null;g.socket.onerror=null;try{g.socket.close();}catch(e){}}g.socket=null;g.media={};
+    }
+    function request(g,url,phase,post,extra,ok,fail){
+        if(g.closed)return;
+        last={phase:phase};var net,ended=false;
+        try{net=new (Lampa.Reguest || Lampa.Request)();}catch(e){return fail(error(phase,'сетевой API недоступен'));}
+        var slot={net:net,timer:null};g.requests.push(slot);
+        var headers={'Referer':phase==='каталог'?'https://mnogotv.com/':g.embed || 'https://mnogotv.com/','Accept':phase==='каталог'?'text/html,application/xhtml+xml,*/*;q=0.8':'*/*'};
+        if(g.origin && phase!=='каталог')headers.Origin=g.origin;
+        Object.keys(extra || {}).forEach(function(k){headers[k]=extra[k];});
+        function end(err,body){
+            if(ended || g.closed)return;ended=true;clearTimeout(slot.timer);g.requests=g.requests.filter(function(r){return r!==slot;});
+            if(err)return fail(err);
+            var meta;try{meta=typeof body==='string' && /^\s*\{/.test(body)?JSON.parse(body):body;}catch(e){}
+            if(meta && typeof meta.body==='string')return ok(meta.body,meta.currentUrl || url,meta.headers || {});
+            ok(typeof body==='string'?body:JSON.stringify(body),url,{});
+        }
+        slot.timer=setTimeout(function(){end(error(phase,'тайм-аут 20 с'));try{net.clear();}catch(e){}},20000);
+        try{net.timeout(20000);(net.native || net.silent).call(net,url,function(b){end(null,b);},function(e){end(error(phase,'HTTP '+(Number(e && e.status)||0)));},post || false,{dataType:'text',headers:headers,returnHeaders:true});}
+        catch(e){end(error(phase,'запрос не выполнен'));}
+    }
+    // Parse a JavaScript string literal as data, without eval or executing embed code.
+    function stringAt(text,start){
+        var quote=text[start],out='',i=start+1;
+        if(quote!=="'" && quote!=='"')throw error('каталог','ожидалась строка');
+        for(;i<text.length;i++){
+            var c=text[i];if(c===quote)return out;
+            if(c!=='\\'){out+=c;continue;}
+            c=text[++i];var escapes={n:'\n',r:'\r',t:'\t',b:'\b',f:'\f',v:'\v'};
+            if(c==='u' || c==='x'){var n=c==='u'?4:2,h=text.slice(i+1,i+1+n);if(!new RegExp('^[0-9a-f]{'+n+'}$','i').test(h))throw error('каталог','некорректная escape-последовательность');out+=String.fromCharCode(parseInt(h,16));i+=n;}
+            else if(c==='\n'){} else out+=Object.prototype.hasOwnProperty.call(escapes,c)?escapes[c]:c;
+        }throw error('каталог','незакрытая строка');
+    }
+    function parseEmbed(html){
+        var m=/\b(?:const|var|let)\s+fileList\s*=\s*JSON\.parse\(\s*/.exec(html);
+        if(!m)throw error('каталог','fileList не найден');
+        var catalog=JSON.parse(stringAt(html,m.index+m[0].length));
+        var u=/\b(?:const|var|let)\s+userParam\s*=\s*\{/.exec(html),token='';
+        if(u){var tail=html.slice(u.index+u[0].length),t=/\btoken\s*:\s*/.exec(tail);if(t)token=stringAt(tail,t.index+t[0].length);}
+        var meta=/<meta\b[^>]*\bname=["']viewporti["'][^>]*\bcontent=["']([^"']+)["']/i.exec(html);
+        if(!token || !meta)throw error('каталог','token/challenge отсутствуют');
+        return {catalog:catalog,token:token,challenge:meta[1]};
+    }
+    function catalog(g,req,ok,fail){
+        g.embed=safeURL(req.source && req.source.iframeUrl);
+        if(!g.embed)return fail(error('каталог','iframe отсутствует'));
+        g.origin=new URL(g.embed).origin;
+        request(g,g.embed,'каталог',false,{},function(html){
+            try{var data=parseEmbed(html);g.token=data.token;g.challenge=data.challenge;g.catalog=data.catalog;g.html=html;ok(data.catalog);}catch(e){fail(error('каталог','конфигурация не распознана'));}
+        },fail);
+    }
+    // SHA-256 on UTF-8, kept local to this adapter for older TV browsers.
+    function sha256(text){
+        var bytes=unescape(encodeURIComponent(text)),words=[],length=bytes.length,i,j;
+        var h=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+        var k=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+        function r(x,n){return x>>>n|x<<32-n;}
+        for(i=0;i<length;i++)words[i>>2]=(words[i>>2]||0)|bytes.charCodeAt(i)<<24-(i%4)*8;
+        words[length>>2]=(words[length>>2]||0)|0x80<<24-(length%4)*8;
+        var total=(((length+8)>>6)+1)*16;words[total-1]=length*8;
+        for(i=0;i<total;i+=16){var w=[],a=h.slice();for(j=0;j<64;j++){
+            if(j<16)w[j]=words[i+j]|0;else {var x=w[j-15],y=w[j-2];w[j]=((r(x,7)^r(x,18)^x>>>3)+w[j-16]+(r(y,17)^r(y,19)^y>>>10)+w[j-7])|0;}
+            var t=(a[7]+(r(a[4],6)^r(a[4],11)^r(a[4],25))+((a[4]&a[5])^(~a[4]&a[6]))+k[j]+w[j])|0;
+            var u=((r(a[0],2)^r(a[0],13)^r(a[0],22))+((a[0]&a[1])^(a[0]&a[2])^(a[1]&a[2])))|0;
+            a=[t+u|0,a[0],a[1],a[2],a[3]+t|0,a[4],a[5],a[6]];
+        }for(j=0;j<8;j++)h[j]=h[j]+a[j]|0;}
+        return h.map(function(v){return ('00000000'+(v>>>0).toString(16)).slice(-8);}).join('');
+    }
+    function fingerprint(g,done){
+        var n=global.navigator || {},parts=[String(n.userAgent||'').replace(/\d+(?:[._]\d+)+/g,'')];
+        try{parts.push(Intl.DateTimeFormat().resolvedOptions().timeZone);}catch(e){parts.push(undefined);}
+        var s=global.screen || {};parts.push(Math.max(s.width||0,s.height||0)+'x'+Math.min(s.width||0,s.height||0));parts.push(n.language||n.userLanguage);parts.push(n.deviceMemory);parts.push(n.hardwareConcurrency);
+        try{var canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');ctx.textBaseline='top';ctx.font='16px sans-serif';ctx.fillText('fp',2,2);parts.push(canvas.toDataURL());}catch(e){}
+        try{var c=document.createElement('canvas'),gl=c.getContext('webgl2',{powerPreference:'high-performance',failIfMajorPerformanceCaveat:true})||c.getContext('webgl');if(gl){var ext=gl.getExtension('WEBGL_debug_renderer_info');if(ext)parts.push(gl.getParameter(ext.UNMASKED_VENDOR_WEBGL)+'|'+gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));var lose=gl.getExtension('WEBGL_lose_context');if(lose)lose.loseContext();}}catch(e){}
+        var finished=false;function finish(audioLength){if(finished || g.closed)return;finished=true;clearTimeout(timer);if(audioLength)parts.push(audioLength);g.fingerprint=sha256(parts.join('||'));done();}
+        var timer=setTimeout(function(){finish();},1500);g.timers.push(timer);
+        try{var Audio=global.OfflineAudioContext||global.webkitOfflineAudioContext;if(!Audio)return finish();var ac=new Audio(1,44100,44100),osc=ac.createOscillator();osc.connect(ac.destination);osc.start(0);ac.startRendering().then(function(b){finish(b.length);},function(){finish();});}catch(e){finish();}
+    }
+    function guard(g,ok,fail){
+        // The captured provider bundle returns one public static guard. Read it freshly;
+        // never ship the recorded bearer token or evaluate the provider's JavaScript.
+        var matches=[],re=/<script\b[^>]*\bsrc=["']([^"']+)["']/gi,m;
+        while((m=re.exec(g.html)))if(/\/build\/app\.[\w-]+\.js(?:\?|$)/.test(m[1]))matches.push(m[1]);
+        if(matches.length!==1)return fail(error('служебный ключ','скрипт провайдера изменился'));
+        var url=new URL(matches[0],g.embed);if(url.origin!==g.origin)return fail(error('служебный ключ','неожиданный адрес скрипта'));
+        request(g,url.href,'служебный ключ',false,{},function(js){
+            var found=[],rx=/['"]([1-9A-HJ-NP-Za-km-z]{250,500})['"]/g,x;
+            while((x=rx.exec(js)))if(found.indexOf(x[1])<0)found.push(x[1]);
+            if(found.length!==1)return fail(error('служебный ключ','формат изменился; требуется обновление адаптера'));
+            g.guard=found[0];ok();
+        },fail);
+    }
+    function api(g,record,ok,fail){
+        if(!g.challenge)return fail(error('API','challenge отсутствует'));
+        var form={token:g.token,av1:'false',autoplay:'0',audio:'',subtitle:''};
+        request(g,g.origin+'/bnsi/movies/'+encodeURIComponent(record.id),'API',form,{'X-Requested-With':'XMLHttpRequest','Borth':g.fingerprint+'|'+challenge(g.challenge)},function(text,url,headers){
+            var data;try{data=JSON.parse(text);}catch(e){return fail(error('API','ответ не является JSON'));}
+            if(!Array.isArray(data.hlsSource)||!data.hlsSource.length)return fail(error('API','нет доступных потоков'));
+            Object.keys(headers).forEach(function(k){if(k.toLowerCase()==='borth')g.challenge=String(headers[k]);});
+            ok(data);
+        },fail);
+    }
+    function socket(g,data,voice,q,ok,fail){
+        clearInterval(g.heartbeat);
+        if(g.socket){g.socket.onopen=null;g.socket.onclose=null;g.socket.onerror=null;g.socket.onmessage=null;try{g.socket.close();}catch(e){}}g.edge='';
+        if(!data.pnr || !data.pnk || !global.WebSocket)return fail(error('WebSocket','сессия недоступна'));
+        var u;try{u=new URL(data.pnr,g.embed);}catch(e){return fail(error('WebSocket','неверный адрес'));}
+        if(u.protocol!=='wss:')return fail(error('WebSocket','неподдерживаемый адрес'));
+        var ws,ended=false,timer;
+        function bad(message){if(ended||g.closed)return;ended=true;clearTimeout(timer);if(ws){ws.onclose=null;try{ws.close();}catch(e){}}fail(error('WebSocket',message));}
+        try{u.searchParams.set('sid',data.pnk);u.searchParams.set('v','2.1');u.searchParams.set('t',String(Date.now()));ws=g.socket=new global.WebSocket(u.href);}catch(e){return bad('соединение не создано');}
+        timer=setTimeout(function(){bad('нет ответа за 10 с');},10000);g.timers.push(timer);
+        g.wsSelection={resolution:String(parseInt(q,10)),track_id:String(voice.audioId)};
+        function send(type){if(g.closed||g.socket!==ws||ws.readyState!==1)return;ws.send(JSON.stringify({type:type,current_time:Math.floor((document.querySelector('video') || {}).currentTime || 0),resolution:g.wsSelection.resolution,track_id:g.wsSelection.track_id,speed:1,subtitle:-1,ts:Date.now()}));}
+        ws.onopen=function(){if(g.closed || g.socket!==ws)return;send('playback_start');g.heartbeat=setInterval(function(){if(g.closed||g.socket!==ws)return;var video=document.querySelector('video');if(video && !video.paused)send('playing');},20000);};
+        ws.onmessage=function(e){if(g.closed||g.socket!==ws)return;var d;try{d=JSON.parse(e.data);}catch(e){return;}if(d.type==='config_update'&&typeof d.edge_hash==='string'&&d.edge_hash){g.edge=d.edge_hash;if(!ended){ended=true;clearTimeout(timer);ok();}}};
+        ws.onerror=function(){bad('ошибка соединения');};ws.onclose=function(){clearInterval(g.heartbeat);if(!ended)bad('соединение закрыто');else if(!g.closed)last={phase:'WebSocket',error:'соединение закрыто'};};
+    }
+    function mediaHeaders(g){return {'Accepts-Controls':g.edge || g.fingerprint,'Authorizations':'Bearer '+g.guard};}
+    function prepare(g,data,voice,q,ok,fail){
+        socket(g,data,voice,q,function(){
+            var url=voice.quality[q];request(g,url,'HLS',false,mediaHeaders(g),function(body,finalUrl){
+                if(body.trim().indexOf('#EXTM3U')!==0)return fail(error('HLS','плейлист не получен'));
+                try {
+                var root=new URL(finalUrl);g.media[root.origin]=true;
+                // Rewrite relative playlist URLs against the final response URL after redirects.
+                body=body.split(/\r?\n/).map(function(line){function absolute(value){var u=new URL(value,finalUrl);if(!/^https?:$/.test(u.protocol))throw error('HLS','неверный протокол');g.media[u.origin]=true;return u.href;}
+                    return line && line[0]!=='#'?absolute(line.trim()):line.replace(/URI="([^"]+)"/g,function(_,v){return 'URI="'+absolute(v)+'"';});}).join('\n');
+                g.cached={url:finalUrl.split('#')[0],body:body};
+                } catch(e) { return fail(error('HLS','некорректный адрес в плейлисте')); }
+                if(!route(g))return fail(error('HLS','загрузчик Lampa недоступен'));
+                ok(g.cached.url+'#.m3u8');
+            },fail);
+        },fail);
+    }
+    function route(g){
+        var Stock=core.hlsRouter && core.hlsRouter.stockLoader();if(!Stock)return false;
+        function Loader(config){this.config=config;this.delegate=null;this.stats={aborted:false,loaded:0,total:0,retry:0,chunkCount:0,bwEstimate:0,loading:{start:0,first:0,end:0},parsing:{start:0,end:0},buffering:{start:0,first:0,end:0}};}
+        Loader.prototype.load=function(ctx,cfg,cb){
+            var self=this,clean=String(ctx.url).split('#')[0];
+            if(g.closed)return cb.onError({code:0,text:'Alloha session closed'},ctx,null,this.stats);
+            if(g.cached&&clean===g.cached.url){var now=global.performance&&global.performance.now?global.performance.now():Date.now();this.stats.loading.start=now;this.timer=setTimeout(function(){if(g.closed||self.stats.aborted)return;self.stats.loading.first=self.stats.loading.end=now;self.stats.loaded=self.stats.total=g.cached.body.length;self.stats.chunkCount=1;cb.onSuccess({url:g.cached.url,data:g.cached.body},self.stats,ctx,null);},0);return;}
+            var conf={};Object.keys(this.config||{}).forEach(function(k){conf[k]=self.config[k];});
+            conf.xhrSetup=function(xhr){var headers=mediaHeaders(g);Object.keys(headers).forEach(function(k){xhr.setRequestHeader(k,headers[k]);});};
+            this.delegate=new Stock(conf);this.delegate.stats=this.stats;this.delegate.load(ctx,cfg,cb);
+        };
+        Loader.prototype.abort=function(){this.stats.aborted=true;clearTimeout(this.timer);if(this.delegate)this.delegate.abort();};
+        Loader.prototype.destroy=function(){this.abort();if(this.delegate&&this.delegate.destroy)this.delegate.destroy();};
+        Loader.prototype.getCacheAge=function(){return null;};Loader.prototype.getResponseHeader=function(k){return this.delegate&&this.delegate.getResponseHeader?this.delegate.getResponseHeader(k):null;};
+        return core.hlsRouter.register('alloha',{owns:function(url){try{return session===g&&!g.closed&&!!g.media[new URL(url).origin];}catch(e){return false;}},loader:Loader});
+    }
+    this.availability=function(req,ok,fail){var g=group();probes.push(g);function finish(e){close(g);probes=probes.filter(function(x){return x!==g;});if(e)fail(e);else ok(true);}catalog(g,req,function(c){if(c.type!=='serial'&&c.type!=='movie')return finish(error('каталог','неизвестный тип'));finish();},finish);};
+    this.resolve=function(req,ok,fail){
+        close(session);if(core.hlsRouter)core.hlsRouter.unregister('alloha');var g=session=group();
+        function bad(e){if(g.closed)return;last={phase:'error',error:e.message};close(g);fail(e);}
+        catalog(g,req,function(c){
+            var entries;try{entries=records(c,req.season,req.episode);}catch(e){return bad(e);}
+            if(!entries.length)return bad(error('каталог','выбранный фильм или серия отсутствует'));
+            var record=entries.filter(function(v){return v.label===pref.name.replace(/^\([^)]*\)\s*/,'');})[0]||entries.filter(function(v){return c.active&&String(c.active.id)===v.id;})[0]||entries[0];
+            fingerprint(g,function(){guard(g,function(){api(g,record,function(data){
+                var list=voices(data,record,c.type==='movie'),selected=pickVoice(list,pref);
+                if(!selected)return bad(error('API','озвучки отсутствуют'));var q=quality(selected.quality,pref.quality);
+                prepare(g,data,selected,q,function(url){
+                    var result={provider:'Alloha',url:url,headers:mediaHeaders(g),quality:{},voiceovers:[],tracks:[],subtitles:[],transport:'HLS'};
+                    function alive(){return !g.closed && session===g;}
+                    function captions(){result.subtitles=subtitles(data).map(function(t){var u=new URL(t.url);u.searchParams.set('t',g.guard);u.searchParams.set('b',g.fingerprint);t.url=u.href;return t;});}
+                    function report(e){g.busy=false;last={phase:'error',error:e.message};if(alive()&&core.notify)core.notify(e.message);}
+                    function fill(){
+                        result.quality={};Object.keys(selected.quality).forEach(function(label){result.quality[label]={url:label===q?result.url:'',call:function(item,done){
+                            if(!alive()||g.busy)return;g.busy=true;prepare(g,data,selected,label,function(next){if(!alive())return;g.busy=false;q=label;pref.quality=q;result.url=next;done(next);},report);
+                        }};});
+                    }
+                    function commit(){pref.name=selected.name;pref.ordinal=selected.ordinal;pref.quality=q;captions();fill();last={phase:'ready',voices:list.length,qualities:Object.keys(selected.quality)};}
+                    commit();
+                    function switchTo(nextData,v,index) {
+                        var nextQ=quality(v.quality,q);
+                        prepare(g,nextData,v,nextQ,function(next){if(!alive())return;g.busy=false;data=nextData;selected=v;q=nextQ;result.url=next;commit();result.voiceovers.forEach(function(t){t.selected=t.index===index;});
+                            if(Lampa.PlayerPanel){if(Lampa.PlayerPanel.setTracks)Lampa.PlayerPanel.setTracks(result.voiceovers);if(Lampa.PlayerPanel.quality)Lampa.PlayerPanel.quality(result.quality,next);if(Lampa.PlayerPanel.listener)Lampa.PlayerPanel.listener.send('quality',{name:q,url:next});}
+                        },report);
+                    }
+                    var options=c.type==='movie'?entries:list;
+                    result.voiceovers=options.map(function(v,index){return {index:index,language:v.label,label:'',selected:c.type==='movie'?v.id===record.id:v===selected,onSelect:function(){
+                        if(!alive()||g.busy)return;g.busy=true;
+                        if(c.type!=='movie')return switchTo(data,v,index);
+                        // Renew HTML challenge before another API request on all bridge types.
+                        catalog(g,req,function(fresh){
+                            var entry=records(fresh).filter(function(e){return e.id===v.id;})[0];
+                            if(!entry)return report(error('озвучка','выбранная запись больше недоступна'));
+                            api(g,entry,function(nextData){var nextList=voices(nextData,entry,true),voice=pickVoice(nextList,null);if(!voice)return report(error('озвучка','поток отсутствует'));switchTo(nextData,voice,index);},report);
+                        },report);
+                    }};});
+                    ok(result);
+                },bad);
+            },bad);},bad);});
+        },bad);
+    };
+    this.cleanup=function(){close(session);session=null;probes.forEach(close);probes=[];if(core.hlsRouter)core.hlsRouter.unregister('alloha');last={phase:'idle'};};
+    this.diagnostics=function(){return {adapter:'AllohaAdapter',experimental:true,session:last,voice:pref.name,quality:pref.quality};};
+    this.quality=function(){return {auto:false,manual:true};};this.audio=function(r){return r.voiceovers||[];};this.subtitles=function(r){return r.subtitles||[];};
+}
+/* ADAPTER:ALLOHA:END */
+global.MnogoTVAllohaAdapter=AllohaAdapter;
+})(window);
+
 (function (global) {
     'use strict';
 
-    var VERSION = '5.2.3-turbo';
+    var VERSION = '5.3.0-alloha';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4283,7 +4569,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
 
     function Component(object) {
         var provider = object.provider || 'collaps';
-        var providerTitle = provider === 'turbo' ? 'Turbo' : provider === 'veoveo' ? 'VeoVeo' : 'Collaps';
+        var providerTitle = provider === 'alloha' ? 'Alloha' : provider === 'turbo' ? 'Turbo' : provider === 'veoveo' ? 'VeoVeo' : 'Collaps';
         var adapter = adapters[provider] || adapters.collaps;
         var movie = object.movie || {};
         var source = object.source;
@@ -4302,7 +4588,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         var zone = 'bar', rowIndex = 0, buttonIndex = 0;
         var root = $('<div class="mnogotv-v5"></div>');
         var bar = $('<div class="mnogotv-v5__bar"></div>');
-        var sourceButton = $('<div class="mnogotv-v5__pill selector"></div>').text(source ? 'Источник: ' + (provider === 'turbo' ? 'Turbo-HLS' : provider === 'veoveo' ? 'VeoVeo-HLS' : 'Collaps-' + formatMode.toUpperCase()) : 'Источник: выберите');
+        var sourceButton = $('<div class="mnogotv-v5__pill selector"></div>').text(source ? 'Источник: ' + (provider === 'alloha' ? 'Alloha-HLS' : provider === 'turbo' ? 'Turbo-HLS' : provider === 'veoveo' ? 'VeoVeo-HLS' : 'Collaps-' + formatMode.toUpperCase()) : 'Источник: выберите');
         var playerButton = $('<div class="mnogotv-v5__pill selector">Плеер: встроенный</div>');
         var seasonButton = $('<div class="mnogotv-v5__pill selector">Сезон 1</div>');
         
@@ -4470,7 +4756,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
                         if (currentPlayback === adapter) currentPlayback = null;
                     }
                     provider = item.provider; adapter = adapters[provider];
-                    providerTitle = provider === 'turbo' ? 'Turbo' : provider === 'veoveo' ? 'VeoVeo' : 'Collaps';
+                    providerTitle = provider === 'alloha' ? 'Alloha' : provider === 'turbo' ? 'Turbo' : provider === 'veoveo' ? 'VeoVeo' : 'Collaps';
                     source = nextSource; imdb = id; formatMode = item.mode;
                     var saved = providerViews[provider];
                     voice = saved ? saved.voice : {index:-1,label:'Авто'};
@@ -4570,7 +4856,8 @@ body.mnogotv-v5-page .head{background:transparent!important}
             {title:'Collaps-AV1', provider:'collaps', mode:'av1'},
             {title:'Collaps-VP9', provider:'collaps', mode:'vp9'},
             {title:'VeoVeo-HLS', provider:'veoveo', mode:'hls'},
-            {title:'Turbo-HLS', provider:'turbo', mode:'hls'}
+            {title:'Turbo-HLS', provider:'turbo', mode:'hls'},
+            {title:'Alloha-HLS (тест)', provider:'alloha', mode:'hls'}
         ];
         items.forEach(function(item) {
             item.selected = item.provider === options.provider && item.mode === options.mode;
@@ -4611,7 +4898,8 @@ body.mnogotv-v5-page .head{background:transparent!important}
                             provider:item.provider, formatMode:item.mode,
                             movie:movie, imdb:id, source:source, page:1, noinfo:true});
                     }
-                    if (item.provider === 'turbo') checkTurboSource(id, ready, failed);
+                    if (item.provider === 'alloha') checkAllohaSource(id, ready, failed);
+                    else if (item.provider === 'turbo') checkTurboSource(id, ready, failed);
                     else if (item.provider === 'veoveo') checkVeoSource(id, ready, failed);
                     else findCollapsSource(id, function(source) {
                         if (!alive()) return;
@@ -4658,17 +4946,33 @@ body.mnogotv-v5-page .head{background:transparent!important}
         },function(){fail(new Error('Turbo: не удалось получить список источников'));});
     }
 
+    function checkAllohaSource(imdb, ok, fail) {
+        requestJson(resolverUrl('/sources',{imdb:imdb}),function(response){
+            var found = null;
+            (response && Array.isArray(response.sources) ? response.sources : []).some(function(source){
+                if (String(source && source.type || '').trim().toLowerCase() === 'alloha') { found=source; return true; }
+                return false;
+            });
+            if (!found) return fail(new Error('Alloha: источник не найден для этого видео'));
+            var source={};Object.keys(found).forEach(function(k){source[k]=found[k];});
+            adapters.alloha.availability({source:source,imdb:imdb},function(available){
+                if(available)ok(source);else fail(new Error('Alloha: доступное видео не найдено'));
+            },fail);
+        },function(){fail(new Error('Alloha: не удалось получить список источников'));});
+    }
+
     function start() {
         if (!global.Lampa || !Lampa.Listener || !Lampa.Player || !global.MnogoTVCollapsAdapter || !global.MnogoTVVeoVeoAdapter || !global.MnogoTVTurboAdapter) return setTimeout(start, 500);
         adapter = new global.MnogoTVCollapsAdapter(core);
         adapters.collaps = adapter;
         adapters.veoveo = new global.MnogoTVVeoVeoAdapter(core);
         adapters.turbo = new global.MnogoTVTurboAdapter(core);
+        if (global.MnogoTVAllohaAdapter) adapters.alloha = new global.MnogoTVAllohaAdapter(core);
         register();
         installNextEpisodeHint();
         installPlayerAutoHide();
         Lampa.Listener.follow('full', addButton);
-        global.__mnogotv_v5_diagnostics = function () { return { version: VERSION, core: core.hlsRouter.diagnostics(), collaps: adapter.diagnostics(), veoveo: adapters.veoveo.diagnostics(), turbo: adapters.turbo.diagnostics() }; };
+        global.__mnogotv_v5_diagnostics = function () { return { version: VERSION, core: core.hlsRouter.diagnostics(), collaps: adapter.diagnostics(), veoveo: adapters.veoveo.diagnostics(), turbo: adapters.turbo.diagnostics(), alloha: adapters.alloha ? adapters.alloha.diagnostics() : null }; };
         notify('MnogoTV v' + VERSION);
         log('started', { resolver: CONFIG.resolver });
     }
