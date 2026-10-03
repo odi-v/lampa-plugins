@@ -1,4 +1,4 @@
-/* MnogoTV/Lampa 5.3.3-alloha | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+/* MnogoTV/Lampa 5.3.4-alloha | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
 (function (global) {
     'use strict';
 
@@ -4223,7 +4223,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.3-alloha';
+    var VERSION = '5.3.4-alloha';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4747,7 +4747,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
             var year = String(movie.release_date || movie.first_air_date || '').slice(0, 4);
             facts.append($('<div></div>').text([year, (movie.origin_country || []).join(', ')].filter(Boolean).join(' • ')));
             if (Number(movie.vote_average) > 0) facts.append($('<div class="mnogotv-v5__rating"></div>').text('★ ' + Number(movie.vote_average).toFixed(1)));
-            facts.append($('<div class="mnogotv-v5__provider"></div>').text(source ? 'MnogoTV • ' + providerTitle : 'MnogoTV-test'));
+            facts.append($('<div class="mnogotv-v5__provider"></div>').text(source ? 'MnogoTV • ' + providerTitle : 'MnogoTV'));
             identity.append(facts); side.append(identity);
             side.append($('<h2 class="mnogotv-v5__title"></h2>').text(titleOf(movie)));
             side.append($('<div class="mnogotv-v5__genres"></div>').text((movie.genres || []).map(function (g) { return g.name; }).filter(Boolean).join(', ')));
@@ -4962,9 +4962,9 @@ body.mnogotv-v5-page .head{background:transparent!important}
         if (!page || !page.length || page.find('.mnogotv-v5-button').length) return;
         var movie = e.data && e.data.movie || e.movie || e.object && e.object.card || {};
         // The launcher never depends on resolver availability or a provider probe.
-        var button = $('<div class="full-start__button selector view--online mnogotv-v5-button" data-subtitle="MnogoTV-test"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 8L17 12L10 16Z" fill="currentColor"/></svg><span>MnogoTV-test</span></div>');
+        var button = $('<div class="full-start__button selector view--online mnogotv-v5-button" data-subtitle="MnogoTV"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 8L17 12L10 16Z" fill="currentColor"/></svg><span>MnogoTV</span></div>');
         button.on('hover:enter click', function () {
-            Lampa.Activity.push({title:'MnogoTV-test',component:COMPONENT,movie:movie,page:1,noinfo:true});
+            Lampa.Activity.push({title:'MnogoTV',component:COMPONENT,movie:movie,page:1,noinfo:true});
         });
         var box = page.find('.full-start-new__buttons, .full-start__buttons').first();
         var torrent = page.find('.view--torrent').first();
@@ -4975,18 +4975,18 @@ body.mnogotv-v5-page .head{background:transparent!important}
         options = options || {};
         var serial = 0, closed = false, menuVisible = true;
         var items = [
+            {title:'Alloha-HLS (тест)', provider:'alloha', mode:'hls'},
+            {title:'Turbo-HLS', provider:'turbo', mode:'hls'},
+            {title:'VeoVeo-HLS', provider:'veoveo', mode:'hls'},
             {title:'Collaps-HLS', provider:'collaps', mode:'hls'},
             {title:'Collaps-AV1', provider:'collaps', mode:'av1'},
-            {title:'Collaps-VP9', provider:'collaps', mode:'vp9'},
-            {title:'VeoVeo-HLS', provider:'veoveo', mode:'hls'},
-            {title:'Turbo-HLS', provider:'turbo', mode:'hls'},
-            {title:'Alloha-HLS (тест)', provider:'alloha', mode:'hls'}
+            {title:'Collaps-VP9', provider:'collaps', mode:'vp9'}
         ];
         items.forEach(function(item) {
             item.selected = item.provider === options.provider && item.mode === options.mode;
         });
         Lampa.Select.show({
-            title: 'MnogoTV-test — источники', items: items,
+            title: 'MnogoTV — источники', items: items,
             onBack: function () {
                 // Select.close also invokes onBack during a programmatic close.
                 if (!menuVisible) return;
@@ -5017,7 +5017,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
                         if (!alive()) return;
                         close();
                         if (options.onReady) { options.onReady(item, source, id); return; }
-                        Lampa.Activity.push({title:'MnogoTV-test', component:COMPONENT,
+                        Lampa.Activity.push({title:'MnogoTV', component:COMPONENT,
                             provider:item.provider, formatMode:item.mode,
                             movie:movie, imdb:id, source:source, page:1, noinfo:true});
                     }
