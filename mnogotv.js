@@ -10,7 +10,7 @@ function render(){
  document.body.appendChild(panel);}
  var l=g.Lampa||{},platform='не определена';
  try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
- panel.textContent='MnogoTV LG-d1 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ panel.textContent='MnogoTV LG-d2 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
  '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
  '\n'+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
 }
@@ -4281,7 +4281,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.4-lg-d1';
+    var VERSION = '5.3.4-lg-d2';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4776,7 +4776,12 @@ body.mnogotv-v5-page .head{background:transparent!important}
         var diagnosticButton = $('<div class="mnogotv-v5__pill selector"></div>');
         function diagnosticLabel() { diagnosticButton.text('Диагностика: ' + (global.MnogoTVDiagnostics === true ? 'вкл' : 'выкл')); }
         diagnosticLabel();
-        diagnosticButton.on('hover:enter click', function () {
+        var diagnosticLastEvent = '', diagnosticLastTime = 0;
+        diagnosticButton.on('hover:enter click', function (event) {
+            var now = Date.now(), eventType = event && event.type || '';
+            if (diagnosticLastEvent && diagnosticLastEvent !== eventType && now - diagnosticLastTime < 500) return;
+            diagnosticLastEvent = eventType;
+            diagnosticLastTime = now;
             global.MnogoTVDiagnostics = global.MnogoTVDiagnostics !== true;
             diagnosticLabel();
             global.MnogoTVLGRefresh();
@@ -4986,6 +4991,9 @@ body.mnogotv-v5-page .head{background:transparent!important}
             if (art && Lampa.Background && Lampa.Background.change) Lampa.Background.change(art);
             if (!initialized) {
                 initialized = true; addCss();
+                global.MnogoTVDiagnostics = true;
+                diagnosticLabel();
+                global.MnogoTVLGRefresh();
                 bar.append(sourceButton);
                 if (isSeries(movie)) bar.append(seasonButton); else seasonButton.hide();
                 bar.append(playerButton).append(diagnosticButton);
