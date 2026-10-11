@@ -10,7 +10,7 @@ function render(){
  document.body.appendChild(panel);}
  var l=g.Lampa||{},platform='не определена';
  try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
- panel.textContent='MnogoTV LG-d2 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ panel.textContent='MnogoTV LG-d3 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
  '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
  '\n'+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
 }
@@ -3649,6 +3649,9 @@ g.MnogoTVLGNetwork=function(provider){
         }
         function request(g, url, ok, fail, phase) {
             phase = phase || 'HLS';
+            var lgRelay = Lampa.Platform && Lampa.Platform.is('webos');
+            var upstreamUrl = url;
+            if (lgRelay) url = core.lgTurboUrl(upstreamUrl, phase === 'страница', g.embed || upstreamUrl);
             var headers = {
                 'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36',
                 'Accept': phase === 'страница' ? 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8' : '*/*',
@@ -3664,6 +3667,14 @@ g.MnogoTVLGNetwork=function(provider){
                 if(ended || g.closed)return;ended=true;clearTimeout(slot.timer);
                 g.requests=g.requests.filter(function(x){return x!==slot;});
                 if(error)return fail(error);
+                if (lgRelay) {
+                    var envelope;
+                    try { envelope = typeof text === 'string' ? JSON.parse(text) : text; } catch(e) {}
+                    if (!envelope || envelope.ok !== true || typeof envelope.body !== 'string' || !address(envelope.currentUrl)) {
+                        return fail(new Error('Turbo • LG relay • ' + (envelope && envelope.error || 'неверный ответ; обновите Worker')));
+                    }
+                    return ok(envelope.body, phase === 'страница' ? '' : envelope.currentUrl);
+                }
                 var meta = null;
                 if (phase !== 'страница') {
                     try { meta = typeof text === 'string' && /^\s*\{/.test(text) ? JSON.parse(text) : text; } catch(e) {}
@@ -3683,7 +3694,7 @@ g.MnogoTVLGNetwork=function(provider){
                 if(!method)throw new Error('network');
                 method.call(net,url,function(text){done(null,text);},function(e){
                     var status=Number(e && e.status);done(error(status>=100 && status<=599?'HTTP '+status:'нет ответа сети'));
-                },false,{dataType:'text',headers:headers,returnHeaders:phase !== 'страница'});
+                },false,{dataType:'text',headers:lgRelay ? {} : headers,returnHeaders:lgRelay ? false : phase !== 'страница'});
             }catch(e){done(error('запрос не выполнен'));}
         }
         function parse(html) {
@@ -3732,6 +3743,7 @@ g.MnogoTVLGNetwork=function(provider){
             var url=address(req.source && req.source.iframeUrl);
             if(!url)return fail(new Error('Turbo: iframe отсутствует'));
             g.origin = new URL(url).origin;
+            g.embed = url;
             request(g,url,function(html){
                 var data;try{data=parse(html);}catch(e){return fail(new Error('Turbo: не удалось разобрать конфигурацию провайдера'));}
                 ok(data,url);
@@ -4281,7 +4293,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.4-lg-d2';
+    var VERSION = '5.3.4-lg-d3';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4495,6 +4507,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
     }
 
     var core = {
+        lgTurboUrl: function(url, page, ref) { return resolverUrl('/lg/turbo', {url:url,kind:page?'page':'hls',ref:ref}); },
         version: VERSION,
         resolverUrl: resolverUrl,
         requestJson: requestJson,
