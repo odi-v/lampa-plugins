@@ -1,492 +1,280 @@
-(function () {
+(function(g){
+'use strict';
+var rows=[],panel=null,seq=0;
+function supported(type){try{return !!(g.MediaSource&&g.MediaSource.isTypeSupported(type));}catch(e){return false;}}
+function render(){
+ if(!g.MnogoTVDiagnostics){if(panel&&panel.parentNode)panel.parentNode.removeChild(panel);panel=null;return;}
+ if(!document.body)return;
+ if(!panel){panel=document.createElement('div');panel.id='mnogotv-lg-network';
+ panel.style.cssText='position:fixed;left:3%;top:14%;max-width:92%;z-index:2147483646;background:rgba(0,0,0,.88);color:white;font:20px/1.4 sans-serif;padding:12px 16px;white-space:pre-wrap;pointer-events:none;';
+ document.body.appendChild(panel);}
+ var l=g.Lampa||{},platform='не определена';
+ try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
+ panel.textContent='MnogoTV LG-d1 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
+ '\n'+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
+}
+g.MnogoTVLGRefresh=render;
+g.MnogoTVLGNetwork=function(provider){
+ var real=g.Lampa,local=Object.create(real);
+ function wrap(Original){
+  if(typeof Original!=='function')return Original;
+  return function(){
+   var net=new Original(),active=[];
+   ['native','silent'].forEach(function(method){
+    if(typeof net[method]!=='function')return;
+    var original=net[method];
+    net[method]=function(url,ok,fail,post,options){
+     var host='?',kind=options&&options.dataType||'default';
+     try{host=new URL(url).hostname;}catch(e){}
+     var r={id:++seq,provider:provider,method:method,kind:kind,host:host,state:'запрос',ms:0,info:''},start=Date.now(),ended=false;
+     rows.push(r);if(rows.length>4)rows.shift();active.push(r);render();
+     function finish(state,value){
+      if(ended)return;ended=true;r.state=state;r.ms=Date.now()-start;
+      active=active.filter(function(x){return x!==r;});
+      if(state==='получен'){
+       var text=typeof value==='string'?value:'';
+       r.info=typeof value+'; '+text.length+' симв.';
+       if(/^\s*#EXTM3U/.test(text))r.info+='; M3U8';
+       else if(/^\s*</.test(text))r.info+='; HTML/XML';
+       else if(/^\s*[{[]/.test(text))r.info+='; JSON/обёртка';
+      }
+      render();
+     }
+     var args=[url,function(value){finish('получен',value);if(ok)return ok.apply(this,arguments);},
+     function(value){finish('ошибка HTTP '+(value&&value.status||'?'));if(fail)return fail.apply(this,arguments);},post,options];
+     try{return original.apply(net,args);}catch(e){finish('исключение');throw e;}
+    };
+   });
+   var clear=net.clear;
+   if(typeof clear==='function')net.clear=function(){active.forEach(function(r){r.state='отменён';});active=[];render();return clear.apply(net,arguments);};
+   return net;
+  };
+ }
+ local.Reguest=wrap(real.Reguest);local.Request=wrap(real.Request);
+ return local;
+};
+})(window);
+
+/* MnogoTV/Lampa 5.3.4-alloha | CollapsAdapter SHA-256: f1a8f57a0c815fdc5657b7e8ca53e8f20779902a172c09a682181d2783a53ca1 */
+(function (global) {
     'use strict';
 
-    var VERSION = '3.20.8';
-    var PLUGIN_ID = 'mnogotv_v318';
-    var COMPONENT = 'mnogotv_v318_component';
-    var DEFAULT_RESOLVER = 'https://mnogotv-relay.odi-84v.workers.dev';
-
-    if (window[PLUGIN_ID]) return;
-    window[PLUGIN_ID] = true;
-
-    var cache = {
-        collaps: {},
-        veoCatalog: {},
-        veoMovieId: {},
-        hlsMeta: {},
-        ids: {},
-        sources: {}
-    };
-
-    function log() {
-        try { console.log.apply(console, ['[MnogoTV ' + VERSION + ']'].concat([].slice.call(arguments))); } catch (e) {}
-    }
-
-    function notify(text) {
-        try {
-            if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show(text);
-        } catch (e) {}
-    }
-
-    function errText(err) {
-        if (!err) return 'неизвестная ошибка';
-        if (typeof err === 'string') return err;
-        if (err.message) return err.message;
-        try { return JSON.stringify(err); } catch (e) {}
-        return 'ошибка';
-    }
-
-    function getConfig() {
-        var cfg = { resolver: DEFAULT_RESOLVER };
-
-        try {
-            var script = document.currentScript;
-            var src = script && script.src ? script.src : '';
-            if (src) {
-                var u = new URL(src, window.location.href);
-                var custom = String(u.searchParams.get('resolver') || '').trim();
-                if (custom) cfg.resolver = custom;
-            }
-        } catch (e) {}
-
-        try {
-            if (Lampa.Storage) {
-                var saved = String(Lampa.Storage.get('mnogotv_resolver') || '').trim();
-                if (saved) cfg.resolver = saved;
-            }
-        } catch (e2) {}
-
-        cfg.resolver = String(cfg.resolver || '').replace(/\/+$/, '');
-        return cfg;
-    }
-
-    var CONFIG = getConfig();
-
-    function resolverUrl(path, params) {
-        var url = CONFIG.resolver + path;
-        var q = [];
-        Object.keys(params || {}).forEach(function (k) {
-            var v = params[k];
-            if (v !== undefined && v !== null && v !== '') q.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
-        });
-        return url + (q.length ? '?' + q.join('&') : '');
-    }
-
-    function requestJson(url, ok, fail) {
-        function parseResponse(r) {
-            return r.text().then(function (text) {
-                var data = null;
-                try { data = text ? JSON.parse(text) : {}; } catch (e) {
-                    if (!r.ok) throw new Error('HTTP ' + r.status);
-                    throw new Error('invalid json');
-                }
-
-                if (!r.ok) throw new Error((data && (data.error || data.message)) || ('HTTP ' + r.status));
-                if (data && data.ok === false) throw new Error(data.error || 'ошибка');
-                return data;
-            });
-        }
-
-        if (typeof fetch === 'function') {
-            var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-            var timer = setTimeout(function () {
-                try { if (controller) controller.abort(); } catch (e) {}
-            }, 15000);
-
-            fetch(url, {
-                method: 'GET',
-                cache: 'no-store',
-                credentials: 'omit',
-                signal: controller ? controller.signal : undefined
-            }).then(function (r) {
-                clearTimeout(timer);
-                return parseResponse(r);
-            }).then(ok).catch(function (e) {
-                clearTimeout(timer);
-                fallback(e);
-            });
-            return;
-        }
-
-        fallback(new Error('fetch unavailable'));
-
-        function fallback(initialErr) {
-            var network = null;
-            try { network = new Lampa.Reguest(); } catch (e) {
-                try { network = new Lampa.Request(); } catch (e2) {}
-            }
-
-            if (!network) {
-                fail(initialErr || new Error('network unavailable'));
-                return;
-            }
-
-            function done(data) {
-                try {
-                    if (typeof data === 'string') data = JSON.parse(data);
-                } catch (e) {
-                    fail(e);
-                    return;
-                }
-
-                if (data && data.ok === false) {
-                    fail(new Error(data.error || 'ошибка'));
-                    return;
-                }
-                ok(data);
-            }
-
-            function bad(a, c) {
-                var msg = initialErr || a || c || 'network error';
-                fail(typeof msg === 'string' ? new Error(msg) : msg);
-            }
-
-            try {
-                if (typeof network.native === 'function') {
-                    network.timeout(15000);
-                    network.native(url, done, bad, false, { dataType: 'json' });
-                    return;
-                }
-            } catch (e3) {}
-
-            try {
-                if (typeof network.silent === 'function') {
-                    network.timeout(15000);
-                    network.silent(url, done, bad, false, { dataType: 'json' });
-                    return;
-                }
-            } catch (e4) {}
-
-            fail(initialErr || new Error('request failed'));
-        }
-    }
-
-    function tmdbId(movie) {
-        if (!movie) return '';
-        var source = movie.source || 'tmdb';
-        var id = (source === 'tmdb' || source === 'cub') ? movie.id : (movie.tmdb_id || movie.id);
-        id = String(id === undefined || id === null ? '' : id).trim();
-        return /^\d+$/.test(id) ? id : '';
-    }
-
-    function isSeries(movie) {
-        return !!(movie && (movie.media_type === 'tv' || movie.number_of_seasons || movie.first_air_date || movie.name || movie.original_name));
-    }
-
-    function titleOf(movie) {
-        return (movie && (movie.title || movie.name || movie.original_title || movie.original_name)) || 'MnogoTV';
-    }
-
-    function episodeDate(raw) {
-        if (!raw) return 'Неизвестно';
-        try {
-            var p = String(raw).split('-');
-            if (p.length === 3) {
-                var months = ['Января','Февраля','Марта','Апреля','Мая','Июня','Июля','Августа','Сентября','Октября','Ноября','Декабря'];
-                return parseInt(p[2], 10) + ' ' + (months[parseInt(p[1], 10) - 1] || p[1]);
-            }
-        } catch (e) {}
-        return String(raw);
-    }
-
-    function episodeImage(ep) {
-        try {
-            if (ep && ep.still_path && Lampa.TMDB && Lampa.TMDB.image) {
-                return Lampa.TMDB.image('t/p/w300' + ep.still_path);
-            }
-        } catch (e) {}
-        return '';
-    }
-
-
-    function episodeRuntime(ep, movie) {
-        var minutes = parseInt(ep && ep.runtime, 10);
-
-        if (!minutes && movie && Array.isArray(movie.episode_run_time)) {
-            minutes = parseInt(movie.episode_run_time[0], 10);
-        }
-
-        if (!minutes || minutes < 1) return '—';
-
-        var h = Math.floor(minutes / 60);
-        var m = minutes % 60;
-
-        if (h > 0) {
-            return ('0' + h).slice(-2) + ':' + ('0' + m).slice(-2);
-        }
-
-        return '00:' + ('0' + m).slice(-2);
-    }
-
-
-    function movieImage(movie) {
-        try {
-            if (movie && movie.backdrop_path && Lampa.TMDB && Lampa.TMDB.image) {
-                return Lampa.TMDB.image('t/p/w500' + movie.backdrop_path);
-            }
-            if (movie && movie.poster_path && Lampa.TMDB && Lampa.TMDB.image) {
-                return Lampa.TMDB.image('t/p/w300' + movie.poster_path);
-            }
-        } catch (e) {}
-        return '';
-    }
-
-    function extractOverviewFromFull(root) {
-        var best = '';
-
-        try {
-            if (!root || !root.length) return '';
-
-            root.find(
-                '[class*="description"],' +
-                '[class*="overview"],' +
-                '[class*="descr"]'
-            ).each(function () {
-                var node = $(this);
-                var text = String(node.text() || '')
-                    .replace(/\s+/g, ' ')
-                    .trim();
-
-                /*
-                 * Берём именно абзац описания, а не половину страницы.
-                 */
-                if (
-                    text.length >= 60 &&
-                    text.length <= 5000 &&
-                    text.length > best.length
-                ) {
-                    best = text;
-                }
-            });
-        } catch (e) {}
-
-        return best;
-    }
-
-    function sourceType(source) {
-        return String(
-            source && source.type || ''
-        ).toLowerCase();
-    }
-
-    function isWebProviderSource(source) {
-        var type = sourceType(source);
-
-        return (
-            type === 'alloha' ||
-            type === 'turbo'
-        );
-    }
-
-    function appendUrlParams(url, params) {
-        url = String(url || '').trim();
-
-        if (!url) return '';
-
-        try {
-            var u = new URL(url, window.location.href);
-
-            Object.keys(params || {}).forEach(function (key) {
-                var value = params[key];
-
-                if (
-                    value !== undefined &&
-                    value !== null &&
-                    value !== ''
-                ) {
-                    u.searchParams.set(
-                        key,
-                        String(value)
-                    );
-                }
-            });
-
-            return u.toString();
-        } catch (e) {
-            return url;
-        }
-    }
-
-    function getImdb(movie, ok, fail) {
-        var direct = movie && (movie.imdb_id || (movie.external_ids && movie.external_ids.imdb_id));
-        if (direct && /^tt\d+$/i.test(String(direct))) {
-            ok(String(direct));
-            return;
-        }
-
-        var id = tmdbId(movie);
-        if (!id) {
-            fail(new Error('TMDB ID не найден'));
-            return;
-        }
-
-        try {
-            Lampa.Api.sources.tmdb.get(
-                (isSeries(movie) ? 'tv/' : 'movie/') + id + '/external_ids',
-                {},
-                function (data) {
-                    var imdb = data && data.imdb_id;
-                    if (imdb && /^tt\d+$/i.test(String(imdb))) ok(String(imdb));
-                    else fail(new Error('IMDb ID не найден'));
-                },
-                function (e) { fail(e || new Error('TMDB external_ids недоступен')); }
-            );
-        } catch (e2) { fail(e2); }
-    }
-
-    function getSeasons(movie, ok, fail) {
-        var arr = [];
-        if (movie && Array.isArray(movie.seasons)) {
-            movie.seasons.forEach(function (s) {
-                var n = parseInt(s && s.season_number, 10);
-                if (n > 0) arr.push(n);
-            });
-        }
-        if (arr.length) { ok(arr); return; }
-
-        var count = parseInt(movie && movie.number_of_seasons, 10);
-        if (count > 0) {
-            for (var i = 1; i <= count; i++) arr.push(i);
-            ok(arr);
-            return;
-        }
-
-        try {
-            Lampa.Api.sources.tmdb.get('tv/' + tmdbId(movie), {}, function (data) {
-                var seasons = [];
-                (data && data.seasons || []).forEach(function (s) {
-                    var n = parseInt(s.season_number, 10);
-                    if (n > 0) seasons.push(n);
-                });
-                if (seasons.length) ok(seasons);
-                else fail(new Error('Сезоны не найдены'));
-            }, fail);
-        } catch (e) { fail(e); }
-    }
-
-    function getEpisodes(movie, season, ok, fail) {
-        var id = tmdbId(movie);
-        if (!id) { fail(new Error('TMDB ID не найден')); return; }
-
-        try {
-            Lampa.Api.sources.tmdb.get('tv/' + id + '/season/' + season, {}, function (data) {
-                var episodes = data && data.episodes || [];
-                if (episodes.length) ok(episodes);
-                else fail(new Error('Серии не найдены'));
-            }, fail);
-        } catch (e) { fail(e); }
-    }
-
-    function getSources(imdb, ok, fail) {
-        imdb = String(imdb || '');
-
-        if (
-            imdb &&
-            cache.sources[imdb]
-        ) {
-            ok(
-                cache.sources[imdb]
-            );
-            return;
-        }
-
-        requestJson(
-            resolverUrl(
-                '/sources',
-                {
-                    imdb: imdb
-                }
-            ),
-            function (response) {
-                var sources =
-                    response &&
-                    response.sources ||
-                    [];
-
-                if (!Array.isArray(sources)) {
-                    sources = [];
-                }
-
-                sources.forEach(function (s) {
-                    var type =
-                        String(
-                            s &&
-                            s.type ||
-                            ''
-                        ).toLowerCase();
-
-                    /*
-                     * Стабильные на этой приставке:
-                     * - VeoVeo: direct HLS
-                     * - Alloha: web-player
-                     *
-                     * Turbo iframe открывается, но не управляется пультом
-                     * и самостоятельно выбирает сезон/эпизод.
-                     *
-                     * Collaps теперь идёт через media relay:
-                     * Worker подставляет playback headers и переписывает
-                     * вложенные HLS playlist/key/segment URL.
-                     */
-                    s.experimental =
-                        type === 'turbo';
-
-                    s.supported =
-                        type === 'alloha' ||
-                        type === 'collaps' ||
-                        type === 'veoveo' ||
-                        type === 'veo' ||
-                        type.indexOf('veoveo') >= 0;
-
-                    s.webPlayer =
-                        type === 'alloha';
-
-                    s.preferred =
-                        type === 'veoveo' ||
-                        type === 'veo' ||
-                        type.indexOf('veoveo') >= 0;
-
-                    s.lookupBackend =
-                        response &&
-                        response.backend ||
-                        '';
-
-                    s.kinopoiskId =
-                        response &&
-                        response.kp ||
-                        '';
-
-                    if (
-                        s.kinopoiskId
-                    ) {
-                        cache.ids[imdb] =
-                            String(
-                                s.kinopoiskId
-                            );
-                    }
-                });
-
-                if (imdb) {
-                    cache.sources[imdb] =
-                        sources;
-                }
-
-                ok(sources);
-            },
-            fail
-        );
-    }
-
-
-    var VEO_UA =
-        'Mozilla/5.0 (Linux; Android 10; SmartTV) ' +
-        'AppleWebKit/537.36 Chrome/120 Safari/537.36';
-
-    function nativeJson(url, headers, ok, fail) {
+    /* ADAPTER:COLLAPS:BEGIN */
+    function CollapsAdapter(core) {
+        var Lampa = global.MnogoTVLGNetwork('Collaps');
+        var cache = { ids: {} };
+        var errText = core.errText;
+        var log = core.log;
+        var notify = core.notify;
+        var requestJson = core.requestJson;
+        var resolverUrl = core.resolverUrl;
+
+        /* COLLAPS_REFERENCE_BLOCK_BEGIN */
+    var COLLAPS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36';
+    var COLLAPS_HOST = 'https://api.ortified.ws';
+    var COLLAPS_REF = COLLAPS_HOST + '/';
+
+    function silentText(url, headers, ok, fail) {
         var network = null;
 
         try {
             network = new Lampa.Reguest();
         } catch (e) {
+            try {
+                network = new Lampa.Request();
+            } catch (e2) {}
+        }
+
+        if (
+            !network ||
+            typeof network.silent !== 'function'
+        ) {
+            fail(
+                new Error(
+                    'Lampa.Reguest.silent недоступен'
+                )
+            );
+            return;
+        }
+
+        try {
+            network.clear();
+            network.timeout(12000);
+
+            network.silent(
+                url,
+                function (str) {
+                    ok(
+                        String(
+                            str ||
+                            ''
+                        )
+                    );
+                },
+                function (a, c) {
+                    var status =
+                        a &&
+                        a.status !== undefined
+                            ? a.status
+                            : '';
+
+                    var message =
+                        status
+                            ? ('HTTP ' + status)
+                            : errText(
+                                a ||
+                                c ||
+                                'network error'
+                            );
+
+                    fail(
+                        new Error(
+                            message
+                        )
+                    );
+                },
+                false,
+                {
+                    dataType: 'text',
+                    headers: headers || {}
+                }
+            );
+        } catch (e3) {
+            fail(e3);
+        }
+    }
+
+    function collapsEmbedNavigationHeaders() {
+        /*
+         * HAR рабочего браузерного Collaps показывает, что embed загружается
+         * как обычная document navigation: desktop UA + HTML Accept, без
+         * Origin/Referer. На Android TV network.silent использует окружение
+         * WebView и может получить другой makePlayer-конфиг, где остаётся
+         * только HLS. Поэтому сначала просим embed через native bridge с
+         * браузероподобными navigation headers.
+         */
+        return {
+            'User-Agent': COLLAPS_UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ru,en;q=0.9',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Upgrade-Insecure-Requests': '1'
+        };
+    }
+
+    function collapsConfigHasDash(cfg, season, episode) {
+        try {
+            var item = pickCollapsItem(cfg, season, episode);
+            if (!item) return false;
+            return !!(
+                item.dasha ||
+                item.dash ||
+                (item.source && (item.source.dasha || item.source.dash))
+            );
+        } catch (e) {}
+        return false;
+    }
+
+    function collapsEmbedConfig(attempt, season, episode, ok, fail) {
+        var nativeError = null;
+        var nativeHtml = '';
+        var nativeCfg = null;
+
+        function trySilent() {
+            silentText(
+                attempt.url,
+                {},
+                function (silentHtml) {
+                    var silentCfg = parseCollapsHtml(silentHtml);
+
+                    /*
+                     * Если desktop/native дал DASH, он всегда приоритетнее.
+                     * Иначе берём silent только если именно он дал DASH или
+                     * native-конфиг вообще не распарсился.
+                     */
+                    if (
+                        nativeCfg &&
+                        collapsConfigHasDash(nativeCfg, season, episode)
+                    ) {
+                        ok(nativeCfg, 'native-desktop');
+                        return;
+                    }
+
+                    if (
+                        silentCfg &&
+                        collapsConfigHasDash(silentCfg, season, episode)
+                    ) {
+                        ok(silentCfg, 'silent-dash');
+                        return;
+                    }
+
+                    if (nativeCfg) {
+                        ok(nativeCfg, 'native-desktop-hls');
+                        return;
+                    }
+
+                    if (silentCfg) {
+                        ok(silentCfg, 'silent-hls');
+                        return;
+                    }
+
+                    fail(
+                        nativeError ||
+                        new Error('Collaps: makePlayer не найден')
+                    );
+                },
+                function (silentError) {
+                    if (nativeCfg) {
+                        ok(
+                            nativeCfg,
+                            collapsConfigHasDash(nativeCfg, season, episode)
+                                ? 'native-desktop'
+                                : 'native-desktop-hls'
+                        );
+                        return;
+                    }
+
+                    fail(
+                        silentError ||
+                        nativeError ||
+                        new Error('Collaps embed недоступен')
+                    );
+                }
+            );
+        }
+
+        nativeText(
+            attempt.url,
+            collapsEmbedNavigationHeaders(),
+            function (html) {
+                nativeHtml = String(html || '');
+                nativeCfg = parseCollapsHtml(nativeHtml);
+
+                /*
+                 * Не делаем второй запрос, если уже получили нужный DASH.
+                 */
+                if (
+                    nativeCfg &&
+                    collapsConfigHasDash(nativeCfg, season, episode)
+                ) {
+                    ok(nativeCfg, 'native-desktop');
+                    return;
+                }
+
+                trySilent();
+            },
+            function (err) {
+                nativeError = err;
+                trySilent();
+            }
+        );
+    }
+
+    function nativeText(url, headers, ok, fail) {
+        var network = null;
+        try { network = new Lampa.Reguest(); } catch (e) {
             try { network = new Lampa.Request(); } catch (e2) {}
         }
 
@@ -498,59 +286,2932 @@
         try {
             network.clear();
             network.timeout(12000);
-
-            network.native(
-                url,
-                function (data) {
-                    try {
-                        if (typeof data === 'string') data = JSON.parse(data);
-                        ok(data);
-                    } catch (e) {
-                        fail(new Error('VeoVeo: invalid JSON'));
-                    }
-                },
-                function (a, c) {
-                    var status =
-                        a && a.status !== undefined
-                            ? a.status
-                            : '';
-
-                    fail(new Error(
-                        status
-                            ? ('HTTP ' + status)
-                            : errText(a || c || 'network error')
-                    ));
-                },
-                false,
-                {
-                    dataType: 'json',
-                    headers: headers || {}
-                }
-            );
+            network.native(url, function (str) {
+                ok(String(str || ''));
+            }, function (a, c) {
+                var status = a && a.status !== undefined ? a.status : '';
+                var message = status ? ('HTTP ' + status) : errText(a || c || 'network error');
+                fail(new Error(message));
+            }, false, {
+                dataType: 'text',
+                headers: headers || {}
+            });
         } catch (e3) {
             fail(e3);
         }
     }
 
-    function veoHeaders(url) {
-        var origin = '';
+    function collapsHeadersFor(url) {
+        var origin = COLLAPS_HOST;
 
         try {
-            origin = new URL(String(url || '')).origin;
+            origin = new URL(String(url || '')).origin || COLLAPS_HOST;
         } catch (e) {}
 
-        var headers = {
-            'User-Agent': VEO_UA
+        return {
+            'User-Agent': COLLAPS_UA,
+            'Origin': origin,
+            'Referer': origin + '/'
         };
-
-        if (origin) {
-            headers.Origin = origin;
-            headers.Referer = origin + '/';
-        }
-
-        return headers;
     }
 
+    function collapsHeaders() {
+        return collapsHeadersFor(COLLAPS_HOST);
+    }
+
+    function parseCollapsHtml(html) {
+        html = String(html || '');
+
+        /*
+         * Collaps загружает media не по URL из makePlayer напрямую.
+         * api.ortified.ws/cdn.js добавляет bare-token fa4cdd5c и затем
+         * переводит запросы .mpd/.webm в /x-en-x/<encoded>.
+         * Эти два значения живут СНАРУЖИ makePlayer, поэтому сохраняем их
+         * рядом с распарсенным конфигом.
+         */
+        var unixMatch = html.match(/unixTime\s*=\s*(\d+)/i);
+        var keyMatch = null;
+        // The variable name changes. Follow the source-URL append expression.
+        var tokenUse = html.match(/\[[^\]\r\n]+\]\s*\+=\s*["']&["']\s*\+\s*([A-Za-z_$][\w$]*)/);
+        var tokenName = tokenUse ? tokenUse[1] : 'fa4cdd5c';
+        var escapedTokenName = tokenName.replace(/[$]/g, '\\$&');
+        var keyRe = new RegExp('\\b' + escapedTokenName + '\\s*=\\s*["\']([0-9a-f]+)["\']', 'ig');
+        var km;
+        while ((km = keyRe.exec(html))) keyMatch = km[1];
+
+        var flat = html.replace(/\n/g, '');
+        var find = flat.match(/makePlayer\(({.*?})\);/);
+        var json = null;
+
+        try {
+            json = find && (0, eval)('"use strict"; (' + find[1] + ');');
+        } catch (e) {}
+
+        if (json) {
+            json.__mnogotvCdn = {
+                unixTime: unixMatch ? parseInt(unixMatch[1], 10) : 0,
+                key: keyMatch || ''
+            };
+        }
+
+        return json;
+    }
+
+    function normalizeDirectUrl(url) {
+        url = String(url || '').trim();
+        if (url.indexOf('//') === 0) url = 'https:' + url;
+        return url;
+    }
+
+    /*
+     * Collaps CDN URLs are issued for the client that loaded the embed.
+     * Cloudflare relay changes the network origin/IP and current interkh.com
+     * answers 424. Build the same /x-en-x/ URL on the device instead.
+     */
+    var COLLAPS_CDN_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+    var COLLAPS_CDN_SUBST = 'DlChEXitLONYRkFjAsnBbymWzSHMqKPgQZpvwerofJTVdIuUcxaG';
+
+    function appendCollapsBareToken(rawUrl, key) {
+        var value = String(rawUrl || '').trim();
+        key = String(key || '').trim();
+        if (!value || !key) return value;
+        if (value.indexOf('&' + key) !== -1 || value.slice(-(key.length + 1)) === '?' + key) return value;
+        return value + (value.indexOf('?') >= 0 ? '&' : '?') + key;
+    }
+
+    function collapsClientCdnUrl(rawUrl, unixTime, key, appendSourceToken) {
+        /*
+         * IMPORTANT: Collaps adds fa4cdd5c only to the TOP-LEVEL source
+         * (hls/dash) before VenomPlayer starts. cdn.js does NOT append this
+         * bare token to child playlists or media fragments. v4.0.7-v4.0.9
+         * appended it to every URI we rewrote, which made the x-en-x request
+         * for the first TS fragment invalid and the CDN answered HTTP 410.
+         */
+        var logical = normalizeDirectUrl(rawUrl);
+        if (appendSourceToken !== false) {
+            logical = appendCollapsBareToken(logical, key);
+        }
+        if (!logical) return '';
+
+        var u;
+        try { u = new URL(logical); } catch (e) { return logical; }
+
+        if (u.pathname.indexOf('/x-en-x/') !== -1) return u.toString();
+
+        var unix = parseInt(unixTime || 0, 10) || 0;
+        if (!unix) return u.toString();
+
+        var hour = Math.round(unix / 3600);
+        var payload = hour + '/' + u.pathname + u.search;
+        var base64 = '';
+
+        try {
+            base64 = btoa(unescape(encodeURIComponent(payload)));
+        } catch (e2) {
+            try { base64 = btoa(payload); } catch (e3) { return u.toString(); }
+        }
+
+        var encoded = '';
+        for (var i = 0; i < base64.length; i++) {
+            var ch = base64.charAt(i);
+            var pos = COLLAPS_CDN_ALPHABET.indexOf(ch);
+            encoded += pos >= 0 ? COLLAPS_CDN_SUBST.charAt(pos) : ch;
+        }
+
+        return u.origin + '/x-en-x/' + encoded;
+    }
+
+    function collapsPlaybackHeaders(format) {
+        return {
+            'User-Agent': COLLAPS_UA,
+            'Origin': COLLAPS_HOST,
+            'Referer': COLLAPS_REF,
+            'Accept': format === 'dash'
+                ? 'application/dash+xml,*/*;q=0.8'
+                : 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*;q=0.8'
+        };
+    }
+
+
+    /*
+     * v4.0.7: Android native HLS loader for Collaps.
+     *
+     * v4.0.6 proved that Lampa.Reguest.native can fetch the signed Collaps
+     * manifest from the device, while Lampa's stock Hls.js XHR then fails
+     * with manifestLoadError. Lampa creates Hls with `new Hls()` and no
+     * custom config, so we install a default loader which only intercepts
+     * Collaps CDN requests. Every other URL falls back to Hls.js' original
+     * loader unchanged.
+     */
+    var COLLAPS_NATIVE_HLS = {
+        generation: 0,
+        rangeRecovery: {paths: {}},
+        installed: false,
+        originalLoader: null,
+        unixTime: 0,
+        key: '',
+        headers: {},
+        urlMap: {},
+        lastRequest: null,
+        lastError: null
+    };
+
+    function stripHash(url) {
+        return String(url || '').split('#')[0];
+    }
+
+    function isCollapsCdnUrl(url) {
+        try {
+            var host = new URL(stripHash(url)).hostname.toLowerCase();
+            return host === 'interkh.com' || host.slice(-12) === '.interkh.com';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function describeNativePayload(value) {
+        var root = value, raw = value, route = [], depth = 0;
+        var status = root && typeof root === 'object' ? Number(root.status || root.statusCode || 0) : 0;
+        while (raw && typeof raw === 'object' && depth++ < 5) {
+            if (Object.prototype.toString.call(raw) === '[object ArrayBuffer]') {
+                return { kind: 'arraybuffer', length: raw.byteLength, route: route.join('.'), status: status };
+            }
+            if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(raw)) {
+                return { kind: 'typed-array', length: raw.byteLength, route: route.join('.'), status: status };
+            }
+            var fields = ['base64', 'data', 'body', 'response', 'result'], field = '';
+            fields.some(function (name) { if (raw[name] !== undefined) { field = name; return true; } return false; });
+            if (!field) return { kind: 'object-without-body', length: 0, route: route.join('.'), status: status };
+            route.push(field); raw = raw[field];
+        }
+        var text = typeof raw === 'string' ? raw : '';
+        var trimmed = text.trim(), kind = typeof raw;
+        if (raw === null || raw === undefined || trimmed === '' && typeof raw === 'string') kind = 'empty';
+        else if (typeof raw === 'string') {
+            if (/^(?:<!doctype|<html|<head|<body|<\?xml)/i.test(trimmed)) kind = 'html-or-xml';
+            else if (/^[{[]/.test(trimmed)) kind = 'json-text';
+            else if (/^https?:\/\//i.test(trimmed)) kind = 'url-text';
+            else if (/^data:/i.test(trimmed)) kind = 'data-url';
+            else if (/^"[A-Za-z0-9+/=\s]+"$/.test(trimmed)) kind = 'quoted-base64';
+            else if (/^[A-Za-z0-9+/\s]*={0,2}$/.test(trimmed)) kind = 'base64-like';
+            else if (/^[A-Za-z0-9_\-\s]*={0,2}$/.test(trimmed)) kind = 'base64url-like';
+            else kind = 'non-base64-text';
+        }
+        // Deliberately omit response text, URLs, tokens and arbitrary object values.
+        return { kind: kind, length: text.length, route: route.join('.') || 'direct', status: status };
+    }
+
+    function nativeJsonDetail(value) {
+        var raw = value, info = { fields: [], error: '', status: 0, parse: 'not-json', preview: '' };
+        function safe(value) {
+            if (typeof value !== 'string' && typeof value !== 'number') return '';
+            return String(value).replace(/[\x00-\x1f\x7f]/g, ' ').replace(/https?:\/\/\S+/gi, '[url]')
+                .replace(/(?:token|key|secret|authorization)[\"'\s]*[:=][\"'\s]*[^,}\s]+/gi, '[redacted]')
+                .replace(/[A-Za-z0-9_\/-]{24,}/g, '[redacted]').slice(0, 140);
+        }
+        for (var depth = 0; depth < 8; depth++) {
+            if (typeof raw === 'string' && /^[\s]*[{"[]/.test(raw)) {
+                try { raw = JSON.parse(raw); info.parse = 'valid'; } catch (e) {
+                    info.parse = 'invalid'; info.preview = safe(raw); break;
+                }
+            }
+            if (Array.isArray(raw)) {
+                info.parse = 'array(' + raw.length + ')';
+                if (raw.length && raw[0] && typeof raw[0] === 'object') { raw = raw[0]; }
+                else { info.preview = safe(raw.slice(0, 3).join(' | ')); break; }
+            }
+            if (!raw || typeof raw !== 'object') {
+                info.preview = safe(raw); break;
+            }
+            info.fields = Object.keys(raw).slice(0, 8).map(function (name) { return safe(name); });
+            var status = Number(raw.status || raw.statusCode || 0);
+            if (status >= 100 && status <= 599) info.status = status;
+            var err = raw.error;
+            var details = err && typeof err === 'object' ? err : raw;
+            var message = typeof err === 'string' ? err : details.message || details.detail || details.reason || details.description || details.code;
+            if (message !== undefined) info.error = safe(message);
+            if (err || raw.success === false || info.status >= 400) break;
+            var next = raw.data !== undefined ? raw.data : raw.body !== undefined ? raw.body :
+                raw.response !== undefined ? raw.response : raw.result;
+            if (next === undefined) break;
+            raw = next;
+        }
+        return info;
+    }
+
+    function nativeDecodeSummary(value, range) {
+        var info = describeNativePayload(value);
+        var detail = nativeJsonDetail(value);
+        info.json = detail;
+        info.range = range ? 'yes' : 'no';
+        // Put the actionable detail first: TV notifications can clip long lines.
+        info.summary = (detail.error ? 'error=' + detail.error + ' · ' : '') +
+            (detail.preview ? 'text=' + detail.preview + ' · ' : '') +
+            'JSON=' + detail.parse + ' · ' + info.kind + ' · len=' + info.length +
+            ' · status=' + (detail.status || info.status || '?') + ' · Range=' + info.range +
+            (detail.fields.length ? ' · fields=' + detail.fields.join(',') : '');
+        return info;
+    }
+
+    function base64ToArrayBuffer(value) {
+        var raw = value;
+        for (var depth = 0; depth < 8; depth++) {
+            if (typeof raw === 'string' && /^[\s]*[{"[]/.test(raw)) {
+                try { raw = JSON.parse(raw); } catch (jsonError) {
+                    throw new Error('Некорректный JSON-ответ native bridge');
+                }
+            }
+            if (Object.prototype.toString.call(raw) === '[object ArrayBuffer]') return raw;
+            if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(raw)) {
+                return raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+            }
+            if (!raw || typeof raw !== 'object') break;
+            if (raw.error || raw.success === false || Number(raw.status || raw.statusCode || 0) >= 400) {
+                throw new Error('Native bridge вернул JSON с ошибкой вместо видеоданных');
+            }
+            raw = raw.base64 !== undefined ? raw.base64 :
+                  raw.data !== undefined ? raw.data :
+                  raw.body !== undefined ? raw.body :
+                  raw.response !== undefined ? raw.response :
+                  raw.result !== undefined ? raw.result : '';
+        }
+        raw = String(raw || '');
+        var comma = raw.indexOf('base64,');
+        if (comma >= 0) raw = raw.slice(comma + 7);
+        raw = raw.replace(/\s+/g, '');
+        if (!raw || !/^[A-Za-z0-9+/]*={0,2}$/.test(raw) || raw.length % 4 === 1) {
+            throw new Error('Ответ native bridge не является Base64-видеофрагментом');
+        }
+        var binary = atob(raw);
+        var out = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i) & 255;
+        return out.buffer;
+    }
+
+    function collapsDashRangeKey(url) {
+        try {
+            var u = new URL(url), path = u.pathname;
+            if (path.indexOf('/x-en-x/') !== -1) {
+                var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+                var subst = 'DlChEXitLONYRkFjAsnBbymWzSHMqKPgQZpvwerofJTVdIuUcxaG';
+                var encoded = path.split('/x-en-x/')[1].replace(/[A-Za-z]/g, function (ch) {
+                    return alphabet.charAt(subst.indexOf(ch));
+                });
+                var logical = atob(encoded);
+                path = logical.slice(logical.indexOf('/') + 1).split('?')[0];
+            }
+            // Learn only numbered media segments; audio/init and other paths stay independent.
+            if (!/\/\d+\.(?:webm|m4s|mp4|ts)$/.test(path)) return '';
+            return u.origin + path.slice(0, path.lastIndexOf('/') + 1);
+        } catch (e) { return ''; }
+    }
+
+    // Per-request recovery for the Android bridge's oversized-response marker.
+    // No provider state is shared and normal successful requests are unchanged.
+    function collapsDashRequest(network, url, complete, fail, post, options, stale, budget, recovery) {
+        var ended = false, partBudget = Math.max(10000, Number(budget) || 30000);
+        var deadline = Date.now() + partBudget, rangeMode = false;
+        var watchdogs = [];
+        function clearWatchdogs() {
+            watchdogs.forEach(function (timer) { clearTimeout(timer); });
+            watchdogs = [];
+        }
+        var telemetry = null, requestId = null, started = Date.now();
+        var detail = { phase: 'direct', issued: 0, received: 0, assembled: 0,
+            pending: {}, parts: [], started: started, budgetMs: deadline - started };
+        if (recovery && options.dataType === 'base64') {
+            telemetry = recovery.telemetry || (recovery.telemetry = {seq: 0, active: {}, completed: []});
+            Object.keys(telemetry.active).forEach(function (id) { if (!telemetry.active[id].alive()) delete telemetry.active[id]; });
+            requestId = ++telemetry.seq;
+            telemetry.active[requestId] = {started: started, detail: detail, alive: function () { return !ended && !stale(); }};
+        }
+        function keepFailure(reason) {
+            if (!recovery) return;
+            detail.elapsedMs = Date.now() - started;
+            detail.reason = reason;
+            recovery.lastFailure = detail;
+        }
+        function record(value) {
+            if (!telemetry) return;
+            delete telemetry.active[requestId];
+            var bytes = 0;
+            var raw = value;
+            for (var depth = 0; raw && typeof raw === 'object' && depth < 8; depth++) {
+                if (typeof raw.byteLength === 'number') { bytes = raw.byteLength; break; }
+                raw = raw.base64 !== undefined ? raw.base64 : raw.data !== undefined ? raw.data : raw.body;
+            }
+            // Do not decode/copy media again just to measure it.
+            if (!bytes && typeof raw === 'string' && /^[A-Za-z0-9+/]/.test(raw)) {
+                bytes = Math.floor(raw.length * 3 / 4) - (/==$/.test(raw) ? 2 : /=$/.test(raw) ? 1 : 0);
+            }
+            if (!bytes) return;
+            telemetry.completed.push({bytes: bytes, ms: Date.now() - started, finished: Date.now()});
+            if (telemetry.completed.length > 64) telemetry.completed.shift();
+        }
+        function inactive() { return ended || stale(); }
+        function error(message, reason) {
+            if (inactive()) return;
+            keepFailure(reason || (message.indexOf('истекло') >= 0 ? 'deadline' : 'range-error'));
+            ended = true;
+            clearWatchdogs();
+            if (telemetry) delete telemetry.active[requestId];
+            try { if (network.clear) network.clear(); } catch (e) {}
+            fail({status: 0, responseText: message});
+        }
+        function done(value) {
+            if (inactive()) return;
+            detail.elapsedMs = Date.now() - started;
+            if (recovery && detail.phase !== 'direct') recovery.lastRange = detail;
+            ended = true; clearWatchdogs(); record(value); complete(value);
+        }
+        function request(params, ok, bad) {
+            if (inactive()) return;
+            var remaining = deadline - Date.now();
+            if (remaining <= 0) return error('Collaps Range: истекло время загрузки фрагмента');
+            // Each part has its own bounded wait; successful parts may continue
+            // beyond the original fragment budget, up to the hard deadline.
+            var requestBudget = rangeMode ? Math.min(partBudget, remaining) : remaining;
+            var requestDeadline = Date.now() + requestBudget;
+            if (network.timeout) network.timeout(requestBudget);
+            function expired() {
+                if (Date.now() >= deadline) {
+                    error('Collaps Range: истекло общее время загрузки фрагмента', 'deadline'); return true;
+                }
+                if (rangeMode && Date.now() >= requestDeadline) {
+                    error('Collaps Range: часть не поступила вовремя', 'part-timeout'); return true;
+                }
+                return false;
+            }
+            // The Android bridge may never call either callback. Enforce the
+            // deadline ourselves, and ignore late/duplicate bridge responses.
+            var settled = false;
+            var timer = setTimeout(function () {
+                if (settled) return;
+                settled = true;
+                if (inactive()) { clearWatchdogs(); return; }
+                error(rangeMode ? 'Collaps Range: часть не поступила вовремя' :
+                    'Collaps Range: истекло время загрузки фрагмента',
+                    Date.now() >= deadline ? 'deadline' : 'part-timeout');
+            }, requestBudget);
+            watchdogs.push(timer);
+            function receive(value, callback) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                watchdogs = watchdogs.filter(function (item) { return item !== timer; });
+                if (inactive()) { clearWatchdogs(); return; }
+                if (!expired()) callback(value);
+            }
+            try {
+                network.native(url, function (value) {
+                    receive(value, ok);
+                }, function (value) {
+                    receive(value, bad);
+                }, post, params);
+            } catch (e) { error('Collaps Range: ' + errText(e)); }
+        }
+        var rangeKey = collapsDashRangeKey(url);
+        function recover() {
+            rangeMode = true;
+            deadline = started + Math.max(120000, partBudget);
+            detail.budgetMs = deadline - started;
+            detail.partBudgetMs = partBudget;
+            detail.phase = 'probe';
+            detail.directMs = Date.now() - started;
+            var headers = {}, start = 0, end = null, rawRange = '';
+            Object.keys(options.headers || {}).forEach(function (key) {
+                if (key.toLowerCase() === 'range') rawRange = options.headers[key];
+                else headers[key] = options.headers[key];
+            });
+            if (rawRange) {
+                var match = /^bytes=(\d+)-(\d*)$/.exec(rawRange);
+                if (!match) return error('Collaps Range: неподдерживаемый диапазон');
+                start = Number(match[1]); end = match[2] ? Number(match[2]) : null;
+                if (end !== null && end < start) return error('Collaps Range: неверные границы');
+            }
+            // 256 KiB binary -> about 342 KiB Base64, below the failing multi-MB responses.
+            var chunkSize = 262144, overlap = 32, maxBytes = 67108864;
+            var chunks = [], total = 0, tail = null, firstByte = null;
+            var stride = chunkSize - overlap, issued = 0, consumed = 0, inflight = 0, ready = {}, pumping = false;
+            function finish() {
+                if (inactive()) return;
+                if (!total) return error('Collaps Range: пустой фрагмент');
+                detail.phase = 'assemble';
+                detail.cancelled = Object.keys(detail.pending).length;
+                detail.pending = {};
+                var out = new Uint8Array(total), offset = 0;
+                chunks.forEach(function (chunk) { out.set(chunk, offset); offset += chunk.length; });
+                chunks = []; ready = {};
+                try { if (network.clear) network.clear(); } catch (e) {}
+                done(out.buffer);
+            }
+            function get(a, b, ok, bad) {
+                var h = {};
+                Object.keys(headers).forEach(function (key) { h[key] = headers[key]; });
+                h.Range = 'bytes=' + a + '-' + b;
+                // Identity prevents byte offsets referring to compressed transport data.
+                h['Accept-Encoding'] = 'identity';
+                request({dataType: 'base64', headers: h}, function (body) {
+                    var bytes;
+                    try { bytes = new Uint8Array(base64ToArrayBuffer(body)); }
+                    catch (e) { return bad({rangeError: 'Collaps Range: часть не получена — ' + errText(e)}); }
+                    if (bytes.length > b - a + 1) return bad({rangeError: 'Collaps Range: сервер проигнорировал диапазон'});
+                    ok(bytes);
+                }, bad);
+            }
+            function drain() {
+                while (!inactive() && ready[consumed]) {
+                    var item = ready[consumed]; delete ready[consumed];
+                    if (item.error) return error(item.error);
+                    var bytes = item.bytes, keep = tail ? tail.length : 0;
+                    if (bytes.length < keep) return error('Collaps Range: фрагмент изменился или обрезан');
+                    for (var i = 0; i < keep; i++) {
+                        if (bytes[i] !== tail[i]) return error('Collaps Range: части не совпадают');
+                    }
+                    if (!total && bytes[0] !== firstByte) return error('Collaps Range: начальные данные изменились');
+                    var piece = bytes.subarray(keep);
+                    if (total + piece.length > maxBytes) return error('Collaps Range: превышен предел сборки 64 MiB');
+                    chunks.push(piece); total += piece.length; consumed++;
+                    detail.assembled = total;
+                    if (bytes.length < item.length || end !== null && start + total > end) return finish();
+                    if (!piece.length) return error('Collaps Range: нет продвижения');
+                    tail = bytes.subarray(bytes.length - Math.min(overlap, bytes.length));
+                }
+            }
+            function launch(index, a, b) {
+                inflight++;
+                detail.phase = 'parts'; detail.issued++;
+                var partStarted = Date.now();
+                detail.pending[index] = { from: a, to: b, started: partStarted };
+                function receive(item) {
+                    if (inactive()) return;
+                    delete detail.pending[index];
+                    if (!item.error) detail.received++;
+                    detail.parts.push({ index: index, from: a, to: b,
+                        bytes: item.bytes ? item.bytes.length : 0,
+                        ms: Date.now() - partStarted, error: !!item.error });
+                    if (detail.parts.length > 8) detail.parts.shift();
+                    inflight--; ready[index] = item; drain(); pump();
+                }
+                get(a, b, function (bytes) { receive({bytes: bytes, length: b - a + 1}); }, function (e) {
+                    receive({error: e && e.rangeError || 'Collaps Range: запрос части не выполнен (status=' + (e && e.status || '?') + ')'});
+                });
+            }
+            function pump() {
+                if (inactive() || pumping) return;
+                pumping = true;
+                // At most four unconsumed parts, including out-of-order completed requests.
+                while (!inactive() && inflight < 4 && issued - consumed < 4) {
+                    var a = start + issued * stride, b = a + chunkSize - 1;
+                    if (end !== null) { if (a > end) break; b = Math.min(b, end); }
+                    if (a - start >= maxBytes) { error('Collaps Range: превышен предел сборки 64 MiB'); break; }
+                    launch(issued++, a, b);
+                }
+                pumping = false;
+            }
+            // Verify Range behaviour on this very URL, not just Accept-Ranges advertising.
+            get(start, start, function (bytes) {
+                if (bytes.length !== 1) return error('Collaps Range: проверка диапазона не пройдена');
+                firstByte = bytes[0];
+                if (recovery && rangeKey) recovery.paths[rangeKey] = true;
+                pump();
+            }, function (e) { error(e && e.rangeError || 'Collaps Range: диапазоны недоступны (status=' + (e && e.status || '?') + ')'); });
+        }
+        if (options.dataType === 'base64' && recovery && rangeKey && recovery.paths[rangeKey]) return recover();
+        request(options, function (value) {
+            if (options.dataType === 'base64' && value === '[Response too large, skipped]') recover();
+            else done(value);
+        }, function (e) {
+            if (inactive()) return;
+            keepFailure('native-error');
+            ended = true;
+            clearWatchdogs();
+            if (telemetry) delete telemetry.active[requestId];
+            fail(e);
+        });
+    }
+
+    function rangeDiagnosticText(detail, now) {
+        if (!detail) return '';
+        var pending = Object.keys(detail.pending || {}).map(function (id) {
+            var p = detail.pending[id];
+            return '#' + (Number(id) + 1) + ' ' + ((now - p.started) / 1000).toFixed(1) + 'с';
+        }).join(', ');
+        var parts = (detail.parts || []).slice(-3).map(function (p) {
+            return '#' + (p.index + 1) + ':' + (p.bytes / 1024).toFixed(0) + 'КБ/' + (p.ms / 1000).toFixed(1) + 'с' + (p.error ? '!' : '');
+        }).join(' ');
+        return 'Range ' + detail.phase + ': ' + detail.received + '/' + detail.issued +
+            ' частей' + (detail.cancelled ? ' | отменено ' + detail.cancelled : '') + ' | собрано ' + (detail.assembled / 1048576).toFixed(2) + ' МБ' +
+            ' | ' + ((detail.elapsedMs === undefined ? now - detail.started : detail.elapsedMs) / 1000).toFixed(1) + '/' + (detail.budgetMs / 1000).toFixed(0) + 'с' +
+            (detail.partBudgetMs ? ' | часть ≤' + (detail.partBudgetMs / 1000).toFixed(0) + 'с' : '') +
+            (detail.directMs !== undefined ? ' | до Range ' + (detail.directMs / 1000).toFixed(1) + 'с' : '') +
+            (pending ? '\nОжидают: ' + pending : '') + (parts ? '\nЧасти: ' + parts : '') +
+            (detail.reason ? ' | ошибка: ' + detail.reason : '');
+    }
+
+    function hlsNativeStats() {
+        var now = (window.performance && performance.now) ? performance.now() : Date.now();
+        return {
+            aborted: false,
+            loaded: 0,
+            retry: 0,
+            total: 0,
+            chunkCount: 0,
+            bwEstimate: 0,
+            loading: { start: now, first: 0, end: 0 },
+            parsing: { start: 0, end: 0 },
+            buffering: { start: 0, first: 0, end: 0 }
+        };
+    }
+
+    function mapCollapsPlaylistUri(raw, originalBase) {
+        raw = String(raw || '').trim();
+        if (!raw || raw.indexOf('data:') === 0 || raw.indexOf('blob:') === 0) return raw;
+        try {
+            var logical = new URL(raw, originalBase).toString();
+            var client = collapsClientCdnUrl(
+                logical,
+                COLLAPS_NATIVE_HLS.unixTime,
+                COLLAPS_NATIVE_HLS.key,
+                false
+            );
+            client = stripHash(client);
+            COLLAPS_NATIVE_HLS.urlMap[client] = logical;
+            return client;
+        } catch (e) {
+            return raw;
+        }
+    }
+
+    function rewriteCollapsNativePlaylist(body, originalBase) {
+        return String(body || '').split(/\r?\n/).map(function (line) {
+            if (!line) return line;
+            if (line.charAt(0) !== '#') {
+                return mapCollapsPlaylistUri(line.trim(), originalBase);
+            }
+            return line.replace(/URI="([^"]+)"/g, function (_, uri) {
+                return 'URI="' + mapCollapsPlaylistUri(uri, originalBase) + '"';
+            });
+        }).join('\n');
+    }
+
+    function hlsManifestLevels(text) {
+        return String(text || '').split(/\r?\n/).filter(function (line) {
+            return /^#EXT-X-STREAM-INF:/.test(line);
+        }).map(function (line) {
+            var size = /RESOLUTION=(\d+)x(\d+)/.exec(line);
+            var codec = /CODECS="([^"]+)"/.exec(line);
+            return { width: size ? +size[1] : 0, height: size ? +size[2] : 0, codecs: codec ? codec[1] : '' };
+        });
+    }
+
+    function installCollapsHlsUI(hls) {
+        var state = COLLAPS_NATIVE_HLS, generation = state.generation;
+        var disposed = false, timer = null, panel = null, previous = null, signature = '';
+        var subs = [], initialized = false, deferred = null, requested = null;
+        function active() { return !disposed && generation === state.generation; }
+        function publish(force) {
+            if (!active() || !hls.media || !hls.levels || !hls.levels.length) return;
+            var automatic = hls.autoLevelEnabled;
+            var current = hls.currentLevel, list = hls.levels;
+            var target = requested === null ? hls.loadLevel : requested;
+            var label = automatic ? 'AUTO' : list[target] && list[target].height + 'p' || 'Качество';
+            var key = label + ':' + list.map(function (l) { return l.height; }).join(',');
+            if (!force && key === signature) return;
+            signature = key;
+            if (!Lampa.PlayerPanel || !Lampa.PlayerPanel.setLevels) return;
+            var menu = [];
+            function row(title, index) {
+                var item = {title: title, quality: title, selected: index === -1 ? automatic : !automatic && target === index};
+                Object.defineProperty(item, 'enabled', { configurable: true, get: function () { return item.selected; }, set: function (value) {
+                    if (!value || !active()) return;
+                    requested = index === -1 ? null : index;
+                    // AUTO releases the lock. Locking the currently playing rendition
+                    // must also preserve buffered media: nextLevel triggers a switch
+                    // even when the chosen rendition is already playing.
+                    if (index === -1 || index === hls.currentLevel) hls.loadLevel = index;
+                    else hls.nextLevel = index;
+                    publish(true);
+                }});
+                menu.push(item);
+            }
+            row('AUTO', -1);
+            list.forEach(function (l, i) { row(l.height ? l.height + 'p' : 'Уровень ' + (i + 1), i); });
+            if (Lampa.PlayerPanel.quality) Lampa.PlayerPanel.quality({}, '__collaps_hls_levels__');
+            Lampa.PlayerPanel.setLevels(menu, label);
+        }
+        function sizes(list) { return list && list.length ? list.map(function (l) { return l.width && l.height ? l.width + '×' + l.height : 'н/д'; }).join(', ') : 'н/д'; }
+        function mbps(value) { return typeof value === 'number' && isFinite(value) && value > 0 ? (value / 1000000).toFixed(2) + ' Мбит/с' : 'н/д'; }
+        function autoLevel(index) { var l = hls.levels && hls.levels[index]; return l ? l.height + 'p (#' + index + ')' : 'н/д'; }
+        function sample() {
+            if (!active()) return dispose();
+            var v = hls.media;
+            if (!v) return;
+            publish(false);
+            if (!(global.MnogoTVDiagnostics === true)) return;
+            var buffer = 0, frames = 'н/д', now = Date.now();
+            try { for (var i=0; i<v.buffered.length; i++) if (v.currentTime >= v.buffered.start(i) && v.currentTime <= v.buffered.end(i)) buffer = v.buffered.end(i)-v.currentTime; } catch (e) {}
+            try {
+                var q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : {totalVideoFrames:v.webkitDecodedFrameCount,droppedVideoFrames:v.webkitDroppedFrameCount};
+                if (typeof q.totalVideoFrames === 'number' && typeof q.droppedVideoFrames === 'number') {
+                    if (previous && q.totalVideoFrames >= previous.total && q.droppedVideoFrames >= previous.drop) frames = '+' + (q.droppedVideoFrames-previous.drop) + '/' + (q.totalVideoFrames-previous.total) + ' за ' + ((now-previous.time)/1000).toFixed(1) + 'с';
+                    previous = {total:q.totalVideoFrames,drop:q.droppedVideoFrames,time:now};
+                }
+            } catch (e2) {}
+            var abr = { bandwidth: hls.bandwidthEstimate, next: hls.nextAutoLevel,
+                min: hls.minAutoLevel, max: hls.maxAutoLevel, cap: hls.autoLevelCapping };
+            var last = state.lastSegment;
+            var abrText = 'AUTO оценка: ' + mbps(abr.bandwidth) + ' | следующий: ' + autoLevel(abr.next) +
+                '\nAUTO границы: ' + autoLevel(abr.min) + ' — ' + autoLevel(abr.max) + ' | cap: ' + (abr.cap === -1 ? 'нет' : abr.cap === undefined ? 'н/д' : abr.cap) +
+                '\nБитрейты: ' + (hls.levels || []).map(function (l) { return l.height + 'p: ' + mbps(l.bitrate); }).join('; ') +
+                '\nСегмент: ' + (last ? (last.bytes/1048576).toFixed(2) + ' МиБ / ' + (last.ms/1000).toFixed(2) + 'с = ' + mbps(last.bps) : 'н/д') + ' | TTFB неизвестен';
+            var text = 'Collaps HLS | ' + (hls.autoLevelEnabled ? 'AUTO' : 'ручной') + ' | факт ' + (v.videoWidth || '?') + '×' + (v.videoHeight || '?') + '\n' +
+                'Буфер общий: ' + buffer.toFixed(1) + 'с | пропуски/кадры: ' + frames + '\n' +
+                'Исходный: ' + sizes(state.originalLevels) + '\nПосле обработки: ' + sizes(state.rewrittenLevels) + '\nПлеер: ' + sizes(hls.levels) + '\n' + abrText;
+            state.playbackTelemetry = {text:text,abr:abr,lastSegment:last,original:state.originalLevels,rewritten:state.rewrittenLevels,levels:hls.levels.map(function(l){return {width:l.width,height:l.height,videoCodec:l.videoCodec};})};
+            if (!panel && document.body) {
+                panel = document.createElement('div');
+                panel.style.cssText = 'position:fixed;left:3%;top:3%;z-index:99999;padding:10px;background:rgba(0,0,0,.8);color:white;font-size:18px;white-space:pre-line;pointer-events:none';
+                document.body.appendChild(panel);
+            }
+            if (panel) panel.textContent = text;
+        }
+        function dispose() {
+            if (disposed) return;
+            disposed = true; clearInterval(timer); clearTimeout(deferred);
+            subs.forEach(function (s) { hls.off(s[0],s[1]); });
+            if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+        }
+        function on(name, fn) { if (name) { hls.on(name,fn); subs.push([name,fn]); } }
+        on(Hls.Events.MANIFEST_PARSED, function () {
+            clearTimeout(deferred);
+            deferred = setTimeout(function () {
+                if (!active() || !hls.media) return;
+                if (!initialized) {
+                    var chosen = -1;
+                    (hls.levels || []).forEach(function (l,i) { if (l.height > 0 && l.height <= 720 && (chosen < 0 || l.height > hls.levels[chosen].height)) chosen = i; });
+                    requested = chosen < 0 ? null : chosen; hls.loadLevel = chosen; initialized = true;
+                }
+                publish(true);
+            },0);
+        });
+        on(Hls.Events.FRAG_CHANGED, function () {
+            clearTimeout(deferred);
+            deferred = setTimeout(function () { publish(true); },0);
+        });
+        on(Hls.Events.DESTROYING, dispose);
+        timer = setInterval(sample,1000);
+        return {dispose:dispose};
+    }
+
+    function hookCollapsHlsUI() {
+        if (COLLAPS_NATIVE_HLS.uiInstalled || !global.Hls || !Hls.prototype.loadSource) return;
+        var original = Hls.prototype.loadSource;
+        Hls.prototype.loadSource = function (url) {
+            if (COLLAPS_NATIVE_HLS.urlMap[stripHash(url)]) {
+                if (COLLAPS_NATIVE_HLS.ui) COLLAPS_NATIVE_HLS.ui.dispose();
+                COLLAPS_NATIVE_HLS.ui = installCollapsHlsUI(this);
+            }
+            return original.apply(this,arguments);
+        };
+        COLLAPS_NATIVE_HLS.uiInstalled = true;
+    }
+
+    function configureCollapsNativeHls(rawUrl, clientUrl, unixTime, key, headers) {
+        COLLAPS_NATIVE_HLS.unixTime = parseInt(unixTime || 0, 10) || 0;
+        COLLAPS_NATIVE_HLS.key = String(key || '');
+        COLLAPS_NATIVE_HLS.headers = headers || {};
+        COLLAPS_NATIVE_HLS.urlMap = {};
+        COLLAPS_NATIVE_HLS.urlMap[stripHash(clientUrl)] = normalizeDirectUrl(rawUrl);
+
+        hookCollapsHlsUI();
+        if (COLLAPS_NATIVE_HLS.installed) return true;
+
+        /*
+         * Core owns the one permanent HLS router. This adapter contributes
+         * only an URL predicate and a loader constructor; its urlMap, token,
+         * headers and request diagnostics stay inside this adapter instance.
+         */
+        var OriginalLoader = core.hlsRouter.stockLoader();
+        if (!OriginalLoader) return false;
+        COLLAPS_NATIVE_HLS.originalLoader = OriginalLoader;
+
+        function CollapsNativeLoader(config) {
+            this.serial = 0;
+            this.completed = false;
+            this.config = config;
+            this.context = null;
+            this.stats = hlsNativeStats();
+            this.network = null;
+            this.fallback = null;
+        }
+
+        CollapsNativeLoader.prototype.destroy = function () {
+            if (this.fallback) {
+                this.serial++;
+                if (this.fallback.destroy) this.fallback.destroy();
+                this.fallback = null;
+            }
+            else this.abort();
+            this.context = null;
+            this.config = null;
+        };
+
+        CollapsNativeLoader.prototype.abort = function () {
+            this.serial++;
+            // Hls.js destroys the loader inside onSuccess before ABR samples stats.
+            // Cleanup of a completed request must not retroactively cancel it.
+            if (!this.completed) this.stats.aborted = true;
+            try { if (this.network && this.network.clear) this.network.clear(); } catch (e) {}
+            try { if (this.fallback && this.fallback.abort) this.fallback.abort(); } catch (e2) {}
+        };
+
+        CollapsNativeLoader.prototype.getCacheAge = function () { return null; };
+        CollapsNativeLoader.prototype.getResponseHeader = function () { return null; };
+
+        CollapsNativeLoader.prototype.load = function (context, config, callbacks) {
+            var serial = ++this.serial;
+            this.completed = false;
+            this.context = context;
+            var initialStats = hlsNativeStats();
+            var stats = this.stats;
+            Object.keys(initialStats).forEach(function (key) { stats[key] = initialStats[key]; });
+
+            var visibleUrl = stripHash(context && context.url || '');
+            if (!isCollapsCdnUrl(visibleUrl)) {
+                this.fallback = new OriginalLoader(this.config);
+                this.fallback.stats = this.stats;
+                this.fallback.load(context, config, callbacks);
+                return;
+            }
+
+            var logicalUrl = COLLAPS_NATIVE_HLS.urlMap[visibleUrl] || visibleUrl;
+            var requestUrl = visibleUrl.indexOf('/x-en-x/') >= 0
+                ? visibleUrl
+                : stripHash(collapsClientCdnUrl(
+                    logicalUrl,
+                    COLLAPS_NATIVE_HLS.unixTime,
+                    COLLAPS_NATIVE_HLS.key,
+                    false
+                ));
+
+            COLLAPS_NATIVE_HLS.urlMap[requestUrl] = logicalUrl;
+
+            var isBinary = String(context && context.responseType || '').toLowerCase() === 'arraybuffer';
+            var headers = {};
+            var baseHeaders = COLLAPS_NATIVE_HLS.headers || {};
+            Object.keys(baseHeaders).forEach(function (k) { headers[k] = baseHeaders[k]; });
+
+            /*
+             * Media fragments are binary resources. A real browser requests
+             * them with a generic Accept header rather than an HLS-manifest MIME. Keep
+             * Origin/Referer, but do not advertise the playlist MIME for a
+             * fragment request.
+             */
+            if (isBinary) headers.Accept = '*/*';
+            /*
+             * Hls.js initializes rangeStart/rangeEnd to 0/0 for ordinary
+             * fragments. v4.0.7 treated the mere presence of those fields as
+             * a real byte-range and sent the invalid header `Range: bytes=0--1`,
+             * which makes normal fragments fail with fragLoadError.
+             * Match Hls.js' stock loader: add Range only when rangeEnd is > 0
+             * and the interval is actually non-empty.
+             */
+            if (
+                context &&
+                Number(context.rangeEnd) > Number(context.rangeStart) &&
+                Number(context.rangeEnd) > 0
+            ) {
+                headers.Range =
+                    'bytes=' +
+                    Number(context.rangeStart || 0) +
+                    '-' +
+                    (Number(context.rangeEnd) - 1);
+            }
+
+            var network = null;
+            try { network = new Lampa.Reguest(); } catch (e) {
+                try { network = new Lampa.Request(); } catch (e2) {}
+            }
+            if (!network || typeof network.native !== 'function') {
+                callbacks.onError({ code: 0, text: 'Lampa.Reguest.native unavailable' }, context, null, this.stats);
+                return;
+            }
+            this.network = network;
+
+            var timeout = (config && (config.timeout || config.maxLoadTimeMs)) || 20000;
+            try { if (network.timeout) network.timeout(Math.max(5000, timeout)); } catch (e3) {}
+
+            var self = this;
+            var generation = COLLAPS_NATIVE_HLS.generation;
+            function stale() {
+                return self.stats.aborted || self.serial !== serial ||
+                    generation !== COLLAPS_NATIVE_HLS.generation;
+            }
+            COLLAPS_NATIVE_HLS.lastRequest = {
+                type: String(context && context.type || ''),
+                responseType: String(context && context.responseType || ''),
+                visibleUrl: visibleUrl,
+                logicalUrl: logicalUrl,
+                requestUrl: requestUrl,
+                rangeStart: Number(context && context.rangeStart || 0),
+                rangeEnd: Number(context && context.rangeEnd || 0),
+                headers: headers
+            };
+            log('Collaps native loader request', COLLAPS_NATIVE_HLS.lastRequest);
+
+            try {
+                collapsDashRequest(
+                    network, requestUrl,
+                    function (response) {
+                        if (stale()) return;
+                        var now = (window.performance && performance.now) ? performance.now() : Date.now();
+                        // Native bridge returns the complete response, not first-byte timing.
+                        // Use the full wall time as a conservative throughput sample.
+                        self.stats.loading.first = self.stats.loading.start;
+                        self.stats.loading.end = now;
+                        try {
+                            var data;
+                            if (isBinary) {
+                                data = base64ToArrayBuffer(response);
+                                self.stats.loaded = self.stats.total = data.byteLength || 0;
+                                var elapsed = Math.max(1, now - self.stats.loading.start);
+                                COLLAPS_NATIVE_HLS.lastSegment = {bytes:data.byteLength,ms:elapsed,bps:data.byteLength*8000/elapsed,ttfbKnown:false};
+                                COLLAPS_NATIVE_HLS.lastError = null;
+                                log('Collaps native fragment success', {
+                                    bytes: self.stats.loaded,
+                                    responseKind: Object.prototype.toString.call(response),
+                                    requestUrl: requestUrl
+                                });
+                            }
+                            else {
+                                data = typeof response === 'string' ? response : String(response || '');
+                                if (/^(manifest|level|audioTrack|subtitleTrack)$/i.test(String(context && context.type || ''))) {
+                                    var originalLevels = hlsManifestLevels(data);
+                                    data = rewriteCollapsNativePlaylist(data, logicalUrl);
+                                    if (originalLevels.length) {
+                                        COLLAPS_NATIVE_HLS.originalLevels = originalLevels;
+                                        COLLAPS_NATIVE_HLS.rewrittenLevels = hlsManifestLevels(data);
+                                    }
+                                }
+                                self.stats.loaded = self.stats.total = data.length || 0;
+                            }
+                            self.stats.chunkCount = 1;
+                            self.completed = true;
+                            callbacks.onSuccess({ url: context.url, data: data }, self.stats, context, null);
+                        }
+                        catch (decodeError) {
+                            var payloadInfo = nativeDecodeSummary(response, headers.Range || headers.range);
+                            var decodeText = 'native decode: ' + payloadInfo.summary;
+                            COLLAPS_NATIVE_HLS.lastError = {
+                                phase: isBinary ? 'fragment-decode' : 'text-decode',
+                                payload: payloadInfo,
+                                code: 0,
+                                text: decodeText,
+                                requestUrl: requestUrl
+                            };
+                            log('Collaps native loader decode error', COLLAPS_NATIVE_HLS.lastError);
+                            try { notify('Collaps DEBUG: ' + decodeText); } catch (eNoty1) {}
+                            callbacks.onError({ code: 0, text: decodeText }, context, null, self.stats);
+                        }
+                    },
+                    function (a, c) {
+                        if (stale()) return;
+                        var status = a && a.status !== undefined ? Number(a.status) : 0;
+                        var nativeTextError = errText(a || c || 'native network error');
+                        COLLAPS_NATIVE_HLS.lastError = {
+                            phase: isBinary ? 'fragment-network' : 'playlist-network',
+                            code: status || 0,
+                            text: nativeTextError,
+                            requestUrl: requestUrl,
+                            visibleUrl: visibleUrl,
+                            responseType: String(context && context.responseType || '')
+                        };
+                        log('Collaps native loader network error', COLLAPS_NATIVE_HLS.lastError);
+                        try {
+                            notify(
+                                'Collaps DEBUG: ' +
+                                COLLAPS_NATIVE_HLS.lastError.phase +
+                                ' HTTP ' + (status || 0) +
+                                ' • ' + nativeTextError
+                            );
+                        } catch (eNoty2) {}
+                        callbacks.onError({
+                            code: status || 0,
+                            text: nativeTextError
+                        }, context, a || null, self.stats);
+                    },
+                    false,
+                    {
+                        dataType: isBinary ? 'base64' : 'text',
+                        headers: headers
+                    }, stale, timeout, COLLAPS_NATIVE_HLS.rangeRecovery
+                );
+            }
+            catch (e4) {
+                callbacks.onError({ code: 0, text: errText(e4) }, context, null, self.stats);
+            }
+        };
+
+        try {
+            var registered = core.hlsRouter.register('collaps', {
+                owns: function (url) {
+                    var clean = stripHash(url);
+                    return !!COLLAPS_NATIVE_HLS.urlMap[clean] ||
+                        (!!COLLAPS_NATIVE_HLS.key && isCollapsCdnUrl(clean));
+                },
+                loader: CollapsNativeLoader
+            });
+            if (!registered) return false;
+            COLLAPS_NATIVE_HLS.installed = true;
+            log('Collaps native HLS route installed');
+            return true;
+        }
+        catch (e5) {
+            log('Collaps native Hls loader install failed', e5);
+            return false;
+        }
+    }
+
+    function normalizeSubs(list) {
+        if (!Array.isArray(list)) return [];
+        return list.map(function (s) {
+            if (!s) return null;
+            var url = typeof s === 'string' ? s : (s.url || s.file || s.src || '');
+            url = normalizeDirectUrl(url);
+            if (!url) return null;
+            return {
+                label: (s && (s.name || s.label || s.lang)) || 'Субтитры',
+                url: url
+            };
+        }).filter(Boolean);
+    }
+
+    function normalizeTracks(audio) {
+        var names = audio && Array.isArray(audio.names) ? audio.names : [];
+        var order = audio && Array.isArray(audio.order) ? audio.order : [];
+
+        /*
+         * Collaps audio.names contains the human-readable dubbing names.
+         * audio.order maps each name to the REAL media-track number.
+         *
+         * Example from the real S1E1 config:
+         * names: [Невафильм, LostFilm, HDRezka Studio, Eng.Original,
+         *         DniproFilm (укр), delete]
+         * order: [0, 1, 2, 4, 3, 5]
+         *
+         * Older v4 builds sorted by order and then threw the index away.
+         * The UI could therefore claim one dubbing while dash.js continued
+         * playing its own default audio track.
+         */
+        return names.map(function (name, sourceIndex) {
+            var label = String(name || '').trim();
+            var mapped = parseInt(order[sourceIndex], 10);
+
+            if (!label || label === 'delete') return null;
+
+            return {
+                language: label,
+                label: label,
+                index: isNaN(mapped) ? sourceIndex : mapped,
+                sourceIndex: sourceIndex
+            };
+        }).filter(Boolean);
+    }
+
+    function timeline(movie, season, episode) {
+        try {
+            var base = movie.original_title || movie.original_name || titleOf(movie);
+            var key = season && episode ? [season, episode, base].join('') : base;
+            return Lampa.Timeline.view(Lampa.Utils.hash(key));
+        } catch (e) { return undefined; }
+    }
+
+    function pickCollapsItem(config, season, episode) {
+        if (!config) return null;
+        if (season !== null && episode !== null && config.playlist && Array.isArray(config.playlist.seasons)) {
+            var seasonNode = null;
+            config.playlist.seasons.some(function (s) {
+                if (Number(s.season) === Number(season)) { seasonNode = s; return true; }
+                return false;
+            });
+            if (!seasonNode) return null;
+            var episodeNode = null;
+            (seasonNode.episodes || []).some(function (ep) {
+                if (Number(ep.episode) === Number(episode)) { episodeNode = ep; return true; }
+                return false;
+            });
+            return episodeNode;
+        }
+        return config.source || null;
+    }
+
+    function getKpId(imdb, ok) {
+        imdb = String(imdb || '');
+
+        if (
+            imdb &&
+            cache.ids[imdb]
+        ) {
+            ok(
+                cache.ids[imdb]
+            );
+            return;
+        }
+
+        requestJson(
+            resolverUrl(
+                '/ids',
+                {
+                    imdb: imdb
+                }
+            ),
+            function (data) {
+                var kp =
+                    data &&
+                    data.kp
+                        ? String(data.kp)
+                        : '';
+
+                if (
+                    imdb &&
+                    kp
+                ) {
+                    cache.ids[imdb] =
+                        kp;
+                }
+
+                ok(kp);
+            },
+            function () {
+                ok('');
+            }
+        );
+    }
+
+    function tryCollapsUrls(source, imdb, kp, season, episode, ok, fail) {
+        var urls = [];
+        var seen = {};
+
+        function add(url, label) {
+            url = normalizeDirectUrl(url);
+            if (!url || seen[url]) return;
+
+            seen[url] = true;
+            urls.push({
+                url: url,
+                label: label,
+                headers: collapsHeadersFor(url)
+            });
+        }
+
+        /*
+         * v4.0.12: сначала пробуем ТОТ embed URL, который реально вернул
+         * MnogoTV/Kinobox для выбранного источника. Для Collaps это обычно
+         * api.ortified.ws/embed/movie/<id>. Пользователь подтвердил, что
+         * такие movie/embed страницы открываются в браузере, а KP-route для
+         * S1E1 у нас отдавал только HLS и упирался в 410 на фрагментах.
+         *
+         * Принимаем только собственные Collaps-host'ы, чтобы не вернуть
+         * старую проблему с чужим iframe и неверно выбранной серией. Саму
+         * серию всё равно выбирает pickCollapsItem(cfg, season, episode).
+         */
+        try {
+            var sourceIframe = normalizeDirectUrl(source && source.iframeUrl || '');
+            if (sourceIframe) {
+                var sourceHost = new URL(sourceIframe).hostname.toLowerCase();
+                if (
+                    sourceHost === 'api.ortified.ws' ||
+                    sourceHost === 'api.kinogram.best'
+                ) {
+                    add(sourceIframe, 'source movie embed');
+                }
+            }
+        } catch (eSourceIframe) {}
+
+        /* Fallbacks: KP, затем IMDb. */
+        if (kp) {
+            add(
+                'https://api.ortified.ws/embed/kp/' + encodeURIComponent(kp),
+                'ortified kp'
+            );
+            add(
+                'https://api.kinogram.best/embed/kp/' + encodeURIComponent(kp),
+                'kinogram kp'
+            );
+        }
+
+        if (imdb) {
+            add(
+                'https://api.ortified.ws/embed/imdb/' + encodeURIComponent(imdb),
+                'ortified imdb'
+            );
+            add(
+                'https://api.kinogram.best/embed/imdb/' + encodeURIComponent(imdb),
+                'kinogram imdb'
+            );
+        }
+
+        /*
+         * Kinobox iframe здесь НЕ используем:
+         * он живёт своей внутренней выбранной серией/сезоном,
+         * что и дало пользователю 9 сезон / 1 серия при выборе
+         * другой серии в MnogoTV.
+         */
+        var index = 0;
+        var errors = [];
+
+        function next() {
+            if (index >= urls.length) {
+                fail(new Error(
+                    errors.length
+                        ? errors.join(' | ')
+                        : 'Collaps недоступен'
+                ));
+                return;
+            }
+
+            var attempt = urls[index++];
+
+            collapsEmbedConfig(
+                attempt,
+                season,
+                episode,
+                function (cfg, mode) {
+                    if (cfg) {
+                        ok({
+                            config: cfg,
+                            url: attempt.url,
+                            label:
+                                attempt.label +
+                                ' • ' +
+                                (mode || 'embed'),
+                            headers: attempt.headers,
+                            ref: attempt.headers.Referer
+                        });
+                    }
+                    else {
+                        errors.push(
+                            attempt.label + ': makePlayer не найден'
+                        );
+                        next();
+                    }
+                },
+                function (e) {
+                    errors.push(
+                        attempt.label + ': ' + errText(e)
+                    );
+                    next();
+                }
+            );
+        }
+
+        next();
+    }
+
+    function relayMediaUrl(rawUrl, ref, forceManifest) {
+        var name = forceManifest ? 'master.m3u8' : 'media.bin';
+
+        try {
+            var u = new URL(String(rawUrl || ''));
+            var base = (u.pathname.split('/').pop() || '').split('?')[0];
+
+            if (base && /\.[a-z0-9]{2,5}$/i.test(base)) {
+                name = base.replace(/[^a-zA-Z0-9._-]/g, '_');
+            }
+            else if (String(rawUrl || '').toLowerCase().indexOf('.m3u8') !== -1) {
+                name = 'master.m3u8';
+            }
+        } catch (e) {}
+
+        return resolverUrl('/media/' + name, {
+            url: rawUrl,
+            ref: ref
+        });
+    }
+
+    function looksLikeManifest(text) {
+        text = String(text || '').trim();
+        return text.indexOf('#EXTM3U') === 0;
+    }
+
+    function preparePlayableStream(rawStream, response, ok) {
+        var directHeaders =
+            response.headers ||
+            collapsHeadersFor(response.url);
+
+        var ref =
+            response.ref ||
+            (directHeaders && directHeaders.Referer) ||
+            COLLAPS_REF;
+
+        var relay = relayMediaUrl(rawStream, ref, true);
+
+        nativeText(relay, {}, function (manifest) {
+            var ready = looksLikeManifest(manifest);
+
+            ok({
+                directUrl: rawStream,
+                directHeaders: directHeaders,
+                relayUrl: ready ? relay : '',
+                relayReady: ready
+            });
+        }, function () {
+            ok({
+                directUrl: rawStream,
+                directHeaders: directHeaders,
+                relayUrl: '',
+                relayReady: false
+            });
+        });
+    }
+
+
+
+    /*
+     * v4.0.11: Collaps DASH transport inside the stock Lampa.Player.
+     *
+     * The real VenomPlayer does not start with HLS. Its order is:
+     *   dasha (AV1) -> dash -> hls.
+     * cdn.js rewrites every DASH MPD/WebM URL to /x-en-x/<encoded>.
+     * We mirror only that URL transformation through dash.js RequestModifier.
+     * The media remains inside Lampa.Player; no iframe/external player/CF relay.
+     */
+    var COLLAPS_NATIVE_DASH = {
+        installed: false,
+        active: false,
+        generation: 0,
+        qualityControl: null,
+        lastDecode: null,
+        rangeRecovery: {paths: {}},
+        monitor: null,
+        playbackTelemetry: null,
+        manifestInfo: [],
+        selectedPath: 'основной',
+        unixTime: 0,
+        originalMediaPlayer: null,
+        xhrInstalled: false,
+        originalXHR: null,
+        requestCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        lastUrl: '',
+        lastStatus: 0,
+
+        /* Selected Collaps dubbing. -1 means provider/default track. */
+        audioIndex: -1,
+        audioLabel: '',
+        audioAppliedKey: ''
+    };
+
+    function collapsAv1Supported() {
+        try {
+            return !!(
+                window.MediaSource &&
+                typeof MediaSource.isTypeSupported === 'function' &&
+                MediaSource.isTypeSupported('video/webm; codecs="av01.0.08M.08"') &&
+                MediaSource.isTypeSupported('audio/webm; codecs="opus"')
+            );
+        } catch (e) {}
+        return false;
+    }
+
+
+    /*
+     * v4.0.14: dash.js в штатном Lampa.Player делает обычные XHR.
+     * У Collaps CDN CORS разрешён только для Origin https://api.ortified.ws,
+     * а WebView Lampa имеет другой origin. Поэтому URL мы уже строим правильно,
+     * но браузерный XHR зависает/блокируется.
+     *
+     * Для interkh.com перехватываем XMLHttpRequest и выполняем тот же GET через
+     * Lampa.Reguest.native на самом Android-устройстве. Для всех остальных URL
+     * остаётся настоящий XMLHttpRequest.
+     */
+    function installCollapsDashNativeXHR() {
+        if (COLLAPS_NATIVE_DASH.xhrInstalled) return true;
+
+        var OriginalXHR = window.XMLHttpRequest;
+        if (typeof OriginalXHR !== 'function') return false;
+
+        COLLAPS_NATIVE_DASH.originalXHR = OriginalXHR;
+
+        function guessNativeContentType(url, responseType) {
+            var value = String(url || '').toLowerCase();
+            if (value.indexOf('.mpd') >= 0) return 'application/dash+xml';
+            if (value.indexOf('.webm') >= 0) return 'video/webm';
+            if (value.indexOf('.mp4') >= 0 || value.indexOf('.m4s') >= 0) return 'video/mp4';
+            if (String(responseType || '').toLowerCase() === 'arraybuffer') return 'application/octet-stream';
+            return 'text/plain';
+        }
+
+        function NativeDashXHR() {
+            this._delegate = null;
+            this._nativeRequest = null;
+            this._requestSerial = 0;
+            this._aborted = false;
+            this._useNative = false;
+            this._method = 'GET';
+            this._url = '';
+            this._async = true;
+            this._headers = {};
+            this._listeners = {};
+
+            this.readyState = 0;
+            this.status = 0;
+            this.statusText = '';
+            this.response = null;
+            this.responseText = '';
+            this.responseURL = '';
+            this.responseXML = null;
+
+            this._responseType = '';
+            this._timeout = 0;
+            this._withCredentials = false;
+
+            this.onloadstart = null;
+            this.onprogress = null;
+            this.onreadystatechange = null;
+            this.onload = null;
+            this.onerror = null;
+            this.onabort = null;
+            this.ontimeout = null;
+            this.onloadend = null;
+        }
+
+        NativeDashXHR.UNSENT = 0;
+        NativeDashXHR.OPENED = 1;
+        NativeDashXHR.HEADERS_RECEIVED = 2;
+        NativeDashXHR.LOADING = 3;
+        NativeDashXHR.DONE = 4;
+
+        NativeDashXHR.prototype.UNSENT = 0;
+        NativeDashXHR.prototype.OPENED = 1;
+        NativeDashXHR.prototype.HEADERS_RECEIVED = 2;
+        NativeDashXHR.prototype.LOADING = 3;
+        NativeDashXHR.prototype.DONE = 4;
+
+        NativeDashXHR.prototype._emit = function (type, extra) {
+            var evt = extra || {};
+            try { evt.type = evt.type || type; } catch (e) {}
+            try { evt.target = evt.target || this; } catch (e2) {}
+            try { evt.currentTarget = evt.currentTarget || this; } catch (e3) {}
+
+            var prop = this['on' + type];
+            if (typeof prop === 'function') {
+                try { prop.call(this, evt); } catch (e4) {}
+            }
+
+            var list = this._listeners[type] || [];
+            list.slice().forEach(function (fn) {
+                try { fn.call(this, evt); } catch (e5) {}
+            }, this);
+        };
+
+        NativeDashXHR.prototype.addEventListener = function (type, fn) {
+            if (typeof fn !== 'function') return;
+            if (!this._listeners[type]) this._listeners[type] = [];
+            this._listeners[type].push(fn);
+        };
+
+        NativeDashXHR.prototype.removeEventListener = function (type, fn) {
+            var list = this._listeners[type] || [];
+            this._listeners[type] = list.filter(function (x) { return x !== fn; });
+        };
+
+        NativeDashXHR.prototype.dispatchEvent = function (evt) {
+            this._emit(evt && evt.type || '', evt || {});
+            return true;
+        };
+
+        NativeDashXHR.prototype._syncDelegate = function () {
+            var d = this._delegate;
+            if (!d) return;
+            try { this.readyState = d.readyState; } catch (e) {}
+            try { this.status = d.status; } catch (e2) {}
+            try { this.statusText = d.statusText; } catch (e3) {}
+            try { this.response = d.response; } catch (e4) {}
+            try { this.responseText = d.responseText; } catch (e5) {}
+            try { this.responseURL = d.responseURL || this._url; } catch (e6) {}
+            try { this.responseXML = d.responseXML; } catch (e7) {}
+        };
+
+        NativeDashXHR.prototype._wireDelegate = function () {
+            var self = this;
+            var d = this._delegate;
+            if (!d || d.__mnogotvWired) return;
+            d.__mnogotvWired = true;
+
+            [
+                'loadstart',
+                'progress',
+                'readystatechange',
+                'load',
+                'error',
+                'abort',
+                'timeout',
+                'loadend'
+            ].forEach(function (type) {
+                try {
+                    d.addEventListener(type, function (evt) {
+                        self._syncDelegate();
+                        self._emit(type, evt || {});
+                    });
+                } catch (e) {}
+            });
+        };
+
+        NativeDashXHR.prototype.open = function (method, url, async, user, password) {
+            this._requestSerial++;
+            this._aborted = false;
+            this._method = String(method || 'GET').toUpperCase();
+            this._url = stripHash(String(url || ''));
+            this.responseURL = this._url;
+            this._async = async !== false;
+
+            this._useNative =
+                COLLAPS_NATIVE_DASH.active &&
+                isCollapsCdnUrl(this._url);
+
+            if (this._useNative) {
+                this.readyState = 1;
+                this._emit('readystatechange', {});
+                return;
+            }
+
+            this._delegate = new OriginalXHR();
+            this._wireDelegate();
+
+            try { this._delegate.timeout = this._timeout || 0; } catch (e0) {}
+            try { this._delegate.withCredentials = this._withCredentials; } catch (e1) {}
+            try {
+                this._delegate.open(
+                    this._method,
+                    this._url,
+                    this._async,
+                    user,
+                    password
+                );
+            } catch (e2) {
+                throw e2;
+            }
+        };
+
+        NativeDashXHR.prototype.setRequestHeader = function (name, value) {
+            if (this._useNative) {
+                this._headers[String(name)] = String(value);
+                return;
+            }
+            if (this._delegate) this._delegate.setRequestHeader(name, value);
+        };
+
+        NativeDashXHR.prototype.getResponseHeader = function (name) {
+            if (!this._useNative && this._delegate) {
+                try { return this._delegate.getResponseHeader(name); } catch (e) {}
+                return null;
+            }
+
+            var key = String(name || '').toLowerCase();
+            if (key === 'content-type') {
+                return guessNativeContentType(this._url, this._responseType);
+            }
+            if (key === 'accept-ranges') return 'bytes';
+            return null;
+        };
+
+        NativeDashXHR.prototype.getAllResponseHeaders = function () {
+            if (!this._useNative && this._delegate) {
+                try { return this._delegate.getAllResponseHeaders(); } catch (e) {}
+                return '';
+            }
+            return (
+                'Content-Type: ' +
+                guessNativeContentType(this._url, this._responseType) +
+                '\\r\\nAccept-Ranges: bytes\\r\\n'
+            );
+        };
+
+        NativeDashXHR.prototype.overrideMimeType = function (mime) {
+            if (!this._useNative && this._delegate && this._delegate.overrideMimeType) {
+                try { this._delegate.overrideMimeType(mime); } catch (e) {}
+            }
+        };
+
+        NativeDashXHR.prototype.send = function (body) {
+            if (!this._useNative) {
+                if (!this._delegate) throw new Error('XMLHttpRequest.open() not called');
+                try { this._delegate.responseType = this._responseType || ''; } catch (e0) {}
+                try { this._delegate.timeout = this._timeout || 0; } catch (e1) {}
+                try { this._delegate.withCredentials = this._withCredentials; } catch (e2) {}
+                this._delegate.send(body);
+                return;
+            }
+
+            var gate = COLLAPS_NATIVE_DASH.bufferProbe;
+            if (gate && gate.holding) {
+                var xhr = this, serial = this._requestSerial, gen = COLLAPS_NATIVE_DASH.generation;
+                gate.queue.push(function () {
+                    if (!xhr._aborted && serial === xhr._requestSerial && gen === COLLAPS_NATIVE_DASH.generation && COLLAPS_NATIVE_DASH.active) xhr.send(body);
+                });
+                return;
+            }
+
+            var self = this;
+            var network = null;
+
+            try { network = new Lampa.Reguest(); } catch (e3) {
+                try { network = new Lampa.Request(); } catch (e4) {}
+            }
+
+            if (!network || typeof network.native !== 'function') {
+                this.status = 0;
+                this.readyState = 4;
+                this._emit('readystatechange', {});
+                this._emit('error', {});
+                this._emit('loadend', {});
+                return;
+            }
+
+            this._nativeRequest = network;
+            var serial = ++this._requestSerial;
+            var generation = COLLAPS_NATIVE_DASH.generation;
+            function stale() {
+                return self._aborted || self._requestSerial !== serial ||
+                    generation !== COLLAPS_NATIVE_DASH.generation || !COLLAPS_NATIVE_DASH.active;
+            }
+            COLLAPS_NATIVE_DASH.requestCount++;
+            COLLAPS_NATIVE_DASH.lastUrl = this._url;
+
+            var headers = {};
+            Object.keys(this._headers || {}).forEach(function (k) {
+                headers[k] = self._headers[k];
+            });
+
+            /*
+             * Это ровно тот сетевой контекст, который виден в успешном HAR.
+             * XHR в WebView сам такой Origin выставить не может, native bridge
+             * может передать его как обычный HTTP header.
+             */
+            headers['User-Agent'] = COLLAPS_UA;
+            headers['Origin'] = COLLAPS_HOST;
+            headers['Referer'] = COLLAPS_REF;
+            headers['Accept'] = '*/*';
+
+            var binary =
+                String(this._responseType || '').toLowerCase() === 'arraybuffer';
+
+            try {
+                if (network.clear) network.clear();
+                if (network.timeout) {
+                    network.timeout(
+                        Math.max(
+                            10000,
+                            Number(this._timeout || 0) || 30000
+                        )
+                    );
+                }
+            } catch (e5) {}
+
+            this._emit('loadstart', {});
+
+            try {
+                collapsDashRequest(
+                    network, this._url,
+                    function (payload) {
+                        if (stale()) return;
+                        var data;
+                        try {
+                            data = binary
+                                ? base64ToArrayBuffer(payload)
+                                : String(payload || '');
+                        } catch (decodeError) {
+                            var payloadInfo = nativeDecodeSummary(payload, headers.Range || headers.range);
+                            COLLAPS_NATIVE_DASH.lastDecode = payloadInfo;
+                            COLLAPS_NATIVE_DASH.errorCount++;
+                            COLLAPS_NATIVE_DASH.lastStatus = 0;
+                            self.status = 0;
+                            self.statusText = 'native decode error';
+                            self.readyState = 4;
+                            self._emit('readystatechange', {});
+                            self._emit('error', { error: decodeError });
+                            self._emit('loadend', {});
+                            notify(
+                                'Collaps DASH: decode • ' +
+                                payloadInfo.summary
+                            );
+                            return;
+                        }
+
+                        if (!binary && /<MPD\b/.test(data)) COLLAPS_NATIVE_DASH.manifestInfo = collapsManifestInfo(data);
+
+                        var size = binary
+                            ? (data.byteLength || 0)
+                            : String(data || '').length;
+
+                        COLLAPS_NATIVE_DASH.successCount++;
+                        COLLAPS_NATIVE_DASH.lastStatus = 200;
+
+                        self.status = 200;
+                        self.statusText = 'OK';
+                        self.responseURL = self._url;
+
+                        self.readyState = 2;
+                        self._emit('readystatechange', {});
+
+                        self.readyState = 3;
+                        self._emit('readystatechange', {});
+                        self._emit('progress', {
+                            lengthComputable: size > 0,
+                            loaded: size,
+                            total: size
+                        });
+
+                        self.response = data;
+                        if (!binary) self.responseText = String(data || '');
+
+                        self.readyState = 4;
+                        self._emit('readystatechange', {});
+                        self._emit('load', {});
+                        self._emit('loadend', {});
+                    },
+                    function (a, c) {
+                        if (stale()) return;
+                        var status =
+                            a &&
+                            a.status !== undefined
+                                ? Number(a.status)
+                                : 0;
+
+                        COLLAPS_NATIVE_DASH.errorCount++;
+                        COLLAPS_NATIVE_DASH.lastStatus = status || 0;
+
+                        self.status = status || 0;
+                        self.statusText = errText(a || c || 'native network error');
+                        try {
+                            self.responseText =
+                                a && a.responseText
+                                    ? String(a.responseText)
+                                    : '';
+                        } catch (e6) {}
+                        self.readyState = 4;
+                        self._emit('readystatechange', {});
+                        self._emit('error', {
+                            status: self.status,
+                            error: a || c || null
+                        });
+                        self._emit('loadend', {});
+
+                        notify(
+                            'Collaps DASH: ' +
+                            (a && /^Collaps Range:/.test(a.responseText || '')
+                                ? a.responseText : 'native HTTP ' + (self.status || 0))
+                        );
+                    },
+                    false,
+                    {
+                        dataType: binary ? 'base64' : 'text',
+                        headers: headers
+                    }, stale, Math.max(10000, Number(this._timeout || 0) || 30000), COLLAPS_NATIVE_DASH.rangeRecovery
+                );
+            } catch (e7) {
+                COLLAPS_NATIVE_DASH.errorCount++;
+                COLLAPS_NATIVE_DASH.lastStatus = 0;
+                self.status = 0;
+                self.statusText = errText(e7);
+                self.readyState = 4;
+                self._emit('readystatechange', {});
+                self._emit('error', { error: e7 });
+                self._emit('loadend', {});
+            }
+        };
+
+        NativeDashXHR.prototype.abort = function () {
+            this._aborted = true;
+            this._requestSerial++;
+            try {
+                if (this._nativeRequest && this._nativeRequest.clear) {
+                    this._nativeRequest.clear();
+                }
+            } catch (e) {}
+
+            if (!this._useNative && this._delegate) {
+                try { this._delegate.abort(); } catch (e2) {}
+                return;
+            }
+
+            this.status = 0;
+            this.readyState = 4;
+            this._emit('readystatechange', {});
+            this._emit('abort', {});
+            this._emit('loadend', {});
+        };
+
+        Object.defineProperty(
+            NativeDashXHR.prototype,
+            'responseType',
+            {
+                get: function () {
+                    if (!this._useNative && this._delegate) {
+                        try { return this._delegate.responseType; } catch (e) {}
+                    }
+                    return this._responseType || '';
+                },
+                set: function (value) {
+                    this._responseType = String(value || '');
+                    if (!this._useNative && this._delegate) {
+                        try { this._delegate.responseType = value; } catch (e) {}
+                    }
+                }
+            }
+        );
+
+        Object.defineProperty(
+            NativeDashXHR.prototype,
+            'timeout',
+            {
+                get: function () { return this._timeout || 0; },
+                set: function (value) {
+                    this._timeout = Number(value || 0) || 0;
+                    if (!this._useNative && this._delegate) {
+                        try { this._delegate.timeout = this._timeout; } catch (e) {}
+                    }
+                }
+            }
+        );
+
+        Object.defineProperty(
+            NativeDashXHR.prototype,
+            'withCredentials',
+            {
+                get: function () { return !!this._withCredentials; },
+                set: function (value) {
+                    this._withCredentials = !!value;
+                    if (!this._useNative && this._delegate) {
+                        try { this._delegate.withCredentials = !!value; } catch (e) {}
+                    }
+                }
+            }
+        );
+
+        try {
+            window.XMLHttpRequest = NativeDashXHR;
+            COLLAPS_NATIVE_DASH.xhrInstalled = true;
+            log('Collaps DASH native XMLHttpRequest bridge installed');
+            return true;
+        } catch (e8) {
+            log('Collaps DASH native XMLHttpRequest bridge failed', e8);
+            return false;
+        }
+    }
+
+    function setCollapsDashAudioChoice(voiceChoice) {
+        var index =
+            voiceChoice &&
+            voiceChoice.index !== undefined
+                ? parseInt(voiceChoice.index, 10)
+                : -1;
+
+        COLLAPS_NATIVE_DASH.audioIndex =
+            isNaN(index)
+                ? -1
+                : index;
+
+        COLLAPS_NATIVE_DASH.audioLabel =
+            voiceChoice &&
+            voiceChoice.label
+                ? String(voiceChoice.label)
+                : '';
+
+        /*
+         * Force the next dash.js instance to apply the new choice even if
+         * the same MediaPlayer wrapper remains installed.
+         */
+        COLLAPS_NATIVE_DASH.audioAppliedKey = '';
+    }
+
+    function collapsDashTrackNumber(track, fallbackIndex) {
+        track = track || {};
+
+        var lang = String(track.lang || track.language || track.mediaInfo && track.mediaInfo.lang || '');
+        var suffix = lang.match(/(\d+)$/);
+        if (suffix) return Number(suffix[1]);
+        var index = track.index;
+        return typeof index === 'number' ? index : fallbackIndex;
+    }
+
+    function installCollapsDashAudioMap(player) {
+        if (!player.getTracksFor || !player.setCurrentTrack) return;
+        var get = player.getTracksFor, set = player.setCurrentTrack;
+        var generation = COLLAPS_NATIVE_DASH.generation;
+        var names = COLLAPS_NATIVE_DASH.audioNames || [];
+        player.getTracksFor = function (type) {
+            var tracks = get.apply(player, arguments) || [];
+            if (type !== 'audio') return tracks;
+            var labels = [];
+            var copies = tracks.map(function (track, i) {
+                var number = collapsDashTrackNumber(track, i), name = null, copy = {};
+                names.some(function (n) { if (n.index === number) { name = n; return true; } return false; });
+                Object.keys(track).forEach(function (key) { if (key !== 'enabled') copy[key] = track[key]; });
+                Object.defineProperty(copy, '__collapsOriginal', {value:track});
+                labels.push({language:name ? name.label : String(track.lang || 'Дорожка ' + (i + 1))});
+                return copy;
+            });
+            if (generation === COLLAPS_NATIVE_DASH.generation && Lampa.PlayerPanel && Lampa.PlayerPanel.setTranslate)
+                Lampa.PlayerPanel.setTranslate({tracks:labels});
+            return copies;
+        };
+        player.setCurrentTrack = function (track) {
+            if (generation !== COLLAPS_NATIVE_DASH.generation || !COLLAPS_NATIVE_DASH.active) return;
+            var original = track && track.__collapsOriginal || track;
+            var result = set.call(player, original);
+            // A user's choice must not be overwritten by delayed startup retries.
+            if (original && original.type === 'audio') {
+                COLLAPS_NATIVE_DASH.audioIndex = -1;
+                COLLAPS_NATIVE_DASH.audioAppliedKey = '';
+            }
+            return result;
+        };
+    }
+
+    function applyCollapsDashAudioChoice(player, reason) {
+        if (
+            !COLLAPS_NATIVE_DASH.active ||
+            !player ||
+            COLLAPS_NATIVE_DASH.audioIndex < 0
+        ) {
+            return false;
+        }
+
+        if (
+            typeof player.getTracksFor !== 'function' ||
+            typeof player.setCurrentTrack !== 'function'
+        ) {
+            return false;
+        }
+
+        var tracks = [];
+        try {
+            tracks = player.getTracksFor('audio') || [];
+        } catch (e) {
+            return false;
+        }
+
+        if (!tracks.length) return false;
+
+        var wanted = COLLAPS_NATIVE_DASH.audioIndex;
+        var chosen = null;
+        var chosenArrayIndex = -1;
+
+        for (var i = 0; i < tracks.length; i++) {
+            if (Number(collapsDashTrackNumber(tracks[i], i)) === Number(wanted)) {
+                chosen = tracks[i];
+                chosenArrayIndex = i;
+                break;
+            }
+        }
+
+        /*
+         * Last-resort fallback for MPDs without ids/lang suffixes.
+         */
+        if (!chosen && tracks[wanted]) {
+            chosen = tracks[wanted];
+            chosenArrayIndex = wanted;
+        }
+
+        if (!chosen) {
+            log(
+                'Collaps DASH audio track not found',
+                wanted,
+                tracks
+            );
+            return false;
+        }
+
+        var key =
+            String(wanted) +
+            '|' +
+            String(
+                chosen.id !== undefined
+                    ? chosen.id
+                    : chosenArrayIndex
+            ) +
+            '|' +
+            String(chosen.lang || '');
+
+        if (COLLAPS_NATIVE_DASH.audioAppliedKey === key) {
+            return true;
+        }
+
+        try {
+            player.setCurrentTrack(chosen);
+            COLLAPS_NATIVE_DASH.audioAppliedKey = key;
+
+            log(
+                'Collaps DASH audio selected',
+                {
+                    wantedIndex: wanted,
+                    label: COLLAPS_NATIVE_DASH.audioLabel,
+                    chosenArrayIndex: chosenArrayIndex,
+                    chosenId: chosen.id,
+                    chosenLang: chosen.lang,
+                    reason: reason || ''
+                }
+            );
+
+            try {
+                notify(
+                    'Collaps: озвучка ' +
+                    (
+                        COLLAPS_NATIVE_DASH.audioLabel ||
+                        ('дорожка ' + (wanted + 1))
+                    )
+                );
+            } catch (eNoty) {}
+
+            return true;
+        } catch (e2) {
+            log('Collaps DASH setCurrentTrack failed', e2);
+            return false;
+        }
+    }
+
+    function collapsManifestInfo(text) {
+        var result = [];
+        try {
+            var doc = new DOMParser().parseFromString(text, 'application/xml');
+            if (doc.getElementsByTagName('parsererror').length) return result;
+            var sets = doc.getElementsByTagName('AdaptationSet');
+            for (var i = 0; i < sets.length; i++) {
+                var set = sets[i], reps = set.getElementsByTagName('Representation');
+                for (var j = 0; j < reps.length; j++) {
+                    var rep = reps[j];
+                    function attr(name) { return rep.getAttribute(name) || set.getAttribute(name) || ''; }
+                    var mime = attr('mimeType'), type = attr('contentType');
+                    if (type !== 'video' && mime.indexOf('video/') !== 0) continue;
+                    result.push({id: rep.getAttribute('id') || '', height: Number(attr('height')) || 0,
+                        width: Number(attr('width')) || 0, codec: attr('codecs'), mime: mime});
+                }
+            }
+        } catch (e) {}
+        return result;
+    }
+
+    function collapsCodecLabel(codec) {
+        var family = /^avc[13]/i.test(codec) ? 'H.264' : /^av01/i.test(codec) ? 'AV1' :
+            /^(?:vp09|vp9)/i.test(codec) ? 'VP9' : /^(?:hvc1|hev1)/i.test(codec) ? 'HEVC' : '';
+        return codec ? (family ? family + ' (' + codec + ')' : codec) : 'н/д';
+    }
+
+    function installCollapsMonitor(player) {
+        if (!(global.MnogoTVDiagnostics === true)) return {start:function(){}, dispose:function(){}};
+        var video = null, panel = null, timer = null, disposed = false, previous = null;
+        var phase = 'запуск', subscriptions = [], generation = COLLAPS_NATIVE_DASH.generation;
+        var history = [], expectedTick = 0, lagMs = 0;
+        var summary = { samples: 0, totalFrames: 0, droppedFrames: 0, maxLagMs: 0, minBuffer: null, waits: 0 };
+        var probe = {holding:false, queue:[], status:'ожидание запаса 30с', done:false};
+        COLLAPS_NATIVE_DASH.bufferProbe = probe;
+        var probeTimer = null;
+        function finishProbe(reason, flush) {
+            if (!probe.holding) return;
+            probe.holding = false; probe.done = true; probe.status = reason;
+            probe.elapsed = Date.now() - probe.started;
+            try {
+                var q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : {totalVideoFrames:video.webkitDecodedFrameCount,droppedVideoFrames:video.webkitDroppedFrameCount};
+                probe.frames = Math.max(0, q.totalVideoFrames - probe.total);
+                probe.drops = Math.max(0, q.droppedVideoFrames - probe.dropped);
+            } catch (e) {}
+            if (probeTimer !== null) clearTimeout(probeTimer);
+            probeTimer = null;
+            var queued = probe.queue; probe.queue = [];
+            if (flush) queued.forEach(function (resume) { resume(); });
+        }
+        function active() { return !disposed && COLLAPS_NATIVE_DASH.active && generation === COLLAPS_NATIVE_DASH.generation; }
+        function sample() {
+            if (!active()) return dispose();
+            if (!video) return;
+            var now = Date.now(), recovery = COLLAPS_NATIVE_DASH.rangeRecovery;
+            var network = recovery && recovery.telemetry, count = 0, oldest = 0, largest = null, rangeDetail = null;
+            if (network) {
+                Object.keys(network.active).forEach(function (id) {
+                    var item = network.active[id];
+                    if (!item.alive()) { delete network.active[id]; return; }
+                    count++; oldest = Math.max(oldest, (now - item.started) / 1000);
+                    if (item.detail && (!rangeDetail || item.started < rangeDetail.started)) rangeDetail = item.detail;
+                });
+                network.completed.forEach(function (item) {
+                    if (now - item.finished < 15000 && (!largest || item.bytes > largest.bytes)) largest = item;
+                });
+            }
+            function buffer(type) {
+                try {
+                    var value = player.getBufferLength && player.getBufferLength(type);
+                    return typeof value === 'number' && isFinite(value) ? value.toFixed(1) + 'с' : 'н/д';
+                } catch (e) { return 'н/д'; }
+            }
+            var av = 0;
+            try {
+                for (var i = 0; i < video.buffered.length; i++) {
+                    if (video.currentTime >= video.buffered.start(i) && video.currentTime <= video.buffered.end(i)) {
+                        av = video.buffered.end(i) - video.currentTime; break;
+                    }
+                }
+            } catch (e) {}
+            var frames = 'н/д', total = null, dropped = null;
+            try {
+                if (video.getVideoPlaybackQuality) {
+                    var quality = video.getVideoPlaybackQuality(); total = quality.totalVideoFrames; dropped = quality.droppedVideoFrames;
+                } else { total = video.webkitDecodedFrameCount; dropped = video.webkitDroppedFrameCount; }
+                if (typeof total === 'number' && typeof dropped === 'number') {
+                    if (previous && !previous.paused && !video.paused && total >= previous.total && dropped >= previous.dropped) {
+                        summary.totalFrames += total - previous.total;
+                        summary.droppedFrames += dropped - previous.dropped;
+                    }
+                    frames = previous && total >= previous.total && dropped >= previous.dropped
+                        ? '+' + (dropped - previous.dropped) + '/' + (total - previous.total) + ' за ' + ((now - previous.time) / 1000).toFixed(1) + 'с' : 'сбор данных';
+                    previous = {total: total, dropped: dropped, time: now, paused: video.paused};
+                }
+            } catch (e2) {}
+            if (probe.holding) {
+                probe.maxLag = Math.max(probe.maxLag, lagMs);
+                if (av < 15 || video.paused || video.seeking || video.videoHeight !== probe.height)
+                    finishProbe('досрочно: буфер/пауза/переключение', true);
+            } else if (!probe.done && !video.paused && !video.seeking && phase === 'воспроизведение' &&
+                av >= 30 && count === 0 && summary.samples >= 10 && typeof total === 'number' && typeof dropped === 'number') {
+                probe.holding = true; probe.status = 'без новых DASH-запросов';
+                probe.started = now; probe.total = total; probe.dropped = dropped;
+                probe.height = video.videoHeight; probe.maxLag = 0;
+                probe.baseline = {frames:summary.totalFrames, drops:summary.droppedFrames};
+                probeTimer = setTimeout(function () { finishProbe('завершён', active()); }, 10000);
+            }
+            if (!video.paused) {
+                summary.samples++;
+                summary.minBuffer = summary.minBuffer === null ? av : Math.min(summary.minBuffer, av);
+                history.push({time: now, position: video.currentTime, height: video.videoHeight,
+                    buffer: av, total: total, dropped: dropped, lagMs: lagMs, phase: phase});
+                if (history.length > 120) history.shift();
+            }
+            COLLAPS_NATIVE_DASH.playbackTelemetry = {time: now, summary: summary, history: history, panelMode: 'pause-only', bufferProbe: probe};
+            // No text formatting or DOM text updates while video is running.
+            if (!video.paused && phase !== 'конец') {
+                if (panel && panel.style.display !== 'none') panel.style.display = 'none';
+                return;
+            }
+            var manifest = COLLAPS_NATIVE_DASH.manifestInfo || [], codecs = [], heights = [];
+            manifest.forEach(function (rep) {
+                if (rep.height && heights.indexOf(rep.height) < 0) heights.push(rep.height);
+                if (rep.height === Number(video.videoHeight) && codecs.indexOf(rep.codec) < 0) codecs.push(rep.codec);
+            });
+            var codec = codecs.length ? codecs.map(collapsCodecLabel).join(' / ') : 'н/д';
+            var text = 'Collaps DASH | ' + (video.videoHeight || '?') + 'p | ' + (video.paused ? 'пауза' : phase) + '\n' +
+                'Поток: ' + COLLAPS_NATIVE_DASH.selectedPath + ' | кодек: ' + codec + '\n' +
+                'Разрешения MPD: ' + (heights.sort(function (a, b) { return a - b; }).join(', ') || 'н/д') + '\n' +
+                'Буфер видео ' + buffer('video') + ' | звук ' + buffer('audio') + ' | общий ' + av.toFixed(1) + 'с\n' +
+                'Пропуски кадров: ' + frames + ' | запросов ' + count + ' | ожидание ' + oldest.toFixed(1) + 'с\n' +
+                'Крупный фрагм. за 15с: ' + (largest ? (largest.bytes / 1048576).toFixed(2) + ' МБ / ' + (largest.ms / 1000).toFixed(2) + 'с' : 'нет данных');
+            var rangeText = rangeDiagnosticText(rangeDetail || recovery && recovery.lastRange, now);
+            if (rangeText) text += '\n' + rangeText;
+            if (recovery && recovery.lastFailure) text += '\nПоследний сбой: ' + rangeDiagnosticText(recovery.lastFailure, recovery.lastFailure.started + recovery.lastFailure.elapsedMs);
+            text += '\nСводка просмотра: пропуски ' + summary.droppedFrames + '/' + summary.totalFrames +
+                ' | waiting ' + summary.waits + ' | мин. буфер ' + (summary.minBuffer === null ? '?' : summary.minBuffer.toFixed(1)) + 'с' +
+                '\nЗадержка таймера JS: максимум ' + summary.maxLagMs.toFixed(0) + ' мс';
+            text += '\nТест буфера: ' + probe.status;
+            if (probe.done) text += ' | ' + (probe.elapsed / 1000).toFixed(1) + 'с | пропуски ' + probe.drops + '/' + probe.frames +
+                ' | JS ≤' + probe.maxLag.toFixed(0) + ' мс' + '\nДо теста: ' + probe.baseline.drops + '/' + probe.baseline.frames;
+            COLLAPS_NATIVE_DASH.playbackTelemetry.text = text;
+            if (panel) { panel.style.display = 'block'; panel.textContent = text; }
+        }
+        function dispose() {
+            finishProbe('отмена сессии', false);
+            if (COLLAPS_NATIVE_DASH.bufferProbe === probe) COLLAPS_NATIVE_DASH.bufferProbe = null;
+            disposed = true;
+            if (timer !== null) clearInterval(timer);
+            timer = null;
+            subscriptions.forEach(function (sub) { if (video && video.removeEventListener) video.removeEventListener(sub.name, sub.fn); });
+            subscriptions = [];
+            if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+            panel = null; video = null;
+        }
+        return {start: function (element) {
+            if (!active() || timer !== null) return;
+            video = element && element.addEventListener ? element : null;
+            if (!video) { try { video = player.getVideoElement && player.getVideoElement(); } catch (e) {} }
+            if (!video || !video.addEventListener) return;
+            ['waiting', 'playing', 'seeking', 'seeked', 'pause', 'ended'].forEach(function (name) {
+                var fn = function () {
+                    if (name === 'waiting') summary.waits++;
+                    if (name === 'seeking' || name === 'pause' || name === 'ended') finishProbe('досрочно: ' + name, true);
+                    phase = {waiting:'загрузка',playing:'воспроизведение',seeking:'перемотка',seeked:'после перемотки',pause:'пауза',ended:'конец'}[name];
+                    sample();
+                };
+                video.addEventListener(name, fn); subscriptions.push({name:name, fn:fn});
+            });
+            if (typeof document !== 'undefined' && document.createElement && document.body) {
+                panel = document.createElement('div');
+                panel.style.cssText = 'position:fixed;left:3%;top:3%;z-index:2147483646;background:rgba(0,0,0,.8);color:#fff;padding:10px 14px;font:18px/1.4 sans-serif;white-space:pre-line;pointer-events:none;';
+                document.body.appendChild(panel);
+            }
+            expectedTick = Date.now() + 1000;
+            timer = setInterval(function () {
+                var now = Date.now(); lagMs = Math.max(0, now - expectedTick); expectedTick = now + 1000;
+                if (video && !video.paused) summary.maxLagMs = Math.max(summary.maxLagMs, lagMs);
+                sample();
+            }, 1000); sample();
+        }, dispose: dispose};
+    }
+
+    function installCollapsDashQuality(player, events) {
+        if (!player || !player.getBitrateInfoListFor || !player.setQualityFor ||
+            !player.updateSettings || !player.getSettings) return null;
+        var alive = true, automatic = false, requested = null, rendered = null, startup = true;
+        var subscriptions = [];
+        var generation = COLLAPS_NATIVE_DASH.generation;
+        var nativeLevels = player.getBitrateInfoListFor;
+        // Lampa adds non-configurable enabled setters to this result.
+        player.getBitrateInfoListFor = function (type) {
+            return (nativeLevels.call(player, type) || []).map(function (level) {
+                var copy = {};
+                Object.keys(level).forEach(function (key) {
+                    if (key !== 'enabled') copy[key] = level[key];
+                });
+                return copy;
+            });
+        };
+        function active() {
+            return alive && COLLAPS_NATIVE_DASH.active &&
+                generation === COLLAPS_NATIVE_DASH.generation;
+        }
+        function levels() {
+            try { return player.getBitrateInfoListFor('video') || []; }
+            catch (e) { return []; }
+        }
+        function setAuto(value) {
+            var settings = player.getSettings();
+            var abr = settings && settings.streaming && settings.streaming.abr;
+            // Lampa writes a boolean where dash.js expects a per-media object.
+            if (abr && (!abr.autoSwitchBitrate || typeof abr.autoSwitchBitrate !== 'object')) {
+                abr.autoSwitchBitrate = { video: value, audio: true };
+            }
+            player.updateSettings({ streaming: { abr: {
+                autoSwitchBitrate: { video: value, audio: true }
+            } } });
+        }
+        function labelFor(index, list) {
+            var match = null;
+            list.some(function (level, i) {
+                if (Number(level.qualityIndex === undefined ? i : level.qualityIndex) === Number(index)) {
+                    match = level; return true;
+                }
+                return false;
+            });
+            return match && Number(match.height) > 0 ? Number(match.height) + 'p' : '';
+        }
+        function publish() {
+            if (!active() || !Lampa.PlayerPanel || !Lampa.PlayerPanel.quality ||
+                !Lampa.PlayerPanel.setLevels) return;
+            var list = levels();
+            if (!list.length) return;
+            var actual = rendered === null ? '' : labelFor(rendered, list);
+            var target = requested === null ? '' : labelFor(requested, list);
+            var label = automatic ? 'AUTO' + (actual ? ' · ' + actual : '') :
+                (actual && rendered !== requested ? actual + ' → ' + target : target);
+            var menu = [];
+            function entry(title, index) {
+                var row = { title: title, quality: title, selected: index === null ? automatic : !automatic && requested === index };
+                Object.defineProperty(row, 'enabled', {
+                    configurable: true,
+                    get: function () { return row.selected; },
+                    set: function (value) {
+                        if (!value || !active()) return;
+                        automatic = index === null;
+                        requested = index;
+                        setAuto(automatic);
+                        if (!automatic) player.setQualityFor('video', index, false);
+                        publish();
+                    }
+                });
+                menu.push(row);
+            }
+            entry('AUTO', null);
+            list.forEach(function (level, i) {
+                var index = Number(level.qualityIndex === undefined ? i : level.qualityIndex);
+                if (Number(level.height) > 0) entry(Number(level.height) + 'p', index);
+            });
+            // Use Lampa's panel API; array entries switch quality without reloading the URL.
+            Lampa.PlayerPanel.quality({}, '__collaps_levels__');
+            Lampa.PlayerPanel.setLevels(menu, label || 'AUTO');
+        }
+        function on(name, callback) {
+            if (name && player.on) {
+                player.on(name, callback);
+                subscriptions.push({ name: name, callback: callback });
+            }
+        }
+        on(events.STREAM_INITIALIZED, function () {
+            if (!active()) return;
+            if (startup) {
+                var list = levels(), chosen = null;
+                list.forEach(function (level, i) {
+                    if (level.height > 0 && level.height <= 720 && (!chosen || level.height > chosen.height))
+                        chosen = {height:level.height,index:Number(level.qualityIndex === undefined ? i : level.qualityIndex)};
+                });
+                if (chosen) { requested = chosen.index; automatic = false; player.setQualityFor('video', requested, false); }
+                else automatic = true;
+                startup = false;
+            }
+            setAuto(automatic);
+            publish();
+        });
+        on(events.QUALITY_CHANGE_RENDERED, function (event) {
+            if (!active() || !event || event.mediaType !== 'video') return;
+            if (event.newQuality !== undefined) rendered = Number(event.newQuality);
+            publish();
+        });
+        on(events.PLAYBACK_PLAYING || events.PLAYBACK_STARTED, publish);
+        return {
+            start: function () {
+                if (!active()) return;
+                automatic = false; requested = null; rendered = null; startup = true;
+                setAuto(false);
+            },
+            dispose: function () {
+                alive = false;
+                subscriptions.forEach(function (sub) {
+                    try { if (player.off) player.off(sub.name, sub.callback); } catch (e) {}
+                });
+                subscriptions = [];
+            },
+            diagnostics: function () {
+                return { automatic: automatic, requested: requested, rendered: rendered };
+            }
+        };
+    }
+
+    function configureCollapsNativeDash(unixTime) {
+        COLLAPS_NATIVE_DASH.unixTime = parseInt(unixTime || 0, 10) || 0;
+        COLLAPS_NATIVE_DASH.active = true;
+
+        if (!installCollapsDashNativeXHR()) {
+            log('Collaps DASH native XMLHttpRequest bridge unavailable');
+            return false;
+        }
+
+        if (COLLAPS_NATIVE_DASH.installed) return true;
+        if (
+            typeof dashjs === 'undefined' ||
+            !dashjs ||
+            typeof dashjs.MediaPlayer !== 'function'
+        ) {
+            return false;
+        }
+
+        var OriginalMediaPlayer = dashjs.MediaPlayer;
+        COLLAPS_NATIVE_DASH.originalMediaPlayer = OriginalMediaPlayer;
+
+        function WrappedMediaPlayer() {
+            var factory = OriginalMediaPlayer.apply(this, arguments);
+            if (!factory || typeof factory.create !== 'function') return factory;
+
+            var originalCreate = factory.create;
+            factory.create = function () {
+                var player = originalCreate.apply(factory, arguments);
+
+                if (
+                    COLLAPS_NATIVE_DASH.active &&
+                    player &&
+                    typeof player.extend === 'function'
+                ) {
+                    var unix = COLLAPS_NATIVE_DASH.unixTime;
+                    if (COLLAPS_NATIVE_DASH.qualityControl) COLLAPS_NATIVE_DASH.qualityControl.dispose();
+                    if (COLLAPS_NATIVE_DASH.monitor) COLLAPS_NATIVE_DASH.monitor.dispose();
+                    installCollapsDashAudioMap(player);
+                    var monitor = installCollapsMonitor(player);
+                    COLLAPS_NATIVE_DASH.monitor = monitor;
+                    var qualityControl = installCollapsDashQuality(player, factory.events || dashjs.MediaPlayer.events || {});
+                    COLLAPS_NATIVE_DASH.qualityControl = qualityControl;
+                    if (typeof player.destroy === 'function') {
+                        var originalDestroy = player.destroy;
+                        player.destroy = function () {
+                            if (qualityControl) qualityControl.dispose();
+                            monitor.dispose();
+                            return originalDestroy.apply(player, arguments);
+                        };
+                    }
+
+                    try {
+                        player.extend(
+                            'RequestModifier',
+                            function () {
+                                return {
+                                    modifyRequestHeader: function (xhr) {
+                                        return xhr;
+                                    },
+                                    modifyRequestURL: function (url) {
+                                        var value = String(url || '');
+                                        try {
+                                            if (
+                                                isCollapsCdnUrl(value) &&
+                                                value.indexOf('/x-en-x/') === -1
+                                            ) {
+                                                var mapped = collapsClientCdnUrl(
+                                                    value,
+                                                    unix,
+                                                    '',
+                                                    false
+                                                );
+                                                mapped = stripHash(mapped);
+                                                log('Collaps DASH map', value, '=>', mapped);
+                                                return mapped;
+                                            }
+                                        } catch (e) {
+                                            log('Collaps DASH map error', e);
+                                        }
+                                        return value;
+                                    }
+                                };
+                            },
+                            true
+                        );
+                    } catch (e2) {
+                        log('Collaps DASH RequestModifier install error', e2);
+                    }
+
+                    /*
+                     * Generic Lampa.PlayerVideo.setParams({track}) is not a
+                     * reliable selector for dash.js. Select the Collaps audio
+                     * AdaptationSet inside dash.js itself.
+                     */
+                    try {
+                        var audioEvents =
+                            factory.events ||
+                            (
+                                dashjs &&
+                                dashjs.MediaPlayer &&
+                                dashjs.MediaPlayer.events
+                            ) ||
+                            {};
+
+                        if (typeof player.on === 'function') {
+                            if (audioEvents.STREAM_INITIALIZED) {
+                                player.on(
+                                    audioEvents.STREAM_INITIALIZED,
+                                    function () {
+                                        applyCollapsDashAudioChoice(
+                                            player,
+                                            'STREAM_INITIALIZED'
+                                        );
+                                    }
+                                );
+                            }
+
+                            if (audioEvents.PLAYBACK_METADATA_LOADED) {
+                                player.on(
+                                    audioEvents.PLAYBACK_METADATA_LOADED,
+                                    function () {
+                                        applyCollapsDashAudioChoice(
+                                            player,
+                                            'PLAYBACK_METADATA_LOADED'
+                                        );
+                                    }
+                                );
+                            }
+
+                            if (audioEvents.PLAYBACK_STARTED) {
+                                player.on(
+                                    audioEvents.PLAYBACK_STARTED,
+                                    function () {
+                                        applyCollapsDashAudioChoice(
+                                            player,
+                                            'PLAYBACK_STARTED'
+                                        );
+                                    }
+                                );
+                            }
+                        }
+
+                        /*
+                         * Some dash.js builds expose the tracks a little later
+                         * than STREAM_INITIALIZED. Retry briefly after
+                         * initialize(), without delaying playback.
+                         */
+                        if (typeof player.initialize === 'function') {
+                            var originalInitialize = player.initialize;
+
+                            player.initialize = function () {
+                                if (qualityControl) qualityControl.start();
+                                var result =
+                                    originalInitialize.apply(
+                                        player,
+                                        arguments
+                                    );
+
+                                monitor.start(arguments[0]);
+                                [250, 700, 1500, 3000].forEach(function (ms) {
+                                    setTimeout(function () {
+                                        applyCollapsDashAudioChoice(
+                                            player,
+                                            'retry-' + ms
+                                        );
+                                    }, ms);
+                                });
+
+                                return result;
+                            };
+                        }
+                    } catch (eAudio) {
+                        log(
+                            'Collaps DASH audio selector install error',
+                            eAudio
+                        );
+                    }
+
+                    try {
+                        var events = factory.events || {};
+                        if (typeof player.on === 'function' && events.ERROR) {
+                            player.on(events.ERROR, function (evt) {
+                                try {
+                                    var er = evt && evt.error || evt || {};
+                                    var req = er && er.data && er.data.request || {};
+                                    var code = er.code !== undefined ? er.code : '';
+                                    var message = er.message || er.name || 'dash error';
+                                    var reqUrl = req.url || '';
+                                    notify(
+                                        'Collaps DASH DEBUG: ' +
+                                        (code !== '' ? ('code ' + code + ' • ') : '') +
+                                        message +
+                                        (reqUrl ? (' • ' + reqUrl.slice(0, 110)) : '')
+                                    );
+                                } catch (eDbg) {}
+                            });
+                        }
+                    } catch (e3) {}
+                }
+
+                return player;
+            };
+
+            return factory;
+        }
+
+        try {
+            Object.keys(OriginalMediaPlayer).forEach(function (key) {
+                try { WrappedMediaPlayer[key] = OriginalMediaPlayer[key]; } catch (e) {}
+            });
+            try { WrappedMediaPlayer.prototype = OriginalMediaPlayer.prototype; } catch (e2) {}
+            dashjs.MediaPlayer = WrappedMediaPlayer;
+            COLLAPS_NATIVE_DASH.installed = true;
+            log('Collaps DASH RequestModifier installed');
+            return true;
+        } catch (e3) {
+            log('Collaps DASH wrapper install failed', e3);
+            return false;
+        }
+    }
+
+    function resolveCollaps(
+        source,
+        imdb,
+        season,
+        episode,
+        ok,
+        fail,
+        dashMode,
+        format
+    ) {
+        getKpId(
+            imdb,
+            function (kp) {
+                tryCollapsUrls(
+                    source,
+                    imdb,
+                    kp,
+                    season,
+                    episode,
+                    function (response) {
+                        var cfg =
+                            response.config;
+
+                        var item =
+                            pickCollapsItem(
+                                cfg,
+                                season,
+                                episode
+                            );
+
+                        if (!item) {
+                            fail(
+                                new Error(
+                                    season !== null
+                                        ? (
+                                            'Collaps: серия S' +
+                                            season +
+                                            'E' +
+                                            episode +
+                                            ' не найдена'
+                                        )
+                                        : 'Collaps: поток не найден'
+                                )
+                            );
+                            return;
+                        }
+
+                        var dashaStream =
+                            normalizeDirectUrl(
+                                item.dasha ||
+                                (
+                                    item.source &&
+                                    item.source.dasha
+                                ) ||
+                                ''
+                            );
+
+                        var dashStream =
+                            normalizeDirectUrl(
+                                item.dash ||
+                                (
+                                    item.source &&
+                                    item.source.dash
+                                ) ||
+                                ''
+                            );
+
+                        var hlsStream =
+                            normalizeDirectUrl(
+                                item.hls ||
+                                (
+                                    item.source &&
+                                    item.source.hls
+                                ) ||
+                                ''
+                            );
+
+                        if (
+                            season === null &&
+                            cfg.source
+                        ) {
+                            if (!dashaStream) {
+                                dashaStream = normalizeDirectUrl(
+                                    cfg.source.dasha || ''
+                                );
+                            }
+                            if (!dashStream) {
+                                dashStream = normalizeDirectUrl(
+                                    cfg.source.dash || ''
+                                );
+                            }
+                            if (!hlsStream) {
+                                hlsStream = normalizeDirectUrl(
+                                    cfg.source.hls || ''
+                                );
+                            }
+                            item = cfg.source;
+                        }
+
+                        if (!dashaStream && !dashStream && !hlsStream) {
+                            fail(new Error('Collaps: DASHA/DASH/HLS не найден'));
+                            return;
+                        }
+
+                        var cdnMeta = cfg.__mnogotvCdn || {};
+                        var cdnUnix = parseInt(cdnMeta.unixTime || 0, 10) || 0;
+                        var cdnKey = String(cdnMeta.key || '');
+                        var av1 = collapsAv1Supported();
+                        var selectedDash = '';
+                        var selectedDashLabel = '';
+
+                        /*
+                         * HAR mnogotv.com5-2: S1E1 uses DASHA/AV1 with
+                         * 486/720/1080 renditions. Prefer the provider DASH
+                         * path; HLS may expose a different rendition ladder.
+                         * AUTO remains under the stock player's ABR control.
+                         */
+                        if (format === 'hls') {
+                            if (!hlsStream) {
+                                fail(new Error('Collaps: HLS для этого видео отсутствует'));
+                                return;
+                            }
+                        }
+                        else if (dashMode === 'alternative' || format === 'vp9') {
+                            if (!dashStream) {
+                                fail(new Error('Collaps-VP9: DASH-поток для этого видео отсутствует'));
+                                return;
+                            }
+                            selectedDash = dashStream;
+                            selectedDashLabel = 'DASH / VP9';
+                        }
+                        else if (format === 'av1') {
+                            if (!dashaStream || !av1) { fail(new Error('Collaps-AV1: поток отсутствует или AV1 не поддерживается плеером')); return; }
+                            selectedDash = dashaStream; selectedDashLabel = 'DASHA/AV1';
+                        }
+                        else if (dashaStream && av1) {
+                            selectedDash = dashaStream;
+                            selectedDashLabel = 'DASHA/AV1';
+                        }
+                        else if (dashStream) {
+                            selectedDash = dashStream;
+                            selectedDashLabel = 'DASH';
+                        }
+
+                        if (format === 'dash' && !selectedDash) {
+                            fail(new Error('Collaps: совместимый DASH отсутствует; выберите HLS, если он доступен'));
+                            return;
+                        }
+
+                        if (selectedDash) {
+                            var clientDashUrl = collapsClientCdnUrl(
+                                selectedDash,
+                                cdnUnix,
+                                cdnKey,
+                                true
+                            );
+
+                            if (!clientDashUrl) {
+                                fail(new Error('Collaps: DASH client URL не построен'));
+                                return;
+                            }
+
+                            if (!configureCollapsNativeDash(cdnUnix)) {
+                                fail(new Error('Collaps: DASH native transport недоступен'));
+                                return;
+                            }
+
+                            COLLAPS_NATIVE_DASH.selectedPath = selectedDashLabel;
+                            COLLAPS_NATIVE_DASH.audioNames = normalizeTracks(item.audio || {});
+                            ok({
+                                provider: 'Collaps',
+                                directUrl: stripHash(clientDashUrl) + '#manifest.mpd',
+                                directHeaders: {},
+                                relayUrl: '',
+                                relayReady: false,
+                                externalDirect: false,
+                                subtitles: normalizeSubs(item.cc || item.subtitles || []),
+                                tracks: normalizeTracks(item.audio || {}),
+                                quality: selectedDashLabel,
+                                resolvedBy:
+                                    response.label +
+                                    (kp ? (' • KP ' + kp) : '') +
+                                    ' • ' + selectedDashLabel + '/NATIVE-XHR'
+                            });
+                            return;
+                        }
+
+                        /* Real master playlist: AUTO plus all provider qualities. */
+                        if (hlsStream) {
+                            var hlsHeaders = collapsPlaybackHeaders('hls');
+                            var clientHlsUrl = collapsClientCdnUrl(
+                                hlsStream,
+                                cdnUnix,
+                                cdnKey,
+                                true
+                            );
+
+                            if (!clientHlsUrl) {
+                                fail(new Error('Collaps: HLS client URL не построен'));
+                                return;
+                            }
+
+                            if (!configureCollapsNativeHls(
+                                hlsStream,
+                                clientHlsUrl,
+                                cdnUnix,
+                                cdnKey,
+                                hlsHeaders
+                            )) {
+                                fail(new Error('Collaps: HLS native transport недоступен'));
+                                return;
+                            }
+
+                            ok({
+                                provider: 'Collaps',
+                                directUrl: stripHash(clientHlsUrl) + '#master.m3u8',
+                                directHeaders: hlsHeaders,
+                                relayUrl: '',
+                                relayReady: false,
+                                externalDirect: false,
+                                subtitles: normalizeSubs(item.cc || item.subtitles || []),
+                                tracks: normalizeTracks(item.audio || {}),
+                                quality: 'HLS',
+                                resolvedBy:
+                                    response.label +
+                                    (kp ? (' • KP ' + kp) : '') +
+                                    ' • HLS/CLIENT'
+                            });
+                            return;
+                        }
+
+                        fail(new Error('Collaps: совместимый media path не найден'));
+                    },
+                    fail
+                );
+            }
+        );
+    }
+
+
+        /* COLLAPS_REFERENCE_BLOCK_END */
+
+        function itemHasMedia(item) {
+            if (!item) return false;
+            var source = item.source || item;
+            return !!(source.hls || source.dash || source.dasha);
+        }
+
+        function configHasAnyMedia(config) {
+            if (!config) return false;
+            if (itemHasMedia(config.source)) return true;
+            var seasons = config.playlist && config.playlist.seasons || [];
+            for (var i = 0; i < seasons.length; i++) {
+                var episodes = seasons[i] && seasons[i].episodes || [];
+                for (var j = 0; j < episodes.length; j++) if (itemHasMedia(episodes[j])) return true;
+            }
+            return false;
+        }
+
+        function resetSession(reason) {
+            try {
+                if (COLLAPS_NATIVE_HLS.ui) COLLAPS_NATIVE_HLS.ui.dispose();
+                COLLAPS_NATIVE_HLS.ui = null;
+                COLLAPS_NATIVE_HLS.originalLevels = [];
+                COLLAPS_NATIVE_HLS.rewrittenLevels = [];
+                COLLAPS_NATIVE_HLS.playbackTelemetry = null;
+                COLLAPS_NATIVE_HLS.lastSegment = null;
+                COLLAPS_NATIVE_HLS.generation++;
+                COLLAPS_NATIVE_HLS.rangeRecovery = {paths: {}};
+                COLLAPS_NATIVE_HLS.unixTime = 0;
+                COLLAPS_NATIVE_HLS.key = '';
+                COLLAPS_NATIVE_HLS.headers = {};
+                COLLAPS_NATIVE_HLS.urlMap = {};
+                COLLAPS_NATIVE_HLS.lastRequest = null;
+                COLLAPS_NATIVE_HLS.lastError = null;
+            } catch (e) {}
+            try {
+                COLLAPS_NATIVE_DASH.active = false;
+                COLLAPS_NATIVE_DASH.generation++;
+                COLLAPS_NATIVE_DASH.rangeRecovery = {paths: {}};
+                if (COLLAPS_NATIVE_DASH.monitor) COLLAPS_NATIVE_DASH.monitor.dispose();
+                COLLAPS_NATIVE_DASH.monitor = null;
+                COLLAPS_NATIVE_DASH.playbackTelemetry = null;
+                COLLAPS_NATIVE_DASH.manifestInfo = [];
+                COLLAPS_NATIVE_DASH.selectedPath = 'основной';
+                if (COLLAPS_NATIVE_DASH.qualityControl) COLLAPS_NATIVE_DASH.qualityControl.dispose();
+                COLLAPS_NATIVE_DASH.qualityControl = null;
+                COLLAPS_NATIVE_DASH.unixTime = 0;
+                setCollapsDashAudioChoice(null);
+            } catch (e2) {}
+            log('Collaps cleanup', reason || 'reset');
+        }
+
+        this.availability = function (request, ok, fail) {
+            getKpId(request.imdb, function (kp) {
+                tryCollapsUrls(request.source, request.imdb, kp, null, null, function (response) {
+                    ok(configHasAnyMedia(response.config));
+                }, fail);
+            });
+        };
+
+        this.resolve = function (request, ok, fail) {
+            resetSession('new-playback-session');
+            COLLAPS_NATIVE_DASH.audioNames = [];
+            try { setCollapsDashAudioChoice(request.voice || null); } catch (e) {}
+            resolveCollaps(request.source, request.imdb, request.season, request.episode, function (result) {
+                ok({
+                    provider: 'Collaps',
+                    url: result.directUrl,
+                    headers: result.directHeaders || {},
+                    subtitles: result.subtitles || [],
+                    tracks: result.tracks || [],
+                    qualityMode: 'native-auto',
+                    qualities: String(result.quality || '').indexOf('DASH') >= 0 ? 'dash-manifest' : 'hls-master',
+                    transport: String(result.quality || '').indexOf('DASH') >= 0 ? 'DASH' : 'HLS',
+                    resolvedBy: result.resolvedBy || ''
+                });
+            }, fail, request.dashMode, request.format);
+        };
+
+        this.quality = function () { return { auto: true, manual: 'Lampa.Player/Hls.js', forcedStartLevel: false }; };
+        this.audio = function (resolved) { return resolved && resolved.tracks || []; };
+        this.subtitles = function (resolved) { return resolved && resolved.subtitles || []; };
+        this.cleanup = resetSession;
+        this.diagnostics = function () {
+            return {
+                adapter: 'CollapsAdapter',
+                playback: COLLAPS_NATIVE_DASH.playbackTelemetry,
+                manifest: COLLAPS_NATIVE_DASH.manifestInfo,
+                selectedPath: COLLAPS_NATIVE_DASH.selectedPath,
+                quality: COLLAPS_NATIVE_DASH.qualityControl ? COLLAPS_NATIVE_DASH.qualityControl.diagnostics() : null,
+                hls: {
+                    installed: !!COLLAPS_NATIVE_HLS.installed,
+                    lastDecode: COLLAPS_NATIVE_HLS.lastError && COLLAPS_NATIVE_HLS.lastError.payload || null,
+                    mappedUrls: Object.keys(COLLAPS_NATIVE_HLS.urlMap || {}).length,
+                    lastRequest: COLLAPS_NATIVE_HLS.lastRequest ? String(COLLAPS_NATIVE_HLS.lastRequest.url || '') : '',
+                    lastError: COLLAPS_NATIVE_HLS.lastError ? String(COLLAPS_NATIVE_HLS.lastError.phase || COLLAPS_NATIVE_HLS.lastError.message || '') : ''
+                },
+                dash: {
+                    installed: !!COLLAPS_NATIVE_DASH.installed,
+                    active: !!COLLAPS_NATIVE_DASH.active,
+                    lastDecode: COLLAPS_NATIVE_DASH.lastDecode,
+                    requests: Number(COLLAPS_NATIVE_DASH.requestCount || 0),
+                    successes: Number(COLLAPS_NATIVE_DASH.successCount || 0),
+                    errors: Number(COLLAPS_NATIVE_DASH.errorCount || 0)
+                }
+            };
+        };
+    }
+    /* ADAPTER:COLLAPS:END */
+
+    global.MnogoTVCollapsAdapter = CollapsAdapter;
+})(window);
+
+(function (global) {
+    'use strict';
+    /* ADAPTER:VEOVEO:BEGIN */
+    function VeoVeoAdapter(core) {
+        var Lampa = global.Lampa, generation = 0, session = null;
+        var probes = [], last = {phase:'idle'}, lastProbe = null;
+        function group() { return {closed:false, requests:[]}; }
+        function close(g) {
+            if (!g || g.closed) return;
+            g.closed = true;
+            g.requests.forEach(function (r) { clearTimeout(r.timer); try { r.network.clear(); } catch (e) {} });
+            g.requests = [];
+        }
+        function url(value, base) {
+            try { var u = new URL(String(value || ''), base); return /^https?:$/.test(u.protocol) ? u.href : ''; }
+            catch (e) { return ''; }
+        }
+        function request(g, address, json, ok, fail, plain) {
+            var phase = /catalog-api/.test(address) ? 'каталог' : /\.json(?:[?#]|$)/i.test(address) ? 'JSON потока' : /balancer-api\/iframe|iframe|embed/.test(address) ? 'страница провайдера' : 'HLS/страница';
+            var headers = {};
+            if (!plain) {
+                headers['User-Agent'] = 'Mozilla/5.0 (Linux; Android 10; SmartTV) AppleWebKit/537.36 Chrome/120 Safari/537.36';
+                try { var origin = new URL(address).origin; headers.Origin = origin; headers.Referer = origin + '/'; } catch (e) {}
+            }
+            if (g.closed) return;
+            var network;
+            try { network = new (Lampa.Reguest || Lampa.Request)(); } catch (e) { fail(e); return; }
+            var slot = {network:network,timer:null}, ended = false;
+            g.requests.push(slot);
+            function done(error, data) {
+                if (ended || g.closed) return;
+                ended = true; clearTimeout(slot.timer);
+                g.requests = g.requests.filter(function (r) { return r !== slot; });
+                if (error) return fail(new Error('VeoVeo • ' + phase + ': ' + error.message));
+                try { if (json && typeof data === 'string') data = JSON.parse(data); }
+                catch (e) { fail(new Error('VeoVeo: некорректный JSON')); return; }
+                ok(data);
+            }
+            slot.timer = setTimeout(function () {
+                done(new Error('VeoVeo: время ожидания истекло'));
+                try { network.clear(); } catch (e) {}
+            },15000);
+            try {
+                network.timeout(15000);
+                var method = network.native || network.silent;
+                if (!method) throw new Error('VeoVeo: сетевой API недоступен');
+                method.call(network,address,function (data) { done(null,data); },function (response) {
+                    var status = Number(response && response.status);
+                    done(new Error(status >= 100 && status <= 599 ? 'HTTP ' + status : 'нет ответа сети'));
+                },false,{dataType:json?'json':'text',headers:headers});
+            } catch (e) { done(e); }
+        }
     function veoMovieIdFromHtml(html, iframeUrl) {
         html = String(html || '');
 
@@ -573,7 +3234,6 @@
 
         return '';
     }
-
     function chooseVeoCatalogItem(catalog, season, episode) {
         if (!Array.isArray(catalog)) return null;
 
@@ -619,7 +3279,27 @@
 
         return null;
     }
+    function normalizeVeoVariants(item) {
+        if (!item) return [];
 
+        var variants =
+            item.episodeVariants ||
+            item.variants ||
+            [];
+
+        if (!Array.isArray(variants)) variants = [];
+
+        if (!variants.length && item.filepath) {
+            variants = [{
+                filepath: item.filepath,
+                title: item.title || ''
+            }];
+        }
+
+        return variants.filter(function (v) {
+            return v && v.filepath;
+        });
+    }
     function veoVariantLabel(variant) {
         if (!variant) return 'Авто';
 
@@ -646,29 +3326,6 @@
 
         return 'Вариант';
     }
-
-    function normalizeVeoVariants(item) {
-        if (!item) return [];
-
-        var variants =
-            item.episodeVariants ||
-            item.variants ||
-            [];
-
-        if (!Array.isArray(variants)) variants = [];
-
-        if (!variants.length && item.filepath) {
-            variants = [{
-                filepath: item.filepath,
-                title: item.title || ''
-            }];
-        }
-
-        return variants.filter(function (v) {
-            return v && v.filepath;
-        });
-    }
-
     function chooseVeoVariant(item, qualityLabel) {
         var variants =
             normalizeVeoVariants(item);
@@ -744,184 +3401,6 @@
 
         return preferred;
     }
-
-
-    function numericQuality(label) {
-        var m = String(label || '').match(/(2160|1440|1080|720|480|360)/);
-        return m ? parseInt(m[1], 10) : 0;
-    }
-
-    function veoQualitySummary(item) {
-        var variants = normalizeVeoVariants(item);
-        var best = 0;
-        var hasHls = false;
-
-        variants.forEach(function (variant) {
-            var q = numericQuality(veoVariantLabel(variant));
-            if (q > best) best = q;
-
-            if (String(variant.filepath || '').toLowerCase().indexOf('.m3u8') >= 0) {
-                hasHls = true;
-            }
-        });
-
-        return best ? (best + 'p') : (hasHls ? 'HLS' : '—');
-    }
-
-    function hlsAttributes(line) {
-        var out = {};
-        var raw = String(line || '');
-        var re = /([A-Z0-9-]+)=(\"[^\"]*\"|[^,]*)/ig;
-        var m;
-
-        while ((m = re.exec(raw))) {
-            var value = String(m[2] || '').trim();
-            if (value.charAt(0) === '"' && value.charAt(value.length - 1) === '"') {
-                value = value.slice(1, -1);
-            }
-            out[String(m[1] || '').toUpperCase()] = value;
-        }
-
-        return out;
-    }
-
-    function parseHlsMeta(manifest, manifestUrl) {
-        var lines = String(manifest || '').split(/\r?\n/);
-        var tracks = [];
-        var qualities = [];
-        var seenQ = {};
-
-        lines.forEach(function (line) {
-            line = String(line || '').trim();
-
-            if (line.indexOf('#EXT-X-MEDIA:') === 0) {
-                var a = hlsAttributes(line.slice('#EXT-X-MEDIA:'.length));
-                if (String(a.TYPE || '').toUpperCase() === 'AUDIO') {
-                    var language = String(a.LANGUAGE || '').trim();
-                    var name = String(a.NAME || '').trim();
-                    var label = name && name !== language ? name : '';
-
-                    tracks.push({
-                        index: tracks.length,
-                        language: language || name || ('Дорожка ' + (tracks.length + 1)),
-                        name: name || language || ('Дорожка ' + (tracks.length + 1)),
-                        label: label,
-                        default: String(a.DEFAULT || '').toUpperCase() === 'YES'
-                    });
-                }
-            }
-
-            if (line.indexOf('#EXT-X-STREAM-INF:') === 0) {
-                var qattr = hlsAttributes(line.slice('#EXT-X-STREAM-INF:'.length));
-                var res = String(qattr.RESOLUTION || '').match(/\d+x(\d+)/i);
-                var height = res ? parseInt(res[1], 10) : 0;
-                if (height && !seenQ[height]) {
-                    seenQ[height] = true;
-                    qualities.push(height);
-                }
-            }
-        });
-
-        qualities.sort(function (a, b) { return b - a; });
-
-        return {
-            tracks: tracks,
-            qualities: qualities,
-            bestQuality: qualities.length ? (qualities[0] + 'p') : ''
-        };
-    }
-
-    function inspectHls(url, headers, ok) {
-        var cacheKey = String(url || '');
-        if (cache.hlsMeta[cacheKey]) {
-            ok(cache.hlsMeta[cacheKey]);
-            return;
-        }
-
-        function finish(manifest, plainOk) {
-            var valid = String(manifest || '').trim().indexOf('#EXTM3U') === 0;
-            var meta = valid ? parseHlsMeta(manifest, url) : { tracks: [], qualities: [], bestQuality: '' };
-            meta.plainOk = !!plainOk && valid;
-            meta.valid = valid;
-            cache.hlsMeta[cacheKey] = meta;
-            ok(meta);
-        }
-
-        nativeText(
-            url,
-            {},
-            function (manifest) {
-                finish(manifest, true);
-            },
-            function () {
-                nativeText(
-                    url,
-                    headers || {},
-                    function (manifest) { finish(manifest, false); },
-                    function () { finish('', false); }
-                );
-            }
-        );
-    }
-
-
-    function veoResolveJsonFile(file, headers, ok, fail) {
-        nativeJson(
-            file,
-            headers,
-            function (data) {
-                var sources =
-                    data &&
-                    data.sources;
-
-                if (
-                    !Array.isArray(sources) ||
-                    !sources.length
-                ) {
-                    fail(new Error(
-                        'VeoVeo: sources в JSON не найдены'
-                    ));
-                    return;
-                }
-
-                var link =
-                    sources[0] &&
-                    (
-                        sources[0].link ||
-                        sources[0].file ||
-                        sources[0].url
-                    );
-
-                if (!link) {
-                    fail(new Error(
-                        'VeoVeo: ссылка в JSON не найдена'
-                    ));
-                    return;
-                }
-
-                ok(normalizeDirectUrl(link));
-            },
-            fail
-        );
-    }
-
-    function probePlainHls(url, ok) {
-        nativeText(
-            url,
-            {},
-            function (manifest) {
-                ok(
-                    String(manifest || '')
-                        .trim()
-                        .indexOf('#EXTM3U') === 0
-                );
-            },
-            function () {
-                ok(false);
-            }
-        );
-    }
-
     function veoContext(iframe) {
         var result = {
             origin: '',
@@ -975,7 +3454,6 @@
 
         return result;
     }
-
     function veoMovieIdEndpoint(
         origin,
         key,
@@ -997,4285 +3475,1689 @@
 
         return url;
     }
+    function hlsAttributes(line) {
+        var out = {};
+        var raw = String(line || '');
+        var re = /([A-Z0-9-]+)=(\"[^\"]*\"|[^,]*)/ig;
+        var m;
 
-    function fetchVeoMovieId(url, ok, fail) {
-        nativeText(
-            url,
-            veoHeaders(url),
-            function (html) {
-                /*
-                 * Lampac: window.MOVIE_ID=([0-9]+);
-                 * Оставляем более терпимый regexp на случай пробелов.
-                 */
-                var movieId =
-                    veoMovieIdFromHtml(
-                        html,
-                        url
-                    );
-
-                if (!movieId) {
-                    fail(new Error(
-                        'MOVIE_ID не найден'
-                    ));
-                    return;
-                }
-
-                ok(movieId);
-            },
-            fail
-        );
-    }
-
-    function resolveVeoMovieId(
-        source,
-        imdb,
-        ok,
-        fail
-    ) {
-        var iframe =
-            normalizeDirectUrl(
-                source &&
-                source.iframeUrl
-            );
-
-        if (!iframe) {
-            fail(
-                new Error(
-                    'VeoVeo: iframeUrl не получен'
-                )
-            );
-            return;
-        }
-
-        var ctx =
-            veoContext(iframe);
-
-        if (!ctx.origin) {
-            fail(
-                new Error(
-                    'VeoVeo: host не определён'
-                )
-            );
-            return;
-        }
-
-        var cacheKey =
-            String(imdb || '') +
-            '|' +
-            ctx.origin +
-            '|' +
-            String(ctx.token || '');
-
-        if (
-            cache.veoMovieId[cacheKey]
-        ) {
-            ok(
-                cache.veoMovieId[cacheKey]
-            );
-            return;
-        }
-
-        var attempts = [];
-
-        function done(result) {
-            cache.veoMovieId[cacheKey] =
-                result;
-
-            if (
-                result &&
-                result.kp &&
-                imdb
-            ) {
-                cache.ids[String(imdb)] =
-                    String(result.kp);
+        while ((m = re.exec(raw))) {
+            var value = String(m[2] || '').trim();
+            if (value.charAt(0) === '"' && value.charAt(value.length - 1) === '"') {
+                value = value.slice(1, -1);
             }
-
-            ok(result);
+            out[String(m[1] || '').toUpperCase()] = value;
         }
 
-        function tryOriginal() {
-            nativeText(
-                iframe,
-                veoHeaders(iframe),
-                function (html) {
-                    var id =
-                        veoMovieIdFromHtml(
-                            html,
-                            iframe
-                        );
-
-                    if (id) {
-                        done({
-                            movieId: id,
-                            origin: ctx.origin,
-                            token: ctx.token,
-                            method: 'MnogoTV iframe'
-                        });
-                    }
-                    else {
-                        attempts.push(
-                            'original: MOVIE_ID не найден'
-                        );
-
-                        fail(
-                            new Error(
-                                'VeoVeo: ' +
-                                attempts.join(' | ')
-                            )
-                        );
-                    }
-                },
-                function (e) {
-                    attempts.push(
-                        'original: ' +
-                        errText(e)
-                    );
-
-                    fail(
-                        new Error(
-                            'VeoVeo: ' +
-                            attempts.join(' | ')
-                        )
-                    );
-                }
-            );
-        }
-
-        function tryImdb() {
-            if (!imdb) {
-                tryOriginal();
-                return;
-            }
-
-            var url =
-                veoMovieIdEndpoint(
-                    ctx.origin,
-                    'imdb',
-                    imdb,
-                    ctx.token
-                );
-
-            fetchVeoMovieId(
-                url,
-                function (id) {
-                    done({
-                        movieId: id,
-                        origin: ctx.origin,
-                        token: ctx.token,
-                        method: 'imdb'
-                    });
-                },
-                function (e) {
-                    attempts.push(
-                        'imdb: ' +
-                        errText(e)
-                    );
-
-                    tryOriginal();
-                }
-            );
-        }
-
-        function tryKp(kp) {
-            kp =
-                String(
-                    kp ||
-                    ''
-                );
-
-            if (!kp) {
-                attempts.push(
-                    'kp: ID не найден'
-                );
-
-                tryImdb();
-                return;
-            }
-
-            var url =
-                veoMovieIdEndpoint(
-                    ctx.origin,
-                    'kp',
-                    kp,
-                    ctx.token
-                );
-
-            fetchVeoMovieId(
-                url,
-                function (id) {
-                    done({
-                        movieId: id,
-                        origin: ctx.origin,
-                        token: ctx.token,
-                        kp: kp,
-                        method: 'kp'
-                    });
-                },
-                function (e) {
-                    attempts.push(
-                        'kp: ' +
-                        errText(e)
-                    );
-
-                    tryImdb();
-                }
-            );
-        }
-
-        /*
-         * v3.17 уже получил KP внутри /sources.
-         * Не спрашиваем /ids повторно при каждом первом запуске VeoVeo.
-         */
-        var knownKp =
-            String(
-                source &&
-                source.kinopoiskId ||
-                (
-                    imdb &&
-                    cache.ids[String(imdb)]
-                ) ||
-                ''
-            );
-
-        if (knownKp) {
-            tryKp(knownKp);
-            return;
-        }
-
-        getKpId(
-            imdb,
-            tryKp
-        );
+        return out;
     }
+    function parseHlsMeta(manifest, manifestUrl) {
+        var lines = String(manifest || '').split(/\r?\n/);
+        var tracks = [];
+        var qualities = [];
+        var seenQ = {};
 
+        lines.forEach(function (line) {
+            line = String(line || '').trim();
 
-    function veoCatalogKey(source, imdb) {
-        return String(imdb || '') + '|' + String(source && source.iframeUrl || '');
-    }
+            if (line.indexOf('#EXT-X-MEDIA:') === 0) {
+                var a = hlsAttributes(line.slice('#EXT-X-MEDIA:'.length));
+                if (String(a.TYPE || '').toUpperCase() === 'AUDIO') {
+                    var language = String(a.LANGUAGE || '').trim();
+                    var name = String(a.NAME || '').trim();
+                    var label = name && name !== language ? name : '';
 
-    function getVeoCatalog(source, imdb, ok, fail) {
-        var key = veoCatalogKey(source, imdb);
-
-        if (cache.veoCatalog[key]) {
-            ok(cache.veoCatalog[key]);
-            return;
-        }
-
-        resolveVeoMovieId(
-            source,
-            imdb,
-            function (resolvedId) {
-                var movieId = resolvedId.movieId;
-                var origin = resolvedId.origin;
-                var token = resolvedId.token;
-
-                var catalogUrl =
-                    origin +
-                    '/balancer-api/proxy/' +
-                    'playlists/catalog-api/' +
-                    'episodes?content-id=' +
-                    encodeURIComponent(movieId);
-
-                if (token) {
-                    catalogUrl += '&token=' + encodeURIComponent(token);
-                }
-
-                nativeJson(
-                    catalogUrl,
-                    veoHeaders(catalogUrl),
-                    function (catalog) {
-                        var result = {
-                            catalog: Array.isArray(catalog) ? catalog : [],
-                            resolvedId: resolvedId
-                        };
-                        cache.veoCatalog[key] = result;
-                        ok(result);
-                    },
-                    function (e) {
-                        fail(new Error('VeoVeo catalog: ' + errText(e)));
-                    }
-                );
-            },
-            fail
-        );
-    }
-
-    function fetchVeoEpisodeItem(
-        source,
-        imdb,
-        season,
-        episode,
-        ok,
-        fail
-    ) {
-        getVeoCatalog(
-            source,
-            imdb,
-            function (result) {
-                var item = chooseVeoCatalogItem(
-                    result.catalog,
-                    season,
-                    episode
-                );
-
-                if (!item) {
-                    fail(new Error('VeoVeo: серия не найдена'));
-                    return;
-                }
-
-                ok({
-                    item: item,
-                    resolvedId: result.resolvedId,
-                    catalog: result.catalog
-                });
-            },
-            fail
-        );
-    }
-
-    function getVeoQualityOptions(
-        source,
-        imdb,
-        season,
-        episode,
-        ok,
-        fail
-    ) {
-        fetchVeoEpisodeItem(
-            source,
-            imdb,
-            season,
-            episode,
-            function (result) {
-                var variants =
-                    normalizeVeoVariants(
-                        result.item
-                    );
-
-                var seen = {};
-                var options = [];
-
-                variants.forEach(function (variant) {
-                    var label =
-                        veoVariantLabel(
-                            variant
-                        );
-
-                    if (!label || seen[label]) return;
-
-                    seen[label] = true;
-                    options.push({
+                    tracks.push({
+                        index: tracks.length,
+                        language: language || name || ('Дорожка ' + (tracks.length + 1)),
+                        name: name || language || ('Дорожка ' + (tracks.length + 1)),
                         label: label,
-                        variant: variant
-                    });
-                });
-
-                ok(options);
-            },
-            fail
-        );
-    }
-
-    function resolveVeoVeo(
-        source,
-        imdb,
-        season,
-        episode,
-        qualityLabel,
-        ok,
-        fail
-    ) {
-        fetchVeoEpisodeItem(
-            source,
-            imdb,
-            season,
-            episode,
-            function (result) {
-                var item =
-                    result.item;
-
-                var resolvedId =
-                    result.resolvedId;
-
-                var variant =
-                    chooseVeoVariant(
-                        item,
-                        qualityLabel
-                    );
-
-                if (
-                    !variant ||
-                    !variant.filepath
-                ) {
-                    fail(new Error(
-                        'VeoVeo: filepath не найден'
-                    ));
-                    return;
-                }
-
-                var selectedQuality =
-                    veoVariantLabel(
-                        variant
-                    );
-
-                var file =
-                    normalizeDirectUrl(
-                        variant.filepath
-                    );
-
-                function finish(stream) {
-                    stream =
-                        normalizeDirectUrl(
-                            stream
-                        );
-
-                    if (!stream) {
-                        fail(new Error(
-                            'VeoVeo: поток пустой'
-                        ));
-                        return;
-                    }
-
-                    var streamHeaders = veoHeaders(stream);
-
-                    inspectHls(
-                        stream,
-                        streamHeaders,
-                        function (probe) {
-                            ok({
-                                provider: 'VeoVeo',
-                                directUrl: stream,
-                                directHeaders:
-                                    probe.plainOk
-                                        ? {}
-                                        : streamHeaders,
-                                relayUrl: '',
-                                relayReady: false,
-                                externalDirect: probe.plainOk,
-                                subtitles: [],
-                                tracks: probe.tracks || [],
-                                hlsQualities: probe.qualities || [],
-                                quality:
-                                    numericQuality(selectedQuality)
-                                        ? selectedQuality
-                                        : (probe.bestQuality || selectedQuality),
-                                resolvedBy:
-                                    'VeoVeo ' +
-                                    resolvedId.method +
-                                    ' → ' +
-                                    resolvedId.movieId
-                            });
-                        }
-                    );
-                }
-
-                if (
-                    file.toLowerCase()
-                        .indexOf('.json') >= 0
-                ) {
-                    veoResolveJsonFile(
-                        file,
-                        veoHeaders(file),
-                        finish,
-                        fail
-                    );
-                }
-                else {
-                    finish(file);
-                }
-            },
-            fail
-        );
-    }
-
-
-    var COLLAPS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36';
-    var COLLAPS_HOST = 'https://api.ortified.ws';
-    var COLLAPS_REF = COLLAPS_HOST + '/';
-
-    function silentText(url, headers, ok, fail) {
-        var network = null;
-
-        try {
-            network = new Lampa.Reguest();
-        } catch (e) {
-            try {
-                network = new Lampa.Request();
-            } catch (e2) {}
-        }
-
-        if (
-            !network ||
-            typeof network.silent !== 'function'
-        ) {
-            fail(
-                new Error(
-                    'Lampa.Reguest.silent недоступен'
-                )
-            );
-            return;
-        }
-
-        try {
-            network.clear();
-            network.timeout(12000);
-
-            network.silent(
-                url,
-                function (str) {
-                    ok(
-                        String(
-                            str ||
-                            ''
-                        )
-                    );
-                },
-                function (a, c) {
-                    var status =
-                        a &&
-                        a.status !== undefined
-                            ? a.status
-                            : '';
-
-                    var message =
-                        status
-                            ? ('HTTP ' + status)
-                            : errText(
-                                a ||
-                                c ||
-                                'network error'
-                            );
-
-                    fail(
-                        new Error(
-                            message
-                        )
-                    );
-                },
-                false,
-                {
-                    dataType: 'text',
-                    headers: headers || {}
-                }
-            );
-        } catch (e3) {
-            fail(e3);
-        }
-    }
-
-    function collapsEmbedText(attempt, ok, fail) {
-        /*
-         * Актуальный online_mod в режиме встроенного Lampa
-         * использует network.silent и пустые playback headers.
-         *
-         * Если конкретная сборка Lampa не даёт silent для этого
-         * домена, оставляем native fallback только для получения
-         * makePlayer-конфига.
-         */
-        silentText(
-            attempt.url,
-            {},
-            ok,
-            function (silentError) {
-                nativeText(
-                    attempt.url,
-                    attempt.headers || {},
-                    ok,
-                    function (nativeError) {
-                        fail(
-                            nativeError ||
-                            silentError
-                        );
-                    }
-                );
-            }
-        );
-    }
-
-    function nativeText(url, headers, ok, fail) {
-        var network = null;
-        try { network = new Lampa.Reguest(); } catch (e) {
-            try { network = new Lampa.Request(); } catch (e2) {}
-        }
-
-        if (!network || typeof network.native !== 'function') {
-            fail(new Error('Lampa.Reguest.native недоступен'));
-            return;
-        }
-
-        try {
-            network.clear();
-            network.timeout(12000);
-            network.native(url, function (str) {
-                ok(String(str || ''));
-            }, function (a, c) {
-                var status = a && a.status !== undefined ? a.status : '';
-                var message = status ? ('HTTP ' + status) : errText(a || c || 'network error');
-                fail(new Error(message));
-            }, false, {
-                dataType: 'text',
-                headers: headers || {}
-            });
-        } catch (e3) {
-            fail(e3);
-        }
-    }
-
-
-    function pickCollapsVariant(masterText, masterUrl) {
-        var text = String(masterText || '').replace(/\r/g, '');
-        if (text.indexOf('#EXTM3U') !== 0) return null;
-
-        var lines = text.split('\n');
-        var audioGroups = {};
-        var variants = [];
-
-        /*
-         * v3.20.0: GROUP-ID не уникален для одной дорожки. В Collaps
-         * несколько EXT-X-MEDIA могут принадлежать одной AUDIO-группе.
-         * В 3.19.9 мы затирали предыдущие строки и оставляли фактически
-         * одну (часто английскую) дорожку. Теперь сохраняем все rendition.
-         */
-        for (var a = 0; a < lines.length; a++) {
-            var mediaLine = String(lines[a] || '').trim();
-            if (mediaLine.indexOf('#EXT-X-MEDIA:') !== 0) continue;
-
-            var attrs = hlsAttributes(mediaLine.slice('#EXT-X-MEDIA:'.length));
-            if (String(attrs.TYPE || '').toUpperCase() !== 'AUDIO') continue;
-
-            var gid = String(attrs['GROUP-ID'] || '').trim();
-            if (!gid) continue;
-
-            var audioUrl = String(attrs.URI || '').trim();
-            if (audioUrl) {
-                try { audioUrl = new URL(audioUrl, masterUrl).toString(); } catch (eAudio) {}
-            }
-
-            if (!audioGroups[gid]) audioGroups[gid] = [];
-            audioGroups[gid].push({
-                url: audioUrl,
-                raw: mediaLine,
-                name: String(attrs.NAME || attrs.LANGUAGE || ('Audio ' + (audioGroups[gid].length + 1))),
-                language: String(attrs.LANGUAGE || ''),
-                isDefault: String(attrs.DEFAULT || '').toUpperCase() === 'YES',
-                autoselect: String(attrs.AUTOSELECT || '').toUpperCase() !== 'NO',
-                forced: String(attrs.FORCED || '').toUpperCase() === 'YES',
-                channels: String(attrs.CHANNELS || '')
-            });
-        }
-
-        for (var i = 0; i < lines.length; i++) {
-            var line = String(lines[i] || '').trim();
-            if (line.indexOf('#EXT-X-STREAM-INF:') !== 0) continue;
-
-            var streamAttrs = hlsAttributes(line.slice('#EXT-X-STREAM-INF:'.length));
-            var bandwidth = parseInt(streamAttrs.BANDWIDTH || '0', 10) || 0;
-            var width = 0;
-            var height = 0;
-            var rs = String(streamAttrs.RESOLUTION || '').match(/(\d+)x(\d+)/i);
-            if (rs) {
-                width = parseInt(rs[1], 10) || 0;
-                height = parseInt(rs[2], 10) || 0;
-            }
-
-            var uri = '';
-            for (var j = i + 1; j < lines.length; j++) {
-                var next = String(lines[j] || '').trim();
-                if (!next) continue;
-                if (next.charAt(0) === '#') continue;
-                uri = next;
-                break;
-            }
-            if (!uri) continue;
-
-            var absolute = uri;
-            try { absolute = new URL(uri, masterUrl).toString(); } catch (e) {}
-
-            var audioGroup = String(streamAttrs.AUDIO || '');
-            var renditions = audioGroup && audioGroups[audioGroup]
-                ? audioGroups[audioGroup].slice()
-                : [];
-
-            variants.push({
-                url: absolute,
-                bandwidth: bandwidth,
-                width: width,
-                height: height,
-                codecs: String(streamAttrs.CODECS || ''),
-                streamInf: line,
-                audioGroup: audioGroup,
-                audioRenditions: renditions,
-                audioUrl: renditions.length ? renditions[0].url : '',
-                muxed: !audioGroup,
-                score: bandwidth || (height * 100000)
-            });
-        }
-
-        if (!variants.length) return null;
-
-        var muxed = variants.filter(function (v) { return v.muxed; });
-        var pool = muxed.length ? muxed : variants;
-        pool.sort(function (a, b) { return b.score - a.score; });
-
-        var chosen = pool[0];
-        chosen.hasMuxed = Boolean(muxed.length);
-        chosen.totalVariants = variants.length;
-        chosen.audioGroupsCount = Object.keys(audioGroups).length;
-        chosen.audioRenditionsCount = chosen.audioRenditions ? chosen.audioRenditions.length : 0;
-        return chosen;
-    }
-
-    function compactVoiceKey(value) {
-        return String(value || '')
-            .toLowerCase()
-            .replace(/[^a-zа-яё0-9]+/gi, ' ')
-            .replace(/^\s+|\s+$/g, '');
-    }
-
-    function collapsPreferredAudio(renditions, voiceChoice) {
-        renditions = Array.isArray(renditions) ? renditions : [];
-        if (!renditions.length) return -1;
-
-        var wanted = voiceChoice && voiceChoice.label && voiceChoice.label !== 'Авто'
-            ? compactVoiceKey(voiceChoice.label)
-            : '';
-
-        if (wanted) {
-            for (var i = 0; i < renditions.length; i++) {
-                var hay = compactVoiceKey((renditions[i].name || '') + ' ' + (renditions[i].language || ''));
-                if (hay === wanted || hay.indexOf(wanted) >= 0 || wanted.indexOf(hay) >= 0) return i;
-            }
-        }
-
-        if (voiceChoice && voiceChoice.index >= 0 && voiceChoice.index < renditions.length) {
-            return voiceChoice.index;
-        }
-
-        for (var d = 0; d < renditions.length; d++) {
-            if (renditions[d].isDefault) return d;
-        }
-
-        return 0;
-    }
-
-    function collapsSyntheticMasterUrl(variant, voiceChoice, ref, audioOverrides, videoOverride) {
-        if (!variant || !variant.url || !variant.audioRenditions || !variant.audioRenditions.length) return '';
-
-        var preferred = collapsPreferredAudio(variant.audioRenditions, voiceChoice);
-        var sourceAudios =
-            Array.isArray(audioOverrides) && audioOverrides.length
-                ? audioOverrides
-                : variant.audioRenditions;
-
-        var audios = sourceAudios.map(function (a, index) {
-            return {
-                url: a.url || a.blob || '',
-                name: a.name || ('Audio ' + (index + 1)),
-                lang: a.language || a.lang || '',
-                channels: a.channels || '',
-                autoselect: a.autoselect !== false,
-                forced: !!a.forced,
-                selected:
-                    a.selected !== undefined
-                        ? !!a.selected
-                        : index === preferred
-            };
-        }).filter(function (a) { return !!a.url; });
-
-        if (!audios.length) return '';
-
-        return resolverUrl('/synthetic/master.m3u8', {
-            video: videoOverride || variant.url,
-            audios: JSON.stringify(audios),
-            group: variant.audioGroup || 'audio0',
-            bandwidth: variant.bandwidth || 800000,
-            width: variant.width || 0,
-            height: variant.height || 0,
-            codecs: variant.codecs || '',
-            ref: ref || ''
-        });
-    }
-
-    function collapsAbsoluteMediaPlaylist(text, playlistUrl) {
-        text = String(text || '').replace(/\r/g, '');
-
-        function absolute(raw) {
-            raw = String(raw || '').trim();
-            if (!raw) return raw;
-            try { return new URL(raw, playlistUrl).toString(); } catch (e) { return raw; }
-        }
-
-        return text.split('\n').map(function (raw) {
-            var line = String(raw || '');
-            var trimmed = line.trim();
-            if (!trimmed) return line;
-
-            if (trimmed.charAt(0) !== '#') {
-                return absolute(trimmed);
-            }
-
-            /*
-             * Media playlists иногда содержат URI= в KEY/MAP.
-             * Делам их абсолютными, чтобы blob:-playlist не потерял base URL.
-             */
-            if (/^#EXT-X-(?:KEY|MAP|PART|PRELOAD-HINT):/i.test(trimmed)) {
-                return line.replace(/URI=(\"([^\"]*)\"|'([^']*)')/ig, function (all, quoted, dq, sq) {
-                    var value = dq !== undefined && dq !== '' ? dq : sq;
-                    var q = quoted.charAt(0);
-                    return 'URI=' + q + absolute(value) + q;
-                });
-            }
-
-            return line;
-        }).join('\n');
-    }
-
-    function collapsBlobUrl(text, mime) {
-        try {
-            if (!window.URL || !window.URL.createObjectURL || typeof Blob === 'undefined') return '';
-            return window.URL.createObjectURL(new Blob([String(text || '')], {
-                type: mime || 'application/vnd.apple.mpegurl'
-            }));
-        } catch (e) {
-            return '';
-        }
-    }
-
-    function collapsMasterAttr(value) {
-        return String(value || '').replace(/\\/g, '\\\\').replace(/\"/g, '\\\"');
-    }
-
-    /*
-     * Android встроенный Lampa.Player падает именно на загрузке удалённого
-     * Collaps manifest. Сам Lampa.Reguest.native эти playlist читает.
-     * Поэтому не меняем ядро Player: plugin сам забирает master/media
-     * playlists, превращает их в blob: URLs, а сегменты оставляет прямыми.
-     * Если после этого будет fragLoadError, значит manifest-барьер уже снят
-     * и проблема находится непосредственно на CDN сегментов/CORS.
-     */
-    function collapsBuildBlobMaster(variant, headers, ok, fail) {
-        if (!variant || !variant.url) {
-            fail(new Error('blob master: video variant не найден'));
-            return;
-        }
-
-        function getText(url, done, bad) {
-            nativeText(url, headers || {}, done, function (first) {
-                nativeText(url, {}, done, function (second) {
-                    bad(second || first);
-                });
-            });
-        }
-
-        getText(variant.url, function (videoText) {
-            var rewrittenVideo = collapsAbsoluteMediaPlaylist(videoText, variant.url);
-            if (rewrittenVideo.indexOf('#EXTM3U') !== 0) {
-                fail(new Error('blob master: video playlist не M3U8'));
-                return;
-            }
-
-            var videoBlob = collapsBlobUrl(rewrittenVideo);
-            if (!videoBlob) {
-                fail(new Error('blob master: createObjectURL недоступен'));
-                return;
-            }
-
-            var sourceAudios = Array.isArray(variant.audioRenditions)
-                ? variant.audioRenditions.filter(function (a) { return a && a.url; })
-                : [];
-            var readyAudios = [];
-            var index = 0;
-
-            function finish() {
-                var group = variant.audioGroup || 'audio0';
-                var lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
-
-                readyAudios.forEach(function (a, i) {
-                    var parts = [
-                        '#EXT-X-MEDIA:TYPE=AUDIO',
-                        'GROUP-ID="' + collapsMasterAttr(group) + '"',
-                        'NAME="' + collapsMasterAttr(a.name || ('Audio ' + (i + 1))) + '"',
-                        'AUTOSELECT=' + (a.autoselect === false ? 'NO' : 'YES'),
-                        'DEFAULT=' + (a.isDefault ? 'YES' : 'NO'),
-                        'URI="' + collapsMasterAttr(a.blob) + '"'
-                    ];
-                    if (a.language) parts.push('LANGUAGE="' + collapsMasterAttr(a.language) + '"');
-                    if (a.channels) parts.push('CHANNELS="' + collapsMasterAttr(a.channels) + '"');
-                    if (a.forced) parts.push('FORCED=YES');
-                    lines.push(parts.join(','));
-                });
-
-                var stream = '#EXT-X-STREAM-INF:BANDWIDTH=' + (variant.bandwidth || 800000);
-                if (variant.width && variant.height) stream += ',RESOLUTION=' + variant.width + 'x' + variant.height;
-                if (variant.codecs) stream += ',CODECS="' + collapsMasterAttr(variant.codecs) + '"';
-                if (readyAudios.length) stream += ',AUDIO="' + collapsMasterAttr(group) + '"';
-                lines.push(stream);
-                lines.push(videoBlob);
-                lines.push('');
-
-                var masterBlob = collapsBlobUrl(lines.join('\n'));
-                if (!masterBlob) {
-                    fail(new Error('blob master: master createObjectURL failed'));
-                    return;
-                }
-
-                ok({
-                    url: masterBlob,
-                    audioCount: readyAudios.length,
-                    videoBlob: videoBlob
-                });
-            }
-
-            function nextAudio() {
-                if (index >= sourceAudios.length) {
-                    finish();
-                    return;
-                }
-
-                var a = sourceAudios[index++];
-                getText(a.url, function (audioText) {
-                    var rewritten = collapsAbsoluteMediaPlaylist(audioText, a.url);
-                    var blob = rewritten.indexOf('#EXTM3U') === 0 ? collapsBlobUrl(rewritten) : '';
-                    if (blob) {
-                        readyAudios.push({
-                            blob: blob,
-                            name: a.name || '',
-                            language: a.language || '',
-                            channels: a.channels || '',
-                            autoselect: a.autoselect,
-                            forced: a.forced,
-                            isDefault: a.isDefault
-                        });
-                    }
-                    nextAudio();
-                }, function () {
-                    nextAudio();
-                });
-            }
-
-            nextAudio();
-        }, fail);
-    }
-
-
-    function collapsBuildVideoBlob(variant, headers, ok, fail) {
-        if (!variant || !variant.url) {
-            fail(new Error('video blob: variant не найден'));
-            return;
-        }
-
-        function done(text) {
-            var rewritten =
-                collapsAbsoluteMediaPlaylist(
-                    text,
-                    variant.url
-                );
-
-            if (rewritten.indexOf('#EXTM3U') !== 0) {
-                fail(new Error('video blob: playlist не M3U8'));
-                return;
-            }
-
-            var blob =
-                collapsBlobUrl(
-                    rewritten
-                );
-
-            if (!blob) {
-                fail(new Error('video blob: createObjectURL failed'));
-                return;
-            }
-
-            ok(blob);
-        }
-
-        nativeText(
-            variant.url,
-            headers || {},
-            done,
-            function (first) {
-                nativeText(
-                    variant.url,
-                    {},
-                    done,
-                    function (second) {
-                        fail(second || first);
-                    }
-                );
-            }
-        );
-    }
-
-
-    /*
-     * v3.20.4 proved that the Android-side native request can read the audio
-     * media playlist, while Cloudflare gets HTTP 424 for that same URL.
-     * Keep Lampa.Player untouched: fetch audio .m3u8 natively in the plugin,
-     * rewrite its segment URIs to absolute URLs, then expose only the nested
-     * audio playlists as blob: URLs referenced by the HTTPS synthetic master.
-     */
-    function collapsBuildAudioBlobRenditions(variant, headers, voiceChoice, ok, fail) {
-        var sourceAudios = Array.isArray(variant && variant.audioRenditions)
-            ? variant.audioRenditions.filter(function (a) { return a && a.url; })
-            : [];
-
-        if (!sourceAudios.length) {
-            fail(new Error('audio blob: дорожки не найдены'));
-            return;
-        }
-
-        var preferred = collapsPreferredAudio(sourceAudios, voiceChoice);
-        var ready = [];
-        var index = 0;
-
-        function getText(url, done, bad) {
-            nativeText(url, headers || {}, done, function (first) {
-                nativeText(url, {}, done, function (second) {
-                    bad(second || first);
-                });
-            });
-        }
-
-        function next() {
-            if (index >= sourceAudios.length) {
-                if (!ready.length) {
-                    fail(new Error('audio blob: ни одна дорожка не подготовлена'));
-                    return;
-                }
-
-                ok(ready);
-                return;
-            }
-
-            var sourceIndex = index;
-            var a = sourceAudios[index++];
-
-            getText(
-                a.url,
-                function (audioText) {
-                    var rewritten =
-                        collapsAbsoluteMediaPlaylist(
-                            audioText,
-                            a.url
-                        );
-
-                    if (rewritten.indexOf('#EXTM3U') !== 0) {
-                        next();
-                        return;
-                    }
-
-                    var blob =
-                        collapsBlobUrl(
-                            rewritten
-                        );
-
-                    if (blob) {
-                        ready.push({
-                            url: blob,
-                            name: a.name || ('Audio ' + (sourceIndex + 1)),
-                            language: a.language || '',
-                            channels: a.channels || '',
-                            autoselect: a.autoselect,
-                            forced: a.forced,
-                            selected: sourceIndex === preferred
-                        });
-                    }
-
-                    next();
-                },
-                function () {
-                    next();
-                }
-            );
-        }
-
-        next();
-    }
-
-    function inspectCollapsMediaPlaylist(text, playlistUrl) {
-        text = String(text || '').replace(/\r/g, '');
-        var lines = text.split('\n');
-        var segments = 0;
-        var discontinuities = 0;
-        var keys = 0;
-        var maps = 0;
-        var dateranges = 0;
-        var hosts = {};
-        var suspicious = '';
-
-        lines.forEach(function (raw) {
-            var line = String(raw || '').trim();
-            if (!line) return;
-            if (line.indexOf('#EXT-X-DISCONTINUITY') === 0) discontinuities++;
-            if (line.indexOf('#EXT-X-KEY:') === 0) keys++;
-            if (line.indexOf('#EXT-X-MAP:') === 0) maps++;
-            if (line.indexOf('#EXT-X-DATERANGE:') === 0) dateranges++;
-            if (line.charAt(0) === '#') return;
-
-            segments++;
-            var absolute = line;
-            try { absolute = new URL(line, playlistUrl).toString(); } catch (e) {}
-            try {
-                var host = new URL(absolute).hostname;
-                if (host) hosts[host] = true;
-            } catch (e2) {}
-
-            if (/lftapp|liftapp|lift3\.ws|liftw\.ws/i.test(absolute)) {
-                suspicious = 'LIFT';
-            }
-        });
-
-        return {
-            segments: segments,
-            hosts: Object.keys(hosts),
-            discontinuities: discontinuities,
-            keys: keys,
-            maps: maps,
-            dateranges: dateranges,
-            endlist: /#EXT-X-ENDLIST/i.test(text),
-            suspicious: suspicious
-        };
-    }
-
-    function collapsFirstSegmentUrl(mediaText, playlistUrl) {
-        var lines = String(mediaText || '').replace(/\r/g, '').split('\n');
-
-        for (var i = 0; i < lines.length; i++) {
-            var line = String(lines[i] || '').trim();
-            if (!line || line.charAt(0) === '#') continue;
-
-            try {
-                return new URL(line, playlistUrl).toString();
-            } catch (e) {
-                return line;
-            }
-        }
-
-        return '';
-    }
-
-    function collapsProbeBinary(url, headers, ok, fail) {
-        var network = null;
-
-        try { network = new Lampa.Reguest(); } catch (e) {
-            try { network = new Lampa.Request(); } catch (e2) {}
-        }
-
-        if (!network || typeof network.native !== 'function') {
-            fail(new Error('native probe unavailable'));
-            return;
-        }
-
-        var probeHeaders = {};
-        Object.keys(headers || {}).forEach(function (k) {
-            probeHeaders[k] = headers[k];
-        });
-
-        try {
-            network.clear();
-            network.timeout(15000);
-            network.native(
-                url,
-                function () { ok('ok'); },
-                function (a, c) {
-                    var status =
-                        a && a.status !== undefined
-                            ? a.status
-                            : '';
-
-                    fail(new Error(
-                        status
-                            ? ('HTTP ' + status)
-                            : errText(a || c || 'network error')
-                    ));
-                },
-                false,
-                {
-                    dataType: 'text',
-                    headers: probeHeaders
-                }
-            );
-        } catch (e3) {
-            fail(e3);
-        }
-    }
-
-    function collapsSegmentProbe(segmentUrl, headers, ref, done) {
-        if (!segmentUrl) {
-            done('S[none]');
-            return;
-        }
-
-        var withHeaders = '?';
-        var noHeaders = '?';
-        var proxy = '?';
-        var pending = 3;
-
-        function clean(e) {
-            return errText(e).replace(/\s+/g, '');
-        }
-
-        function finishOne() {
-            pending--;
-            if (pending > 0) return;
-
-            done(
-                'S[h' + withHeaders +
-                ' n' + noHeaders +
-                ' p' + proxy + ']'
-            );
-        }
-
-        collapsProbeBinary(
-            segmentUrl,
-            headers || {},
-            function () {
-                withHeaders = 'ok';
-                finishOne();
-            },
-            function (e) {
-                withHeaders = clean(e);
-                finishOne();
-            }
-        );
-
-        collapsProbeBinary(
-            segmentUrl,
-            {},
-            function () {
-                noHeaders = 'ok';
-                finishOne();
-            },
-            function (e) {
-                noHeaders = clean(e);
-                finishOne();
-            }
-        );
-
-        var relay =
-            relayMediaUrl(
-                segmentUrl,
-                ref || (headers && headers.Referer) || COLLAPS_REF,
-                false
-            );
-
-        collapsProbeBinary(
-            relay,
-            {},
-            function () {
-                proxy = 'ok';
-                finishOne();
-            },
-            function (e) {
-                proxy = clean(e);
-                finishOne();
-            }
-        );
-    }
-
-
-    function collapsMediaDiag(meta) {
-        if (!meta) return 'V?';
-        var host = meta.hosts && meta.hosts.length ? meta.hosts[0] : '?';
-        if (host.length > 22) host = host.slice(0, 19) + '…';
-        return 'V' + meta.segments +
-            ' h' + (meta.hosts ? meta.hosts.length : 0) + ':' + host +
-            ' d' + meta.discontinuities +
-            ' k' + meta.keys +
-            (meta.dateranges ? (' dr' + meta.dateranges) : '') +
-            (meta.endlist ? ' end' : ' live') +
-            (meta.suspicious ? (' ' + meta.suspicious) : '');
-    }
-
-    function resolveCollapsAndroidVariant(stream, response, ok) {
-        var headers =
-            response && response.headers
-                ? response.headers
-                : collapsHeadersFor(response && response.url || '');
-
-        function finishVariant(variant, baseLabel) {
-            if (!variant || !variant.url) {
-                ok({ url: stream, label: 'android native-media-direct', variant: null });
-                return;
-            }
-
-            function finish(diag, mediaText) {
-                var ref =
-                    (response && response.ref) ||
-                    (headers && headers.Referer) ||
-                    '';
-
-                var hasSeparateAudio =
-                    !variant.muxed &&
-                    variant.audioRenditions &&
-                    variant.audioRenditions.length;
-
-                function emit(synthetic, audioDiag) {
-                    ok({
-                        url: synthetic || variant.url,
-                        builtinUrl: '',
-                        variant: synthetic ? variant : null,
-                        label:
-                            'android ' +
-                            (synthetic ? 'synthetic-av' : baseLabel) +
-                            (variant.height ? (' ' + variant.height + 'p') : '') +
-                            ' • variants ' + variant.totalVariants +
-                            ' • audio ' + (variant.audioRenditionsCount || 0) +
-                            ' • groups ' + variant.audioGroupsCount +
-                            ' • ' + collapsMediaDiag(diag) +
-                            (audioDiag ? (' • ' + audioDiag) : '') +
-                            ' • builtin-child-blobs'
+                        default: String(a.DEFAULT || '').toUpperCase() === 'YES'
                     });
                 }
-
-                var firstSegment =
-                    collapsFirstSegmentUrl(
-                        mediaText || '',
-                        variant.url
-                    );
-
-                collapsSegmentProbe(
-                    firstSegment,
-                    headers || {},
-                    ref,
-                    function (segmentDiag) {
-                        if (!hasSeparateAudio) {
-                            emit('', 'A-muxed • ' + segmentDiag);
-                            return;
-                        }
-
-                        collapsBuildVideoBlob(
-                            variant,
-                            headers || {},
-                            function (videoBlob) {
-                                collapsBuildAudioBlobRenditions(
-                                    variant,
-                                    headers || {},
-                                    null,
-                                    function (audioBlobs) {
-                                        var synthetic =
-                                            collapsSyntheticMasterUrl(
-                                                variant,
-                                                null,
-                                                ref,
-                                                audioBlobs,
-                                                videoBlob
-                                            );
-
-                                        emit(
-                                            synthetic,
-                                            'Vblob • Ablob' +
-                                                audioBlobs.length +
-                                                ' • ' +
-                                                segmentDiag
-                                        );
-                                    },
-                                    function (e) {
-                                        emit(
-                                            '',
-                                            'Vblob • Ablob-fallback[' +
-                                                errText(e).replace(/\s+/g, '') +
-                                            '] • ' +
-                                            segmentDiag
-                                        );
-                                    }
-                                );
-                            },
-                            function (e) {
-                                emit(
-                                    '',
-                                    'Vblob-fallback[' +
-                                        errText(e).replace(/\s+/g, '') +
-                                    '] • ' +
-                                    segmentDiag
-                                );
-                            }
-                        );
-                    }
-                );
             }
 
-            nativeText(
-                variant.url,
-                {},
-                function (mediaText) {
-                    finish(inspectCollapsMediaPlaylist(mediaText, variant.url), mediaText);
-                },
-                function () {
-                    nativeText(
-                        variant.url,
-                        headers || {},
-                        function (mediaText) {
-                            finish(inspectCollapsMediaPlaylist(mediaText, variant.url), mediaText);
-                        },
-                        function () { finish(null); }
-                    );
+            if (line.indexOf('#EXT-X-STREAM-INF:') === 0) {
+                var qattr = hlsAttributes(line.slice('#EXT-X-STREAM-INF:'.length));
+                var res = String(qattr.RESOLUTION || '').match(/\d+x(\d+)/i);
+                var height = res ? parseInt(res[1], 10) : 0;
+                if (height && !seenQ[height]) {
+                    seenQ[height] = true;
+                    qualities.push(height);
                 }
-            );
-        }
-
-        function done(masterText) {
-            var variant = pickCollapsVariant(masterText, stream);
-
-            if (variant && variant.url) {
-                var mode = variant.muxed
-                    ? 'native-master→muxed'
-                    : ('native-master→separate-audio' + (variant.audioGroup ? ('[' + variant.audioGroup + ']') : ''));
-                finishVariant(variant, mode);
-                return;
             }
+        });
 
-            ok({ url: stream, label: 'android native-media-direct', variant: null });
-        }
-
-        nativeText(
-            stream,
-            headers || {},
-            done,
-            function (firstError) {
-                nativeText(
-                    stream,
-                    {},
-                    done,
-                    function (secondError) {
-                        ok({
-                            url: stream,
-                            label: 'android master-probe-fallback [' + errText(secondError || firstError) + ']',
-                            variant: null
-                        });
-                    }
-                );
-            }
-        );
-    }
-
-    function collapsHeadersFor(url) {
-        var origin = COLLAPS_HOST;
-
-        try {
-            origin = new URL(String(url || '')).origin || COLLAPS_HOST;
-        } catch (e) {}
+        qualities.sort(function (a, b) { return b - a; });
 
         return {
-            'User-Agent': COLLAPS_UA,
-            'Origin': origin,
-            'Referer': origin + '/'
+            tracks: tracks,
+            qualities: qualities,
+            bestQuality: qualities.length ? (qualities[0] + 'p') : ''
         };
     }
-
-    function collapsHeaders() {
-        return collapsHeadersFor(COLLAPS_HOST);
+        function catalog(g, req, ok, fail) {
+            var iframe = url(req.source && req.source.iframeUrl);
+            if (!iframe) return fail(new Error('VeoVeo: iframe отсутствует'));
+            var context = veoContext(iframe), attempts = [], lastError = null;
+            if (req.source.kinopoiskId) attempts.push(veoMovieIdEndpoint(context.origin,'kp',req.source.kinopoiskId,context.token));
+            if (req.imdb) attempts.push(veoMovieIdEndpoint(context.origin,'imdb',req.imdb,context.token));
+            attempts.push(iframe);
+            function next() {
+                if (!attempts.length) return fail(lastError || new Error('VeoVeo: MOVIE_ID отсутствует на странице провайдера'));
+                var endpoint = attempts.shift();
+                request(g,endpoint,false,function (html) {
+                    var id = veoMovieIdFromHtml(html,endpoint);
+                    if (!id) return next();
+                    var address = context.origin + '/balancer-api/proxy/playlists/catalog-api/episodes?content-id=' + encodeURIComponent(id);
+                    if (context.token) address += '&token=' + encodeURIComponent(context.token);
+                    request(g,address,true,function (data) {
+                        if (!Array.isArray(data)) return fail(new Error('VeoVeo: каталог не получен'));
+                        ok(data,context.origin);
+                    },fail);
+                },function(e){lastError=e;next();});
+            }
+            next();
+        }
+        function media(g, item, base, quality, ok, fail) {
+            var variant = chooseVeoVariant(item,quality || 'Авто');
+            var file = url(variant && variant.filepath,base);
+            if (!file) return fail(new Error('VeoVeo: видео отсутствует'));
+            function playlist(address) {
+                address = url(address,file);
+                if (!address) return fail(new Error('VeoVeo: неверный адрес видео'));
+                request(g,address,false,function (text) {
+                    if (String(text).trim().indexOf('#EXTM3U') !== 0) return fail(new Error('VeoVeo: HLS не подтверждён'));
+                    var meta = parseHlsMeta(text,address);
+                    var subtitles = [];
+                    String(text).split(/\r?\n/).forEach(function (line) {
+                        if (line.indexOf('#EXT-X-MEDIA:') !== 0) return;
+                        var attr = hlsAttributes(line.slice(13));
+                        if (attr.TYPE === 'SUBTITLES' && attr.URI) subtitles.push({label:attr.NAME || attr.LANGUAGE || 'Субтитры',url:url(attr.URI,address)});
+                    });
+                    ok({provider:'VeoVeo',url:address,headers:{},tracks:meta.tracks,subtitles:subtitles,transport:'HLS',qualityMode:'native-auto',qualities:meta.qualities});
+                },fail);
+            }
+            if (/\.json(?:[?#]|$)/i.test(file)) {
+                request(g,file,true,function (data) {
+                    var sources = data && data.sources || [];
+                    var chosen = null;
+                    sources.some(function (s) { var link = s.link || s.file || s.url; if (link) { chosen = link; return true; } return false; });
+                    if (!chosen) return fail(new Error('VeoVeo: ссылка на HLS не найдена'));
+                    playlist(chosen);
+                },fail);
+            } else playlist(file);
+        }
+        this.availability = function (req, ok, fail) {
+            var g = group(); probes.push(g);
+            function finish(error, available) {
+                lastProbe = {available:!!available,error:error ? error.message : '',time:Date.now()};
+                close(g); probes = probes.filter(function (p) { return p !== g; });
+                if (error) fail(error); else ok(available);
+            }
+            catalog(g,req,function (items,base) {
+                var candidates = items.filter(function (item) { return normalizeVeoVariants(item).length > 0; }), mediaError = null;
+                function next() {
+                    if (!candidates.length) return finish(mediaError,false);
+                    media(g,candidates.shift(),base,null,function () { finish(null,true); },function(e){mediaError=e;next();});
+                }
+                next();
+            },function (e) { finish(e); });
+        };
+        this.resolve = function (req, ok, fail) {
+            close(session); session = group(); var g = session, id = ++generation;
+            last = {phase:'resolving',generation:id};
+            function bad(e) { if (g.closed) return; close(g); last = {phase:'error',generation:id}; fail(e); }
+            catalog(g,req,function (items,base) {
+                var item = chooseVeoCatalogItem(items,req.season,req.episode);
+                // Never substitute another episode for a missing requested one.
+                if (!item) return bad(new Error('VeoVeo: выбранная серия отсутствует'));
+                media(g,item,base,req.quality,function (result) {
+                    if (g.closed || generation !== id) return;
+                    last = {phase:'ready',generation:id,transport:'HLS',qualities:result.qualities.slice(),tracks:result.tracks.length};
+                    ok(result);
+                },bad);
+            },bad);
+        };
+        this.cleanup = function () { ++generation; close(session); session = null; last = {phase:'idle',generation:generation}; };
+        this.diagnostics = function () { return {adapter:'VeoVeoAdapter',session:last,probes:probes.length,availability:lastProbe}; };
+        this.quality = function () { return {auto:true,manual:'native HLS levels'}; };
+        this.audio = function (resolved) { return resolved.tracks || []; };
+        this.subtitles = function (resolved) { return resolved.subtitles || []; };
     }
+    /* ADAPTER:VEOVEO:END */
+    global.MnogoTVVeoVeoAdapter = VeoVeoAdapter;
+})(window);
 
-    function parseCollapsHtml(html) {
-        html = String(html || '').replace(/\n/g, '');
-        var find = html.match(/makePlayer\(({.*?})\);/);
-        var json = null;
-
-        try {
-            json = find && (0, eval)('"use strict"; (' + find[1] + ');');
-        } catch (e) {}
-
-        return json;
-    }
-
-    function normalizeDirectUrl(url) {
-        url = String(url || '').trim();
-        if (url.indexOf('//') === 0) url = 'https:' + url;
-        return url;
-    }
-
-    function normalizeSubs(list) {
-        if (!Array.isArray(list)) return [];
-        return list.map(function (s) {
-            if (!s) return null;
-            var url = typeof s === 'string' ? s : (s.url || s.file || s.src || '');
-            url = normalizeDirectUrl(url);
-            if (!url) return null;
-            return {
-                label: (s && (s.name || s.label || s.lang)) || 'Субтитры',
-                url: url
+(function (global) {
+    'use strict';
+    /* ADAPTER:TURBO:BEGIN */
+    function TurboAdapter(core) {
+        var Lampa = global.MnogoTVLGNetwork('Turbo'), session = null, generation = 0, probes = [];
+        var last = {phase:'idle'}, lastProbe = null, preference = {voice:'',quality:'720p'};
+        function group() { return {closed:false,requests:[],switchId:0,manifests:{}}; }
+        function close(g) {
+            if (!g || g.closed) return;
+            g.closed = true;
+            g.requests.forEach(function(r){clearTimeout(r.timer);try{r.net.clear();}catch(e){}});
+            g.requests = [];
+            g.manifests = {};
+        }
+        function address(value, base) {
+            try { var u = new URL(String(value || '').trim(), base); return /^https?:$/.test(u.protocol) ? u.href : ''; }
+            catch(e){return '';}
+        }
+        function request(g, url, ok, fail, phase) {
+            phase = phase || 'HLS';
+            var headers = {
+                'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36',
+                'Accept': phase === 'страница' ? 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8' : '*/*',
+                'Referer': phase === 'страница' ? 'https://mnogotv.com/' : (g.origin || '') + '/'
             };
-        }).filter(Boolean);
+            if (phase !== 'страница' && g.origin) headers.Origin = g.origin;
+            function error(message) { return new Error('Turbo • ' + phase + ': ' + message); }
+            if (g.closed) return;
+            var net;
+            try { net = new (Lampa.Reguest || Lampa.Request)(); } catch(e){return fail(error('сетевой API недоступен'));}
+            var slot={net:net,timer:null},ended=false;g.requests.push(slot);
+            function done(error,text) {
+                if(ended || g.closed)return;ended=true;clearTimeout(slot.timer);
+                g.requests=g.requests.filter(function(x){return x!==slot;});
+                if(error)return fail(error);
+                var meta = null;
+                if (phase !== 'страница') {
+                    try { meta = typeof text === 'string' && /^\s*\{/.test(text) ? JSON.parse(text) : text; } catch(e) {}
+                    if (meta && typeof meta === 'object' && typeof meta.body === 'string') {
+                        var finalUrl = address(meta.currentUrl);
+                        if (!finalUrl) return fail(new Error('Turbo: native bridge не вернул конечный адрес HLS'));
+                        return ok(meta.body, finalUrl);
+                    }
+                    if (Lampa.Platform && Lampa.Platform.is('android')) return fail(new Error('Turbo: для HLS требуется Android bridge с returnHeaders/currentUrl'));
+                }
+                ok(String(text || ''), '');
+            }
+            slot.timer=setTimeout(function(){done(error('время ожидания истекло'));try{net.clear();}catch(e){}},15000);
+            try {
+                net.timeout(15000);
+                var method=net.native || net.silent;
+                if(!method)throw new Error('network');
+                method.call(net,url,function(text){done(null,text);},function(e){
+                    var status=Number(e && e.status);done(error(status>=100 && status<=599?'HTTP '+status:'нет ответа сети'));
+                },false,{dataType:'text',headers:headers,returnHeaders:phase !== 'страница'});
+            }catch(e){done(error('запрос не выполнен'));}
+        }
+        function parse(html) {
+            var match=String(html).match(/new\s+Player\s*\(\s*("(?:[^"\\]|\\.)*")\s*\)/);
+            if(!match)throw new Error('Turbo: конфигурация плеера не найдена');
+            var encoded=JSON.parse(match[1]);
+            // Provider wrapper + Playerjs #2, verified on film and series HAR.
+            // No provider JavaScript is evaluated. Unknown encodings fail closed.
+            var payload=encoded.slice(73);
+            ['o/o/o','b/b/b','r/r/r','u/u/u','t/t/t'].forEach(function(noise){payload=payload.replace('//'+btoa(noise),'');});
+            var text=decodeURIComponent(Array.prototype.map.call(atob(payload),function(c){return '%'+('00'+c.charCodeAt(0).toString(16)).slice(-2);}).join(''));
+            var data=JSON.parse(text);
+            if(!data || !Array.isArray(data.file))throw new Error('Turbo: неизвестная структура каталога');
+            return data;
+        }
+        function folderNumber(title, kind) {
+            title = String(title || '').trim();
+            var word = kind === 'season' ? '(?:сезон|season)' : '(?:эпизод|серия|episode)';
+            var before = new RegExp('^(\\d+)\\s+' + word + '$','i').exec(title);
+            var after = new RegExp('^' + word + '\\s+(\\d+)$','i').exec(title);
+            var match = before || after;
+            return match ? Number(match[1]) : null;
+        }
+        function variants(data, season, episode) {
+            var list=data.file;
+            if(season!==null && season!==undefined && episode!==null && episode!==undefined){
+                var s=null,ep=null;
+                list.some(function(x){if(folderNumber(x.title,'season')===Number(season)){s=x;return true;}return false;});
+                if(s && Array.isArray(s.folder))s.folder.some(function(x){if(folderNumber(x.title,'episode')===Number(episode)){ep=x;return true;}return false;});
+                list=ep && ep.folder || [];
+            }
+            return list.filter(function(x){return x && typeof x.file==='string' && !x.folder;});
+        }
+        function qualities(voice, base) {
+            var out={},re=/\[([^\]]+)\]([^\[]+)/g,m;
+            while((m=re.exec(voice.file || ''))){
+                var label=m[1].trim();
+                // 'Авто' in the recorded site is not verified adaptive HLS.
+                if(!/^\d{3,4}p$/.test(label))continue;
+                var urls=m[2].replace(/,\s*$/,'').split(/\s+or\s+|:or:/).map(function(u){return address(u,base);}).filter(Boolean);
+                if(urls.length)out[label]=urls;
+            }
+            return out;
+        }
+        function catalog(g,req,ok,fail){
+            var url=address(req.source && req.source.iframeUrl);
+            if(!url)return fail(new Error('Turbo: iframe отсутствует'));
+            g.origin = new URL(url).origin;
+            request(g,url,function(html){
+                var data;try{data=parse(html);}catch(e){return fail(new Error('Turbo: не удалось разобрать конфигурацию провайдера'));}
+                ok(data,url);
+            },fail,'страница');
+        }
+        function mediaKey(url) { return String(url || '').split('#')[0]; }
+        function installManifestRoute() {
+            if (!core.hlsRouter) return false;
+            function now() { return global.performance && global.performance.now ? global.performance.now() : Date.now(); }
+            function ManifestLoader() {
+                this.timer = null;
+                this.stats = {aborted:false,loaded:0,total:0,retry:0,chunkCount:0,bwEstimate:0,
+                    loading:{start:0,first:0,end:0},parsing:{start:0,end:0},buffering:{start:0,first:0,end:0}};
+            }
+            ManifestLoader.prototype.load = function(context, config, callbacks) {
+                var self = this, g = session, entry = g && g.manifests[mediaKey(context.url)];
+                this.stats.loading.start = now();
+                this.timer = setTimeout(function() {
+                    if (self.stats.aborted || !g || g.closed || session !== g) return;
+                    if (!entry) return callbacks.onError({code:0,text:'Turbo: HLS session expired'},context,null,self.stats);
+                    var stats = self.stats;
+                    stats.loading.first = stats.loading.end = now();
+                    stats.loaded = stats.total = entry.text.length; stats.chunkCount = 1;
+                    // Hls.js resolves relative segments against response.url, NOT the embed or redirect URL.
+                    callbacks.onSuccess({url:entry.url,data:entry.text},stats,context,null);
+                },0);
+            };
+            ManifestLoader.prototype.abort = function() { this.stats.aborted = true; clearTimeout(this.timer); };
+            ManifestLoader.prototype.destroy = ManifestLoader.prototype.abort;
+            ManifestLoader.prototype.getCacheAge = function() { return null; };
+            ManifestLoader.prototype.getResponseHeader = function() { return null; };
+            return core.hlsRouter.register('turbo', {
+                owns:function(url) { return !!(session && !session.closed && session.manifests[mediaKey(url)]); },
+                loader:ManifestLoader
+            });
+        }
+        function probeMedia(g,urls,ok,fail){
+            var queue=urls.slice(),error=null;
+            function next(){
+                if(g.closed)return;
+                if(!queue.length)return fail(error || new Error('Turbo: поток отсутствует'));
+                var url=queue.shift();
+                request(g,url,function(text,finalUrl){
+                    if(text.trim().indexOf('#EXTM3U')!==0){error=new Error('Turbo: HLS не подтверждён');return next();}
+                    var playable = finalUrl || url;
+                    if (finalUrl && g === session) {
+                        // Only cache VOD/media or master playlists; live playlists must refresh normally.
+                        if (/#EXT-X-ENDLIST|#EXT-X-PLAYLIST-TYPE:VOD|#EXT-X-STREAM-INF/.test(text)) {
+                            g.manifests[mediaKey(finalUrl)] = {text:text,url:finalUrl};
+                            if (!installManifestRoute()) delete g.manifests[mediaKey(finalUrl)];
+                        }
+                    }
+                    // External players also receive the final CDN address, not the header-protected redirect.
+                    ok(mediaKey(playable)+'#.m3u8');
+                },function(e){error=e;next();});
+            }next();
+        }
+        function chooseQuality(map,wanted){
+            if(map[wanted])return wanted;
+            var keys=Object.keys(map).sort(function(a,b){return parseInt(a,10)-parseInt(b,10);});
+            var below=keys.filter(function(k){return parseInt(k,10)<=720;});
+            return below[below.length-1] || keys[0] || '';
+        }
+        function leafs(data){
+            var out=[];
+            function walk(list,depth){if(depth>3)return;(list || []).forEach(function(x){if(x.folder)walk(x.folder,depth+1);else if(typeof x.file==='string')out.push(x);});}
+            walk(data.file,0);return out;
+        }
+        this.availability=function(req,ok,fail){
+            var g=group();probes.push(g);
+            function finish(e){lastProbe={available:!e,error:e?e.message:'',time:Date.now()};close(g);probes=probes.filter(function(x){return x!==g;});if(e)fail(e);else ok(true);}
+            catalog(g,req,function(data,base){
+                var candidates=leafs(data).slice(0,3),lastError=null;
+                function next(){
+                    if(!candidates.length)return finish(lastError || new Error('Turbo: в каталоге нет доступного потока'));
+                    var map=qualities(candidates.shift(),base),q=chooseQuality(map,'720p');
+                    if(!q)return next();
+                    probeMedia(g,map[q],function(){finish();},function(e){lastError=e;next();});
+                }next();
+            },finish);
+        };
+        this.resolve=function(req,ok,fail){
+            close(session);var g=session=group(),id=++generation;last={phase:'resolving',generation:id};
+            function bad(e){if(g.closed)return;close(g);last={phase:'error',error:e.message};fail(e);}
+            catalog(g,req,function(data,base){
+                var voices=variants(data,req.season,req.episode);
+                if(!voices.length)return bad(new Error('Turbo: ' + (req.season != null && req.episode != null ? 'S' + req.season + 'E' + req.episode : 'фильм') + ' отсутствует в каталоге'));
+                var selected=voices[0];voices.some(function(v){if(v.title===preference.voice){selected=v;return true;}return false;});
+                var map=qualities(selected,base),q=chooseQuality(map,preference.quality);
+                if(!q)return bad(new Error('Turbo: качества отсутствуют'));
+                probeMedia(g,map[q],function(url){
+                    if(g.closed || generation!==id)return;
+                    preference.voice=selected.title;preference.quality=q;
+                    var result={provider:'Turbo',url:url,headers:{},tracks:[],subtitles:[],transport:'HLS',quality:{},voiceovers:[]};
+                    function alive(){return !g.closed && session===g && generation===id && (!Lampa.Player || !Lampa.Player.opened || Lampa.Player.opened());}
+                    function report(e){
+                        if(!alive())return;
+                        result.voiceovers.forEach(function(t){t.selected=t.language===selected.title;t.enabled=t.selected;});
+                        if(Lampa.PlayerPanel && Lampa.PlayerPanel.setTracks)Lampa.PlayerPanel.setTracks(result.voiceovers);
+                        if(core.notify)core.notify(e.message);
+                    }
+                    function fillQuality(){
+                        result.quality={};
+                        Object.keys(map).forEach(function(label){
+                            result.quality[label]={url:label===q?result.url:'',call:function(item,done){
+                                var serial=++g.switchId;
+                                probeMedia(g,map[label],function(next){if(!alive() || serial!==g.switchId)return;q=label;preference.quality=q;result.url=next;done(next);},report);
+                            }};
+                        });
+                    }
+                    fillQuality();
+                    result.voiceovers=voices.map(function(v,index){return {index:index,language:v.title,label:'',selected:v===selected,onSelect:function(){
+                        if(!alive())return;
+                        var nextMap=qualities(v,base),nextQ=chooseQuality(nextMap,q),serial=++g.switchId;
+                        if(!nextQ)return report(new Error('Turbo: озвучка недоступна'));
+                        probeMedia(g,nextMap[nextQ],function(next){
+                            if(!alive() || serial!==g.switchId)return;
+                            selected=v;map=nextMap;q=nextQ;preference.voice=v.title;preference.quality=q;result.url=next;fillQuality();
+                            result.voiceovers.forEach(function(t){t.selected=t.index===index;});
+                            if(Lampa.PlayerPanel && Lampa.PlayerPanel.quality)Lampa.PlayerPanel.quality(result.quality,next);
+                            if(Lampa.PlayerPanel && Lampa.PlayerPanel.listener)Lampa.PlayerPanel.listener.send('quality',{name:q,url:next});
+                        },report);
+                    }};});
+                    last={phase:'ready',generation:id,voices:voices.length,qualities:Object.keys(map)};ok(result);
+                },bad);
+            },bad);
+        };
+        this.cleanup=function(){if(core.hlsRouter)core.hlsRouter.unregister('turbo');++generation;close(session);session=null;probes.forEach(close);probes=[];last={phase:'idle'};};
+        this.diagnostics=function(){return {adapter:'TurboAdapter',session:last,probes:probes.length,availability:lastProbe,quality:preference.quality,voice:preference.voice};};
+        this.quality=function(){return {auto:false,manual:true};};
+        this.audio=function(result){return result.voiceovers || [];};
+        this.subtitles=function(result){return result.subtitles || [];};
+    }
+    /* ADAPTER:TURBO:END */
+    global.MnogoTVTurboAdapter=TurboAdapter;
+})(window);
+
+(function(global) {
+'use strict';
+/* ADAPTER:ALLOHA:BEGIN */
+function AllohaAdapter(core) {
+var Lampa=global.MnogoTVLGNetwork('Alloha');
+
+// Pure permutation from the captured Alloha client. No session values stored here.
+function regroup(text, group, descending) {
+    var counts = [], buckets = [], offsets = [], i, k, cursor = 0, out = [];
+    for (i = 0; i < text.length; i++) { k = group(i); counts[k] = (counts[k] || 0) + 1; }
+    for (i = 0; i < counts.length; i++) {
+        k = descending ? counts.length - i - 1 : i;
+        buckets[k] = text.slice(cursor, cursor + (counts[k] || 0));
+        cursor += counts[k] || 0; offsets[k] = 0;
+    }
+    for (i = 0; i < text.length; i++) { k = group(i); out.push(buckets[k].charAt(offsets[k]++)); }
+    return out.join('');
+}
+function challenge(value) {
+    if (typeof value !== 'string' || !value.length || value.length > 4096) throw new Error('Invalid Alloha challenge');
+    if (value.length < 2) return value;
+    var n = value.length, bits = 0;
+    while (Math.pow(2, bits) < n) bits++;
+    var text = regroup(value, function(i) { var count = 0; while(i > 0) { count++; i >>>= 1; } return count; }, true);
+    text = regroup(text, function(i) { if (!i) return bits; var count = 0; while (!(i & 1)) {count++; i >>= 1;} return count; }, false);
+    function prime(x) { if (x < 2) return false; for (var d = 2; d*d <= x; d++) if (x % d === 0) return false; return true; }
+    var modulus = n + 1, pos = 0, seen = [], order = [], out = [];
+    while (!prime(modulus)) modulus++;
+    while (order.length < n) { pos = (pos + 2) % modulus; if(pos < n && !seen[pos]) {seen[pos] = true; order.push(pos);} }
+    for (var i = 0; i < n; i++) out[order[i]] = text[i];
+    return out.join('');
+}
+
+
+function records(catalog, season, episode) {
+    if (!catalog || !catalog.all) throw new Error('Alloha: каталог отсутствует');
+    var node = catalog.all, out = [];
+    if (catalog.type === 'serial') {
+        if (!(isFinite(Number(season)) && Math.floor(Number(season)) === Number(season)) || !(isFinite(Number(episode)) && Math.floor(Number(episode)) === Number(episode)) || Number(season) < 1 || Number(episode) < 1) throw new Error('Alloha: укажите сезон и серию');
+        node = node[String(Number(season))]; node = node && node[String(Number(episode))];
+        if (!node) return [];
+    } else if (catalog.type !== 'movie') throw new Error('Alloha: неизвестный тип каталога');
+    function walk(value, depth) {
+        if (!value || typeof value !== 'object' || depth > 4) return;
+        if (value.id && typeof value.translation === 'string') {
+            // id_file is NOT the identifier used by /bnsi/movies/.
+            out.push({id:String(value.id),label:value.translation,translationId:String(value.id_translation),edition:value.typeList || '',sourceQuality:value.quality || ''});
+            return;
+        }
+        Object.keys(value).forEach(function(k){walk(value[k], depth+1);});
+    }
+    walk(node,0); return out;
+}
+function safeURL(url) {try {var u=new URL(url);return /^https?:$/.test(u.protocol)?u.href:'';}catch(e){return '';}}
+function voices(response, catalogRecord, film) {
+    var counts = Object.create(null);
+    return (Array.isArray(response.hlsSource) ? response.hlsSource : []).map(function(v){
+        var map = {};
+        Object.keys(v.quality || {}).forEach(function(k){if(/^\d{3,4}$/.test(k) && safeURL(v.quality[k])) map[k+'p']=safeURL(v.quality[k]);});
+        var name = film && catalogRecord ? catalogRecord.label : String(v.label || 'Озвучка');
+        var ordinal = counts[name] || 0; counts[name] = ordinal+1;
+        return {name:name,ordinal:ordinal,label:name+(ordinal?' ('+(ordinal+1)+')':''),audioId:String(v.audioId),quality:map,default:!!v.default};
+    }).filter(function(v){return Object.keys(v.quality).length;});
+}
+function pickVoice(list, preference) {
+    return list.filter(function(v){return preference && v.name === preference.name && v.ordinal === preference.ordinal;})[0] || list.filter(function(v){return v.default;})[0] || list[0] || null;
+}
+function quality(map, wanted) {
+    if (Object.prototype.hasOwnProperty.call(map,wanted)) return wanted;
+    var names=Object.keys(map).sort(function(a,b){return parseInt(a)-parseInt(b);});
+    var low=names.filter(function(k){return parseInt(k)<=720;});return low[low.length-1] || names[0] || '';
+}
+function subtitles(response) {
+    return (Array.isArray(response.tracks)?response.tracks:[]).filter(function(t){return t && t.kind==='captions' && safeURL(t.src);}).map(function(t){return {label:String(t.label || t.language || 'Субтитры'),url:safeURL(t.src),language:String(t.language || '')};});
+}
+    var session=null, probes=[], pref={name:'',ordinal:0,quality:'720p'}, last={phase:'idle'};
+    function group(){return {closed:false,requests:[],socket:null,timers:[],media:{},challenge:'',fingerprint:'',guard:'',edge:'',busy:false};}
+    function error(phase,message){return new Error('Alloha • '+phase+': '+message);}
+    function close(g){
+        if(!g || g.closed)return;g.closed=true;
+        g.requests.forEach(function(r){clearTimeout(r.timer);try{r.net.clear();}catch(e){}});g.requests=[];
+        g.timers.forEach(clearTimeout);g.timers=[];clearInterval(g.heartbeat);
+        if(g.socket){g.socket.onopen=null;g.socket.onclose=null;g.socket.onmessage=null;g.socket.onerror=null;try{g.socket.close();}catch(e){}}g.socket=null;g.media={};
+    }
+    function request(g,url,phase,post,extra,ok,fail,binary){
+        if(g.closed)return;
+        last={phase:phase};var net,ended=false;
+        try{net=new (Lampa.Reguest || Lampa.Request)();}catch(e){return fail(error(phase,'сетевой API недоступен'));}
+        var slot={net:net,timer:null};g.requests.push(slot);
+        var headers={'Referer':phase==='каталог'?'https://mnogotv.com/':g.embed || 'https://mnogotv.com/','Accept':phase==='каталог'?'text/html,application/xhtml+xml,*/*;q=0.8':'*/*'};
+        if(g.origin && phase!=='каталог')headers.Origin=g.origin;
+        Object.keys(extra || {}).forEach(function(k){headers[k]=extra[k];});
+        function end(err,body){
+            if(ended || g.closed)return;ended=true;clearTimeout(slot.timer);g.requests=g.requests.filter(function(r){return r!==slot;});
+            if(err)return fail(err);
+            if(binary)return ok(body,url,{});
+            var meta;try{meta=typeof body==='string' && /^\s*\{/.test(body)?JSON.parse(body):body;}catch(e){}
+            if(meta && typeof meta.body==='string')return ok(meta.body,meta.currentUrl || url,meta.headers || {});
+            ok(typeof body==='string'?body:JSON.stringify(body),url,{});
+        }
+        slot.timer=setTimeout(function(){end(error(phase,'тайм-аут 20 с'));try{net.clear();}catch(e){}},20000);
+        try{net.timeout(20000);(net.native || net.silent).call(net,url,function(b){end(null,b);},function(e){end(error(phase,'HTTP '+(Number(e && e.status)||0)));},post || false,{dataType:binary?'base64':'text',headers:headers,returnHeaders:!binary});}
+        catch(e){end(error(phase,'запрос не выполнен'));}
+        return function(){if(ended)return;ended=true;clearTimeout(slot.timer);g.requests=g.requests.filter(function(r){return r!==slot;});try{net.clear();}catch(e){}};
+    }
+    // Parse a JavaScript string literal as data, without eval or executing embed code.
+    function stringAt(text,start){
+        var quote=text[start],out='',i=start+1;
+        if(quote!=="'" && quote!=='"')throw error('каталог','ожидалась строка');
+        for(;i<text.length;i++){
+            var c=text[i];if(c===quote)return out;
+            if(c!=='\\'){out+=c;continue;}
+            c=text[++i];var escapes={n:'\n',r:'\r',t:'\t',b:'\b',f:'\f',v:'\v'};
+            if(c==='u' || c==='x'){var n=c==='u'?4:2,h=text.slice(i+1,i+1+n);if(!new RegExp('^[0-9a-f]{'+n+'}$','i').test(h))throw error('каталог','некорректная escape-последовательность');out+=String.fromCharCode(parseInt(h,16));i+=n;}
+            else if(c==='\n'){} else out+=Object.prototype.hasOwnProperty.call(escapes,c)?escapes[c]:c;
+        }throw error('каталог','незакрытая строка');
+    }
+    function parseEmbed(html){
+        var m=/\b(?:const|var|let)\s+fileList\s*=\s*JSON\.parse\(\s*/.exec(html);
+        if(!m)throw error('каталог','fileList не найден');
+        var catalog=JSON.parse(stringAt(html,m.index+m[0].length));
+        var u=/\b(?:const|var|let)\s+userParam\s*=\s*\{/.exec(html),token='';
+        if(u){var tail=html.slice(u.index+u[0].length),t=/\btoken\s*:\s*/.exec(tail);if(t)token=stringAt(tail,t.index+t[0].length);}
+        var meta=/<meta\b[^>]*\bname=["']viewporti["'][^>]*\bcontent=["']([^"']+)["']/i.exec(html);
+        if(!token || !meta)throw error('каталог','token/challenge отсутствуют');
+        return {catalog:catalog,token:token,challenge:meta[1]};
+    }
+    function catalog(g,req,ok,fail){
+        g.embed=safeURL(req.source && req.source.iframeUrl);
+        if(!g.embed)return fail(error('каталог','iframe отсутствует'));
+        g.origin=new URL(g.embed).origin;
+        request(g,g.embed,'каталог',false,{},function(html){
+            try{var data=parseEmbed(html);g.token=data.token;g.challenge=data.challenge;g.catalog=data.catalog;g.html=html;ok(data.catalog);}catch(e){fail(error('каталог','конфигурация не распознана'));}
+        },fail);
+    }
+    // SHA-256 on UTF-8, kept local to this adapter for older TV browsers.
+    function sha256(text){
+        var bytes=unescape(encodeURIComponent(text)),words=[],length=bytes.length,i,j;
+        var h=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+        var k=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+        function r(x,n){return x>>>n|x<<32-n;}
+        for(i=0;i<length;i++)words[i>>2]=(words[i>>2]||0)|bytes.charCodeAt(i)<<24-(i%4)*8;
+        words[length>>2]=(words[length>>2]||0)|0x80<<24-(length%4)*8;
+        var total=(((length+8)>>6)+1)*16;words[total-1]=length*8;
+        for(i=0;i<total;i+=16){var w=[],a=h.slice();for(j=0;j<64;j++){
+            if(j<16)w[j]=words[i+j]|0;else {var x=w[j-15],y=w[j-2];w[j]=((r(x,7)^r(x,18)^x>>>3)+w[j-16]+(r(y,17)^r(y,19)^y>>>10)+w[j-7])|0;}
+            var t=(a[7]+(r(a[4],6)^r(a[4],11)^r(a[4],25))+((a[4]&a[5])^(~a[4]&a[6]))+k[j]+w[j])|0;
+            var u=((r(a[0],2)^r(a[0],13)^r(a[0],22))+((a[0]&a[1])^(a[0]&a[2])^(a[1]&a[2])))|0;
+            a=[t+u|0,a[0],a[1],a[2],a[3]+t|0,a[4],a[5],a[6]];
+        }for(j=0;j<8;j++)h[j]=h[j]+a[j]|0;}
+        return h.map(function(v){return ('00000000'+(v>>>0).toString(16)).slice(-8);}).join('');
+    }
+    function fingerprint(g,done){
+        var n=global.navigator || {},parts=[String(n.userAgent||'').replace(/\d+(?:[._]\d+)+/g,'')];
+        try{parts.push(Intl.DateTimeFormat().resolvedOptions().timeZone);}catch(e){parts.push(undefined);}
+        var s=global.screen || {};parts.push(Math.max(s.width||0,s.height||0)+'x'+Math.min(s.width||0,s.height||0));parts.push(n.language||n.userLanguage);parts.push(n.deviceMemory);parts.push(n.hardwareConcurrency);
+        try{var canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');ctx.textBaseline='top';ctx.font='16px sans-serif';ctx.fillText('fp',2,2);parts.push(canvas.toDataURL());}catch(e){}
+        try{var c=document.createElement('canvas'),gl=c.getContext('webgl2',{powerPreference:'high-performance',failIfMajorPerformanceCaveat:true})||c.getContext('webgl');if(gl){var ext=gl.getExtension('WEBGL_debug_renderer_info');if(ext)parts.push(gl.getParameter(ext.UNMASKED_VENDOR_WEBGL)+'|'+gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));var lose=gl.getExtension('WEBGL_lose_context');if(lose)lose.loseContext();}}catch(e){}
+        var finished=false;function finish(audioLength){if(finished || g.closed)return;finished=true;clearTimeout(timer);if(audioLength)parts.push(audioLength);g.fingerprint=sha256(parts.join('||'));done();}
+        var timer=setTimeout(function(){finish();},1500);g.timers.push(timer);
+        try{var Audio=global.OfflineAudioContext||global.webkitOfflineAudioContext;if(!Audio)return finish();var ac=new Audio(1,44100,44100),osc=ac.createOscillator();osc.connect(ac.destination);osc.start(0);ac.startRendering().then(function(b){finish(b.length);},function(){finish();});}catch(e){finish();}
+    }
+    function guard(g,ok,fail){
+        // The captured provider bundle returns one public static guard. Read it freshly;
+        // never ship the recorded bearer token or evaluate the provider's JavaScript.
+        var matches=[],re=/<script\b[^>]*\bsrc=["']([^"']+)["']/gi,m;
+        while((m=re.exec(g.html)))if(/\/build\/app\.[\w-]+\.js(?:\?|$)/.test(m[1]))matches.push(m[1]);
+        if(matches.length!==1)return fail(error('служебный ключ','скрипт провайдера изменился'));
+        var url=new URL(matches[0],g.embed);if(url.origin!==g.origin)return fail(error('служебный ключ','неожиданный адрес скрипта'));
+        request(g,url.href,'служебный ключ',false,{},function(js){
+            var found=[],rx=/['"]([1-9A-HJ-NP-Za-km-z]{250,500})['"]/g,x;
+            while((x=rx.exec(js)))if(found.indexOf(x[1])<0)found.push(x[1]);
+            if(found.length!==1)return fail(error('служебный ключ','формат изменился; требуется обновление адаптера'));
+            g.guard=found[0];ok();
+        },fail);
+    }
+    function api(g,record,ok,fail){
+        if(!g.challenge)return fail(error('API','challenge отсутствует'));
+        var form={token:g.token,av1:'false',autoplay:'0',audio:'',subtitle:''};
+        request(g,g.origin+'/bnsi/movies/'+encodeURIComponent(record.id),'API',form,{'X-Requested-With':'XMLHttpRequest','Borth':g.fingerprint+'|'+challenge(g.challenge)},function(text,url,headers){
+            var data;try{data=JSON.parse(text);}catch(e){return fail(error('API','ответ не является JSON'));}
+            if(!Array.isArray(data.hlsSource)||!data.hlsSource.length)return fail(error('API','нет доступных потоков'));
+            Object.keys(headers).forEach(function(k){if(k.toLowerCase()==='borth')g.challenge=String(headers[k]);});
+            ok(data);
+        },fail);
+    }
+    function socket(g,data,voice,q,ok,fail){
+        clearInterval(g.heartbeat);
+        if(g.socket){g.socket.onopen=null;g.socket.onclose=null;g.socket.onerror=null;g.socket.onmessage=null;try{g.socket.close();}catch(e){}}g.edge='';
+        if(!data.pnr || !data.pnk || !global.WebSocket)return fail(error('WebSocket','сессия недоступна'));
+        var u;try{u=new URL(data.pnr,g.embed);}catch(e){return fail(error('WebSocket','неверный адрес'));}
+        if(u.protocol!=='wss:')return fail(error('WebSocket','неподдерживаемый адрес'));
+        var ws,ended=false,timer;
+        function bad(message){if(ended||g.closed)return;ended=true;clearTimeout(timer);if(ws){ws.onclose=null;try{ws.close();}catch(e){}}fail(error('WebSocket',message));}
+        try{u.searchParams.set('sid',data.pnk);u.searchParams.set('v','2.1');u.searchParams.set('t',String(Date.now()));ws=g.socket=new global.WebSocket(u.href);}catch(e){return bad('соединение не создано');}
+        timer=setTimeout(function(){bad('нет ответа за 10 с');},10000);g.timers.push(timer);
+        g.wsSelection={resolution:String(parseInt(q,10)),track_id:String(voice.audioId)};
+        function send(type){if(g.closed||g.socket!==ws||ws.readyState!==1)return;ws.send(JSON.stringify({type:type,current_time:Math.floor((document.querySelector('video') || {}).currentTime || 0),resolution:g.wsSelection.resolution,track_id:g.wsSelection.track_id,speed:1,subtitle:-1,ts:Date.now()}));}
+        ws.onopen=function(){if(g.closed || g.socket!==ws)return;send('playback_start');g.heartbeat=setInterval(function(){if(g.closed||g.socket!==ws)return;var video=document.querySelector('video');if(video && !video.paused)send('playing');},20000);};
+        ws.onmessage=function(e){if(g.closed||g.socket!==ws)return;var d;try{d=JSON.parse(e.data);}catch(e){return;}if(d.type==='config_update'&&typeof d.edge_hash==='string'&&d.edge_hash){g.edge=d.edge_hash;if(!ended){ended=true;clearTimeout(timer);ok();}}};
+        ws.onerror=function(){bad('ошибка соединения');};ws.onclose=function(){clearInterval(g.heartbeat);if(!ended)bad('соединение закрыто');else if(!g.closed)last={phase:'WebSocket',error:'соединение закрыто'};};
+    }
+    function mediaHeaders(g){return {'Accepts-Controls':g.edge || g.fingerprint,'Authorizations':'Bearer '+g.guard};}
+    function rewritePlaylist(g,body,base){
+        if(String(body).trim().indexOf('#EXTM3U')!==0)throw error('HLS плейлист','ответ не является M3U8');
+        g.media[new URL(base).origin]=true;
+        function absolute(value){var u=new URL(value,base);if(!/^https?:$/.test(u.protocol))throw error('HLS плейлист','неверный протокол');g.media[u.origin]=true;return u.href;}
+        return String(body).split(/\r?\n/).map(function(line){return line && line[0]!=='#'?absolute(line.trim()):line.replace(/URI="([^"]+)"/g,function(_,v){return 'URI="'+absolute(v)+'"';});}).join('\n');
+    }
+    function prepare(g,data,voice,q,ok,fail){
+        socket(g,data,voice,q,function(){
+            var url=voice.quality[q];request(g,url,'HLS',false,mediaHeaders(g),function(body,finalUrl){
+                if(body.trim().indexOf('#EXTM3U')!==0)return fail(error('HLS','плейлист не получен'));
+                try {
+                body=rewritePlaylist(g,body,finalUrl);
+                g.cached={url:finalUrl.split('#')[0],body:body};
+                } catch(e) { return fail(error('HLS','некорректный адрес в плейлисте')); }
+                if(!route(g))return fail(error('HLS','загрузчик Lampa недоступен'));
+                ok(g.cached.url+'#.m3u8');
+            },fail);
+        },fail);
+    }
+    function decodeMedia(raw){
+        for(var depth=0;depth<8;depth++){
+            if(Object.prototype.toString.call(raw)==='[object ArrayBuffer]')return raw;
+            if(typeof ArrayBuffer!=='undefined'&&ArrayBuffer.isView&&ArrayBuffer.isView(raw))return raw.buffer.slice(raw.byteOffset,raw.byteOffset+raw.byteLength);
+            if(typeof raw==='string'&&/^\s*[{"[]/.test(raw)){
+                if(raw==='[Response too large, skipped]')throw new Error('ответ превышает лимит native bridge');
+                try{raw=JSON.parse(raw);}catch(e){throw new Error('вместо видеоданных получен некорректный ответ');}
+            }
+            if(!raw||typeof raw!=='object')break;
+            if(raw.error||raw.success===false||Number(raw.status||raw.statusCode)>=400)throw new Error('native bridge вернул ошибку HTTP '+(Number(raw.status||raw.statusCode)||0));
+            raw=raw.base64!==undefined?raw.base64:raw.body!==undefined?raw.body:raw.data!==undefined?raw.data:raw.response!==undefined?raw.response:raw.result;
+        }
+        raw=String(raw||'').replace(/^data:[^,]*;base64,/,'').replace(/\s/g,'');
+        if(!raw||!/^[A-Za-z0-9+/]*={0,2}$/.test(raw)||raw.length%4===1)throw new Error('ответ не является Base64-видеоданными');
+        var text;try{text=global.atob(raw);}catch(e){throw new Error('Base64 не декодируется');}
+        var out=new Uint8Array(text.length);for(var i=0;i<text.length;i++)out[i]=text.charCodeAt(i);
+        return out.buffer;
+    }
+    function mediaRequest(g,url,headers,ok,fail){
+        var ended=false,cancels=[],timer,parts=[],ready={},issued=0,consumed=0,total=0,tail=null;
+        var size=262144,overlap=32,stride=size-overlap,start=0,limit=null,pumping=false,probe=null;
+        function inactive(){return ended||g.closed;}
+        function stop(){ended=true;clearTimeout(timer);cancels.forEach(function(f){if(f)f();});cancels=[];}
+        function bad(e){if(inactive())return;stop();fail(e);}
+        function done(buffer){if(inactive())return;stop();ok(buffer);}
+        function ranged(a,b,success,failure){
+            var h={};Object.keys(headers).forEach(function(k){if(k.toLowerCase()!=='range')h[k]=headers[k];});h.Range='bytes='+a+'-'+b;
+            cancels.push(request(g,url,'HLS Range',false,h,function(raw){
+                if(inactive())return;
+                var bytes;try{bytes=new Uint8Array(decodeMedia(raw));}catch(e){return failure(error('HLS Range',e.message));}
+                if(bytes.length>b-a+1)return failure(error('HLS Range','сервер проигнорировал диапазон'));
+                success(bytes);
+            },function(e){if(!inactive())failure(e);},true));
+        }
+        function finish(){
+            var out=new Uint8Array(total),offset=0;
+            parts.forEach(function(p){out.set(p,offset);offset+=p.length;});parts=[];ready={};done(out.buffer);
+        }
+        function drain(){
+            while(!inactive()&&ready[consumed]){
+                var item=ready[consumed];delete ready[consumed];
+                if(item.error)return bad(item.error);
+                var bytes=item.bytes,skip=tail?tail.length:0;
+                if(bytes.length<skip)return bad(error('HLS Range','обрезанный фрагмент'));
+                if(!consumed&&(!bytes.length||bytes[0]!==probe))return bad(error('HLS Range','начало фрагмента изменилось'));
+                for(var j=0;j<skip;j++)if(bytes[j]!==tail[j])return bad(error('HLS Range','части фрагмента не совпадают'));
+                var piece=bytes.subarray(skip);parts.push(piece);total+=piece.length;consumed++;
+                if(total>67108864)return bad(error('HLS Range','превышен предел 64 МиБ'));
+                if(bytes.length<item.length||(limit!==null&&start+total>limit))return finish();
+                if(!piece.length)return bad(error('HLS Range','нет продвижения'));
+                tail=bytes.subarray(bytes.length-Math.min(overlap,bytes.length));
+            }
+        }
+        function pump(){
+            if(inactive()||pumping)return;pumping=true;
+            while(!inactive()&&issued-consumed<4){
+                var a=start+issued*stride,b=a+size-1;
+                if(limit!==null){if(a>limit)break;b=Math.min(b,limit);}
+                if(a-start>=67108864){bad(error('HLS Range','превышен предел 64 МиБ'));break;}
+                launch(issued++,a,b);
+            }
+            pumping=false;
+        }
+        function launch(index,a,b){
+            function receive(item){if(inactive())return;ready[index]=item;drain();pump();}
+            ranged(a,b,function(bytes){receive({bytes:bytes,length:b-a+1});},function(e){receive({error:e});});
+        }
+        function recover(){
+            var range=headers.Range;
+            if(range){var m=/^bytes=(\d+)-(\d*)$/.exec(range);if(!m)return bad(error('HLS Range','неверный диапазон'));start=Number(m[1]);limit=m[2]?Number(m[2]):null;}
+            ranged(start,start,function(bytes){
+                if(bytes.length!==1)return bad(error('HLS Range','проверка диапазона не пройдена'));
+                probe=bytes[0];pump();
+            },bad);
+        }
+        timer=setTimeout(function(){bad(error('HLS Range','тайм-аут сборки 120 с'));},120000);g.timers.push(timer);
+        cancels.push(request(g,url,'HLS фрагмент',false,headers,function(raw){
+            if(inactive())return;
+            if(raw==='[Response too large, skipped]')return recover();
+            var buffer;try{buffer=decodeMedia(raw);}catch(e){return bad(error('HLS фрагмент',e.message));}done(buffer);
+        },bad,true));
+        return stop;
+    }
+    function route(g){
+        var Stock=core.hlsRouter && core.hlsRouter.stockLoader();if(!Stock)return false;
+        function Loader(config){this.config=config;this.delegate=null;this.stats={aborted:false,loaded:0,total:0,retry:0,chunkCount:0,bwEstimate:0,loading:{start:0,first:0,end:0},parsing:{start:0,end:0},buffering:{start:0,first:0,end:0}};}
+        Loader.prototype.load=function(ctx,cfg,cb){
+            var self=this,clean=String(ctx.url).split('#')[0];
+            if(g.closed)return cb.onError({code:0,text:'Alloha session closed'},ctx,null,this.stats);
+            if(g.cached&&clean===g.cached.url){var now=global.performance&&global.performance.now?global.performance.now():Date.now();this.stats.loading.start=now;this.timer=setTimeout(function(){if(g.closed||self.stats.aborted)return;self.stats.loading.first=self.stats.loading.end=now;self.stats.loaded=self.stats.total=g.cached.body.length;self.stats.chunkCount=1;cb.onSuccess({url:g.cached.url,data:g.cached.body},self.stats,ctx,null);},0);return;}
+            if(/^(manifest|level|audioTrack|subtitleTrack)$/.test(ctx.type || '') || (ctx.responseType!=='arraybuffer' && /\.m3u8(?:\?|$)/i.test(clean))){
+                function clock(){return global.performance&&global.performance.now?global.performance.now():Date.now();}
+                self.stats.loading.start=clock();
+                function failed(e){
+                    if(g.closed || self.stats.aborted)return;
+                    last={phase:'HLS плейлист',error:e.message};
+                    if(core.notify)core.notify(e.message);
+                    cb.onError({code:Number((e.message.match(/HTTP (\d+)/)||[])[1])||0,text:e.message},ctx,null,self.stats);
+                }
+                self.cancel=request(g,clean,'HLS плейлист',false,mediaHeaders(g),function(body,finalUrl){
+                    if(g.closed || self.stats.aborted)return;
+                    try{body=rewritePlaylist(g,body,finalUrl);}catch(e){return failed(error('HLS плейлист','неверный ответ или адрес'));}
+                    self.stats.loading.first=self.stats.loading.end=clock();
+                    self.stats.loaded=self.stats.total=body.length;self.stats.chunkCount=1;
+                    cb.onSuccess({url:finalUrl,data:body},self.stats,ctx,null);
+                },failed);
+                return;
+            }
+            // Media and keys use the same device transport as playlists.
+            var headers=mediaHeaders(g);
+            if(Number(ctx.rangeEnd)>Number(ctx.rangeStart)&&Number(ctx.rangeEnd)>0)
+                headers.Range='bytes='+Number(ctx.rangeStart||0)+'-'+(Number(ctx.rangeEnd)-1);
+            headers['Accept-Encoding']='identity';
+            self.stats.loading.start=global.performance&&global.performance.now?global.performance.now():Date.now();
+            self.cancel=mediaRequest(g,clean,headers,function(buffer){
+                if(g.closed||self.stats.aborted)return;
+                var end=global.performance&&global.performance.now?global.performance.now():Date.now();
+                self.stats.loading.first=self.stats.loading.end=end;
+                self.stats.loaded=self.stats.total=buffer.byteLength;self.stats.chunkCount=1;
+                last={phase:'HLS фрагмент получен',bytes:buffer.byteLength};
+                cb.onSuccess({url:clean,data:buffer},self.stats,ctx,null);
+            },failedMedia);
+            function failedMedia(e){
+                if(g.closed||self.stats.aborted)return;
+                last={phase:'HLS фрагмент',error:e.message};
+                if(core.notify)core.notify(e.message);
+                cb.onError({code:Number((e.message.match(/HTTP (\d+)/)||[])[1])||0,text:e.message},ctx,null,self.stats);
+            }
+        };
+        Loader.prototype.abort=function(){this.stats.aborted=true;clearTimeout(this.timer);if(this.cancel)this.cancel();if(this.delegate)this.delegate.abort();};
+        Loader.prototype.destroy=function(){this.abort();if(this.delegate&&this.delegate.destroy)this.delegate.destroy();};
+        Loader.prototype.getCacheAge=function(){return null;};Loader.prototype.getResponseHeader=function(k){return this.delegate&&this.delegate.getResponseHeader?this.delegate.getResponseHeader(k):null;};
+        return core.hlsRouter.register('alloha',{owns:function(url){try{return session===g&&!g.closed&&!!g.media[new URL(url).origin];}catch(e){return false;}},loader:Loader});
+    }
+    this.availability=function(req,ok,fail){var g=group();probes.push(g);function finish(e){close(g);probes=probes.filter(function(x){return x!==g;});if(e)fail(e);else ok(true);}catalog(g,req,function(c){if(c.type!=='serial'&&c.type!=='movie')return finish(error('каталог','неизвестный тип'));finish();},finish);};
+    this.resolve=function(req,ok,fail){
+        close(session);if(core.hlsRouter)core.hlsRouter.unregister('alloha');var g=session=group();
+        function bad(e){if(g.closed)return;last={phase:'error',error:e.message};close(g);fail(e);}
+        catalog(g,req,function(c){
+            var entries;try{entries=records(c,req.season,req.episode);}catch(e){return bad(e);}
+            if(!entries.length)return bad(error('каталог','выбранный фильм или серия отсутствует'));
+            var record=entries.filter(function(v){return v.label===pref.name.replace(/^\([^)]*\)\s*/,'');})[0]||entries.filter(function(v){return c.active&&String(c.active.id)===v.id;})[0]||entries[0];
+            fingerprint(g,function(){guard(g,function(){api(g,record,function(data){
+                var list=voices(data,record,c.type==='movie'),selected=pickVoice(list,pref);
+                if(!selected)return bad(error('API','озвучки отсутствуют'));var q=quality(selected.quality,pref.quality);
+                prepare(g,data,selected,q,function(url){
+                    var result={provider:'Alloha',url:url,headers:mediaHeaders(g),quality:{},voiceovers:[],tracks:[],subtitles:[],transport:'HLS'};
+                    function alive(){return !g.closed && session===g;}
+                    function captions(){result.subtitles=subtitles(data).map(function(t){var u=new URL(t.url);u.searchParams.set('t',g.guard);u.searchParams.set('b',g.fingerprint);t.url=u.href;return t;});}
+                    function report(e){g.busy=false;last={phase:'error',error:e.message};if(alive()&&core.notify)core.notify(e.message);}
+                    function fill(){
+                        result.quality={};Object.keys(selected.quality).forEach(function(label){result.quality[label]={url:label===q?result.url:'',call:function(item,done){
+                            if(!alive()||g.busy)return;g.busy=true;prepare(g,data,selected,label,function(next){if(!alive())return;g.busy=false;q=label;pref.quality=q;result.url=next;done(next);},report);
+                        }};});
+                    }
+                    function commit(){pref.name=selected.name;pref.ordinal=selected.ordinal;pref.quality=q;captions();fill();last={phase:'ready',voices:list.length,qualities:Object.keys(selected.quality)};}
+                    commit();
+                    function switchTo(nextData,v,index) {
+                        var nextQ=quality(v.quality,q);
+                        prepare(g,nextData,v,nextQ,function(next){if(!alive())return;g.busy=false;data=nextData;selected=v;q=nextQ;result.url=next;commit();result.voiceovers.forEach(function(t){t.selected=t.index===index;});
+                            if(Lampa.PlayerPanel){if(Lampa.PlayerPanel.setTracks)Lampa.PlayerPanel.setTracks(result.voiceovers);if(Lampa.PlayerPanel.quality)Lampa.PlayerPanel.quality(result.quality,next);if(Lampa.PlayerPanel.listener)Lampa.PlayerPanel.listener.send('quality',{name:q,url:next});}
+                        },report);
+                    }
+                    var options=c.type==='movie'?entries:list;
+                    result.voiceovers=options.map(function(v,index){return {index:index,language:v.label,label:'',selected:c.type==='movie'?v.id===record.id:v===selected,onSelect:function(){
+                        if(!alive()||g.busy)return;g.busy=true;
+                        if(c.type!=='movie')return switchTo(data,v,index);
+                        // Renew HTML challenge before another API request on all bridge types.
+                        catalog(g,req,function(fresh){
+                            var entry=records(fresh).filter(function(e){return e.id===v.id;})[0];
+                            if(!entry)return report(error('озвучка','выбранная запись больше недоступна'));
+                            api(g,entry,function(nextData){var nextList=voices(nextData,entry,true),voice=pickVoice(nextList,null);if(!voice)return report(error('озвучка','поток отсутствует'));switchTo(nextData,voice,index);},report);
+                        },report);
+                    }};});
+                    ok(result);
+                },bad);
+            },bad);},bad);});
+        },bad);
+    };
+    this.cleanup=function(){close(session);session=null;probes.forEach(close);probes=[];if(core.hlsRouter)core.hlsRouter.unregister('alloha');last={phase:'idle'};};
+    this.diagnostics=function(){return {adapter:'AllohaAdapter',experimental:true,session:last,voice:pref.name,quality:pref.quality};};
+    this.quality=function(){return {auto:false,manual:true};};this.audio=function(r){return r.voiceovers||[];};this.subtitles=function(r){return r.subtitles||[];};
+}
+/* ADAPTER:ALLOHA:END */
+global.MnogoTVAllohaAdapter=AllohaAdapter;
+})(window);
+
+(function (global) {
+    'use strict';
+
+    var VERSION = '5.3.4-lg-d1';
+    var PLUGIN_ID = 'mnogotv_v5_collaps';
+    var COMPONENT = 'mnogotv_v5_collaps_component';
+    var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
+
+    if (global[PLUGIN_ID]) return;
+    global[PLUGIN_ID] = true;
+
+    function log() {
+        try { console.log.apply(console, ['[MnogoTV ' + VERSION + ']'].concat([].slice.call(arguments))); } catch (e) {}
     }
 
-    function normalizeTracks(audio) {
-        var names = audio && Array.isArray(audio.names) ? audio.names : [];
-        var order = audio && Array.isArray(audio.order) ? audio.order : [];
-        var tracks = names.map(function (name, index) {
-            return { language: name, order: order[index] !== undefined ? order[index] : 1000 };
-        }).filter(function (item) { return item.language && item.language !== 'delete'; });
-        tracks.sort(function (a, b) { return a.order - b.order; });
-        return tracks.map(function (item) { return { language: item.language }; });
+    function notify(text) {
+        try { if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show(text); } catch (e) {}
+    }
+
+    function errText(err) {
+        if (!err) return 'неизвестная ошибка';
+        if (typeof err === 'string') return err;
+        if (err.message) return err.message;
+        try { return JSON.stringify(err); } catch (e) {}
+        return 'ошибка';
+    }
+
+    function config() {
+        var resolver = DEFAULT_RESOLVER;
+        try {
+            var src = document.currentScript && document.currentScript.src || '';
+            var custom = src ? new URL(src, global.location.href).searchParams.get('resolver') : '';
+            if (custom) resolver = String(custom).trim();
+        } catch (e) {}
+        try {
+            var saved = Lampa.Storage && Lampa.Storage.get('mnogotv_resolver');
+            if (saved) resolver = String(saved).trim();
+        } catch (e2) {}
+        return { resolver: String(resolver || '').replace(/\/+$/, '') };
+    }
+
+    var CONFIG = config();
+
+    function resolverUrl(path, params) {
+        var query = [];
+        Object.keys(params || {}).forEach(function (key) {
+            var value = params[key];
+            if (value !== undefined && value !== null && value !== '') {
+                query.push(encodeURIComponent(key) + '=' + encodeURIComponent(String(value)));
+            }
+        });
+        return CONFIG.resolver + path + (query.length ? '?' + query.join('&') : '');
+    }
+
+    function requestJson(url, ok, fail) {
+        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        var timer = setTimeout(function () { try { if (controller) controller.abort(); } catch (e) {} }, 15000);
+
+        function fallback(initialError) {
+            var request = null;
+            try { request = new Lampa.Reguest(); } catch (e) { try { request = new Lampa.Request(); } catch (e2) {} }
+            if (!request) return fail(initialError || new Error('network unavailable'));
+            function done(data) {
+                try { if (typeof data === 'string') data = JSON.parse(data); } catch (e3) { return fail(e3); }
+                if (data && data.ok === false) return fail(new Error(data.error || 'ошибка'));
+                ok(data || {});
+            }
+            function bad(a, c) { fail(initialError || a || c || new Error('network error')); }
+            try {
+                request.timeout(15000);
+                if (typeof request.native === 'function') return request.native(url, done, bad, false, { dataType: 'json' });
+                if (typeof request.silent === 'function') return request.silent(url, done, bad, false, { dataType: 'json' });
+            } catch (e4) { return fail(e4); }
+            fail(initialError || new Error('request failed'));
+        }
+
+        if (typeof fetch !== 'function') return fallback(new Error('fetch unavailable'));
+        fetch(url, { method: 'GET', cache: 'no-store', credentials: 'omit', signal: controller ? controller.signal : undefined })
+            .then(function (response) {
+                clearTimeout(timer);
+                return response.text().then(function (text) {
+                    var data;
+                    try { data = text ? JSON.parse(text) : {}; } catch (e) { throw new Error(response.ok ? 'invalid json' : 'HTTP ' + response.status); }
+                    if (!response.ok || data.ok === false) throw new Error(data.error || data.message || ('HTTP ' + response.status));
+                    return data;
+                });
+            }).then(ok).catch(function (e) { clearTimeout(timer); fallback(e); });
+    }
+
+    function HlsRouter() {
+        var stock = null;
+        var handlers = {};
+        var installed = false;
+
+        function install() {
+            if (installed) return true;
+            if (typeof Hls === 'undefined' || !Hls.DefaultConfig || !Hls.DefaultConfig.loader) return false;
+            stock = Hls.DefaultConfig.loader;
+
+            function RouterLoader(loaderConfig) {
+                this.config = loaderConfig;
+                this.delegate = null;
+                // Hls.js can retain this object before load(); never replace it.
+                this.stats = {
+                    aborted: false, loaded: 0, retry: 0, total: 0,
+                    chunkCount: 0, bwEstimate: 0,
+                    loading: { start: 0, first: 0, end: 0 },
+                    parsing: { start: 0, end: 0 },
+                    buffering: { start: 0, first: 0, end: 0 }
+                };
+            }
+            RouterLoader.prototype._delegate = function (context) {
+                if (this.delegate) return this.delegate;
+                var Ctor = stock;
+                Object.keys(handlers).some(function (name) {
+                    var handler = handlers[name];
+                    if (handler && handler.owns(context && context.url || '')) {
+                        Ctor = handler.loader;
+                        return true;
+                    }
+                    return false;
+                });
+                this.delegate = new Ctor(this.config);
+                var stats = this.stats;
+                Object.keys(this.delegate.stats || {}).forEach(function (key) {
+                    stats[key] = this.delegate.stats[key];
+                }, this);
+                this.delegate.stats = stats;
+                return this.delegate;
+            };
+            RouterLoader.prototype.load = function (context, loaderConfig, callbacks) {
+                var delegate = this._delegate(context);
+                delegate.load(context, loaderConfig, callbacks);
+                // The delegate updates the same stats object held by Hls.js.
+            };
+            RouterLoader.prototype.abort = function () { try { if (this.delegate && this.delegate.abort) this.delegate.abort(); } catch (e) {} };
+            RouterLoader.prototype.destroy = function () { try { if (this.delegate && this.delegate.destroy) this.delegate.destroy(); } catch (e) {} this.delegate = null; };
+            RouterLoader.prototype.getCacheAge = function () { try { return this.delegate && this.delegate.getCacheAge ? this.delegate.getCacheAge() : null; } catch (e) { return null; } };
+            RouterLoader.prototype.getResponseHeader = function (name) { try { return this.delegate && this.delegate.getResponseHeader ? this.delegate.getResponseHeader(name) : null; } catch (e) { return null; } };
+            Hls.DefaultConfig.loader = RouterLoader;
+            installed = true;
+            return true;
+        }
+
+        this.stockLoader = function () { install(); return stock; };
+        this.register = function (name, handler) { if (!install()) return false; handlers[name] = handler; return true; };
+        this.unregister = function (name) { delete handlers[name]; };
+        this.diagnostics = function () { return { installed: installed, providers: Object.keys(handlers) }; };
+    }
+
+    function tmdbId(movie) {
+        var source = movie && movie.source || 'tmdb';
+        var id = source === 'tmdb' || source === 'cub' ? movie && movie.id : movie && (movie.tmdb_id || movie.id);
+        id = String(id === undefined || id === null ? '' : id).trim();
+        return /^\d+$/.test(id) ? id : '';
+    }
+
+    function isSeries(movie) {
+        return !!(movie && (movie.media_type === 'tv' || movie.number_of_seasons || movie.first_air_date || movie.name || movie.original_name));
+    }
+
+    function titleOf(movie) { return movie && (movie.title || movie.name || movie.original_title || movie.original_name) || 'MnogoTV'; }
+
+    function getImdb(movie, ok, fail) {
+        var direct = movie && (movie.imdb_id || movie.external_ids && movie.external_ids.imdb_id);
+        if (direct && /^tt\d+$/i.test(String(direct))) return ok(String(direct));
+        var id = tmdbId(movie);
+        if (!id) return fail(new Error('TMDB ID не найден'));
+        try {
+            Lampa.Api.sources.tmdb.get((isSeries(movie) ? 'tv/' : 'movie/') + id + '/external_ids', {}, function (data) {
+                if (data && /^tt\d+$/i.test(String(data.imdb_id || ''))) ok(String(data.imdb_id));
+                else fail(new Error('IMDb ID не найден'));
+            }, fail);
+        } catch (e) { fail(e); }
+    }
+
+    function getSeasons(movie, ok, fail) {
+        var result = [];
+        (movie && movie.seasons || []).forEach(function (s) { var n = parseInt(s && s.season_number, 10); if (n > 0) result.push(n); });
+        if (result.length) return ok(result);
+        var count = parseInt(movie && movie.number_of_seasons, 10);
+        if (count > 0) { for (var i = 1; i <= count; i++) result.push(i); return ok(result); }
+        try {
+            Lampa.Api.sources.tmdb.get('tv/' + tmdbId(movie), {}, function (data) {
+                (data && data.seasons || []).forEach(function (s) { var n = parseInt(s.season_number, 10); if (n > 0) result.push(n); });
+                result.length ? ok(result) : fail(new Error('Сезоны не найдены'));
+            }, fail);
+        } catch (e) { fail(e); }
+    }
+
+    function getEpisodes(movie, season, ok, fail) {
+        try {
+            Lampa.Api.sources.tmdb.get('tv/' + tmdbId(movie) + '/season/' + season, {}, function (data) {
+                var episodes = data && data.episodes || [];
+                episodes.length ? ok(episodes) : fail(new Error('Серии не найдены'));
+            }, fail);
+        } catch (e) { fail(e); }
     }
 
     function timeline(movie, season, episode) {
         try {
             var base = movie.original_title || movie.original_name || titleOf(movie);
-            var key = season && episode ? [season, episode, base].join('') : base;
-            return Lampa.Timeline.view(Lampa.Utils.hash(key));
+            return Lampa.Timeline.view(Lampa.Utils.hash(season && episode ? [season, episode, base].join('') : base));
         } catch (e) { return undefined; }
     }
 
-    function pickCollapsItem(config, season, episode) {
-        if (!config) return null;
-        if (season !== null && episode !== null && config.playlist && Array.isArray(config.playlist.seasons)) {
-            var seasonNode = null;
-            config.playlist.seasons.some(function (s) {
-                if (Number(s.season) === Number(season)) { seasonNode = s; return true; }
-                return false;
-            });
-            if (!seasonNode) return null;
-            var episodeNode = null;
-            (seasonNode.episodes || []).some(function (ep) {
-                if (Number(ep.episode) === Number(episode)) { episodeNode = ep; return true; }
-                return false;
-            });
-            return episodeNode;
-        }
-        return config.source || null;
-    }
-
-    function getKpId(imdb, ok) {
-        imdb = String(imdb || '');
-
-        if (
-            imdb &&
-            cache.ids[imdb]
-        ) {
-            ok(
-                cache.ids[imdb]
-            );
-            return;
-        }
-
-        requestJson(
-            resolverUrl(
-                '/ids',
-                {
-                    imdb: imdb
-                }
-            ),
-            function (data) {
-                var kp =
-                    data &&
-                    data.kp
-                        ? String(data.kp)
-                        : '';
-
-                if (
-                    imdb &&
-                    kp
-                ) {
-                    cache.ids[imdb] =
-                        kp;
-                }
-
-                ok(kp);
-            },
-            function () {
-                ok('');
-            }
-        );
-    }
-
-    function tryCollapsUrls(source, imdb, kp, ok, fail) {
-        var urls = [];
-        var seen = {};
-
-        function add(url, label) {
-            url = normalizeDirectUrl(url);
-            if (!url || seen[url]) return;
-
-            seen[url] = true;
-            urls.push({
-                url: url,
-                label: label,
-                headers: collapsHeadersFor(url)
-            });
-        }
-
-        /*
-         * Android: сначала повторяем ТЕКУЩИЙ штатный Collaps-провайдер
-         * Lampa, который использует api.delivembd.ws/embed/kp/<id>.
-         * На остальных платформах не меняем уже рабочий порядок.
-         */
-        var androidPlatform = false;
-        try {
-            androidPlatform = Boolean(
-                Lampa.Platform &&
-                Lampa.Platform.is &&
-                Lampa.Platform.is('android')
-            );
-        } catch (e) {}
-
-        if (androidPlatform && kp) {
-            add(
-                'https://api.delivembd.ws/embed/kp/' + encodeURIComponent(kp),
-                'delivembd kp'
-            );
-        }
-
-        /*
-         * Наши проверенные fallback:
-         * 1) ortified по KP
-         * 2) kinogram по KP
-         * 3) fallback по IMDb
-         */
-        if (kp) {
-            add(
-                'https://api.ortified.ws/embed/kp/' + encodeURIComponent(kp),
-                'ortified kp'
-            );
-            add(
-                'https://api.kinogram.best/embed/kp/' + encodeURIComponent(kp),
-                'kinogram kp'
-            );
-        }
-
-        if (imdb) {
-            add(
-                'https://api.ortified.ws/embed/imdb/' + encodeURIComponent(imdb),
-                'ortified imdb'
-            );
-            add(
-                'https://api.kinogram.best/embed/imdb/' + encodeURIComponent(imdb),
-                'kinogram imdb'
-            );
-        }
-
-        /*
-         * Kinobox iframe здесь НЕ используем:
-         * он живёт своей внутренней выбранной серией/сезоном,
-         * что и дало пользователю 9 сезон / 1 серия при выборе
-         * другой серии в MnogoTV.
-         */
-        var index = 0;
-        var errors = [];
-
-        function next() {
-            if (index >= urls.length) {
-                fail(new Error(
-                    errors.length
-                        ? errors.join(' | ')
-                        : 'Collaps недоступен'
-                ));
-                return;
-            }
-
-            var attempt = urls[index++];
-
-            collapsEmbedText(
-                attempt,
-                function (html) {
-                    var cfg = parseCollapsHtml(html);
-
-                    if (cfg) {
-                        ok({
-                            config: cfg,
-                            url: attempt.url,
-                            label: attempt.label,
-                            headers: attempt.headers,
-                            ref: attempt.headers.Referer
-                        });
-                    }
-                    else {
-                        errors.push(
-                            attempt.label + ': makePlayer не найден'
-                        );
-                        next();
-                    }
-                },
-                function (e) {
-                    errors.push(
-                        attempt.label + ': ' + errText(e)
-                    );
-                    next();
-                }
-            );
-        }
-
-        next();
-    }
-
-    function relayMediaUrl(rawUrl, ref, forceManifest) {
-        var name = forceManifest ? 'master.m3u8' : 'media.bin';
-
-        try {
-            var u = new URL(String(rawUrl || ''));
-            var base = (u.pathname.split('/').pop() || '').split('?')[0];
-
-            if (base && /\.[a-z0-9]{2,5}$/i.test(base)) {
-                name = base.replace(/[^a-zA-Z0-9._-]/g, '_');
-            }
-            else if (String(rawUrl || '').toLowerCase().indexOf('.m3u8') !== -1) {
-                name = 'master.m3u8';
-            }
-        } catch (e) {}
-
-        return resolverUrl('/media/' + name, {
-            url: rawUrl,
-            ref: ref
+    function freshTracks(list) {
+        return (Array.isArray(list) ? list : []).map(function (track) {
+            return { language: String(track.language || ''), label: String(track.label || track.language || ''), index: Number(track.index) };
         });
     }
 
-    function looksLikeManifest(text) {
-        text = String(text || '').trim();
-        return text.indexOf('#EXTM3U') === 0;
+    function freshSubtitles(list) {
+        return (Array.isArray(list) ? list : []).map(function (sub) { return { label: String(sub.label || 'Субтитры'), url: String(sub.url || '') }; });
     }
 
-    function preparePlayableStream(rawStream, response, ok) {
-        var directHeaders =
-            response.headers ||
-            collapsHeadersFor(response.url);
+    var core = {
+        version: VERSION,
+        resolverUrl: resolverUrl,
+        requestJson: requestJson,
+        errText: errText,
+        log: log,
+        notify: notify,
+        hlsRouter: new HlsRouter()
+    };
 
-        var ref =
-            response.ref ||
-            (directHeaders && directHeaders.Referer) ||
-            COLLAPS_REF;
+    var adapter = null;
+    var adapters = {};
+    var currentPlayback = null;
+    var playbackSequence = 0;
 
-        var relay = relayMediaUrl(rawStream, ref, true);
+    function findCollapsSource(imdb, ok, fail) {
+        requestJson(resolverUrl('/sources', { imdb: imdb }), function (response) {
+            var found = null;
+            (response && response.sources || []).some(function (source) {
+                if (String(source && source.type || '').toLowerCase() === 'collaps') { found = source; return true; }
+                return false;
+            });
+            if (!found) return fail(new Error('Collaps отсутствует'));
+            found.kinopoiskId = response && response.kp || '';
+            ok(found);
+        }, fail);
+    }
 
-        function shortRelayText(value) {
-            value = String(value || '')
-                .replace(/\s+/g, ' ')
-                .trim();
-            if (value.length > 90) value = value.slice(0, 90) + '…';
-            return value;
+    function activatePlayback(next) {
+        next = next || adapter;
+        if (currentPlayback && currentPlayback !== next) currentPlayback.cleanup('provider-switch');
+        currentPlayback = next;
+    }
+
+    function installPlayerAutoHide() {
+        if (!Lampa.Player.listener || !Lampa.Controller.listener) return;
+        var active = false, timer = null;
+        function schedule() {
+            clearTimeout(timer);
+            if (!active) return;
+            timer = setTimeout(function () {
+                if (!active) return;
+                var controller = Lampa.Controller.enabled();
+                if (!controller || ['player','player_panel','player_rewind'].indexOf(controller.name) < 0) return;
+                if (Lampa.PlayerPanel && Lampa.PlayerPanel.toPlayer &&
+                    (!Lampa.PlayerPanel.visibleStatus || Lampa.PlayerPanel.visibleStatus())) Lampa.PlayerPanel.toPlayer();
+            }, 5000);
         }
+        Lampa.Player.listener.follow('start', function (data) { active = !!(data && (data.mnogotv_player || data.mnogotv_collaps)); schedule(); });
+        Lampa.Player.listener.follow('destroy', function () { active = false; clearTimeout(timer); });
+        Lampa.Controller.listener.follow('toggle', schedule);
+        document.addEventListener('keydown', schedule, true);
+        document.addEventListener('pointermove', schedule, true);
+        document.addEventListener('pause', function (e) { if (e.target && e.target.tagName === 'VIDEO') schedule(); }, true);
+    }
 
-        nativeText(relay, {}, function (manifest) {
-            var ready = looksLikeManifest(manifest);
-            var relayError = '';
-
-            if (!ready) {
-                relayError = 'not-m3u8: ' + (shortRelayText(manifest) || 'empty response');
-            }
-
-            log('Collaps relay probe', {
-                ready: ready,
-                relay: relay,
-                response: ready ? '#EXTM3U' : shortRelayText(manifest)
-            });
-
-            ok({
-                directUrl: rawStream,
-                directHeaders: directHeaders,
-                relayUrl: ready ? relay : '',
-                relayReady: ready,
-                relayError: relayError
-            });
-        }, function (relayFailure) {
-            var relayError = errText(relayFailure);
-
-            log('Collaps relay probe failed', {
-                relay: relay,
-                error: relayError
-            });
-
-            ok({
-                directUrl: rawStream,
-                directHeaders: directHeaders,
-                relayUrl: '',
-                relayReady: false,
-                relayError: relayError
-            });
+    function installNextEpisodeHint() {
+        if (!Lampa.Player.listener || !Lampa.Controller.listener || !Lampa.PlayerPanel ||
+            typeof Lampa.PlayerPanel.render !== 'function' || typeof MutationObserver === 'undefined') return;
+        var observer = null, panel = null, active = false;
+        var style = document.createElement('style');
+        style.textContent = 'body.mnogotv-next-context:not(.mnogotv-next-focused) .player-next{display:none!important}';
+        document.head.appendChild(style);
+        function clear() {
+            active = false;
+            if (observer) observer.disconnect();
+            observer = null; panel = null;
+            document.body.classList.remove('mnogotv-next-context', 'mnogotv-next-focused');
+        }
+        function update() {
+            if (!active || !panel) return;
+            var controller = Lampa.Controller.enabled();
+            var next = panel.querySelector('.player-panel__next.focus');
+            var visible = !!(controller && controller.name === 'player_panel' && next && !next.classList.contains('hide'));
+            document.body.classList.toggle('mnogotv-next-focused', visible);
+        }
+        Lampa.Player.listener.follow('start', function (data) {
+            clear();
+            if (!data || !data.mnogotv_next_hint) return;
+            var render = Lampa.PlayerPanel.render();
+            panel = render && render[0];
+            if (!panel) return;
+            active = true;
+            document.body.classList.add('mnogotv-next-context');
+            observer = new MutationObserver(update);
+            observer.observe(panel, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+            update();
         });
+        Lampa.Controller.listener.follow('toggle', update);
+        Lampa.Player.listener.follow('destroy', clear);
     }
 
-
-    function resolveCollaps(
-        source,
-        imdb,
-        season,
-        episode,
-        ok,
-        fail
-    ) {
-        getKpId(
-            imdb,
-            function (kp) {
-                tryCollapsUrls(
-                    source,
-                    imdb,
-                    kp,
-                    function (response) {
-                        var cfg =
-                            response.config;
-
-                        var item =
-                            pickCollapsItem(
-                                cfg,
-                                season,
-                                episode
-                            );
-
-                        if (!item) {
-                            fail(
-                                new Error(
-                                    season !== null
-                                        ? (
-                                            'Collaps: серия S' +
-                                            season +
-                                            'E' +
-                                            episode +
-                                            ' не найдена'
-                                        )
-                                        : 'Collaps: поток не найден'
-                                )
-                            );
-                            return;
-                        }
-
-                        var stream =
-                            item.hls ||
-                            (
-                                item.source &&
-                                item.source.hls
-                            ) ||
-                            '';
-
-                        if (
-                            !stream &&
-                            season === null &&
-                            cfg.source
-                        ) {
-                            stream =
-                                cfg.source.hls ||
-                                '';
-
-                            item =
-                                cfg.source;
-                        }
-
-                        stream =
-                            normalizeDirectUrl(
-                                stream
-                            );
-
-                        if (!stream) {
-                            fail(
-                                new Error(
-                                    'Collaps: HLS не найден'
-                                )
-                            );
-                            return;
-                        }
-
-                        /*
-                         * Android v3.19.3: точечно повторяем поведение
-                         * текущего штатного Collaps-провайдера Lampa:
-                         *   - прямой HLS из makePlayer
-                         *   - НЕ добавляем &vp
-                         *   - НЕ добавляем playback headers
-                         *   - НЕ гоняем media через Cloudflare
-                         *
-                         * Диагностика v3.19.1 показала HTTP 424 именно на
-                         * Cloudflare -> media CDN, поэтому этот тест должен
-                         * отделить проблему CDN/relay от Android HLS-плеера.
-                         */
-                        var androidPlatform = false;
-                        try {
-                            androidPlatform = Boolean(
-                                Lampa.Platform &&
-                                Lampa.Platform.is &&
-                                Lampa.Platform.is('android')
-                            );
-                        } catch (eAndroid) {}
-
-                        if (androidPlatform) {
-                            /*
-                             * v3.19.8: MX умеет начать master HLS, но seek
-                             * уходит на lftapp.ink; VLC и встроенный Lampa
-                             * master не переваривают. Поэтому Android native
-                             * HTTP сначала читает master сам, выбирает самый
-                             * качественный variant и плееру отдаётся уже
-                             * обычный media-playlist URL. Без Cloudflare и vp.
-                             */
-                            resolveCollapsAndroidVariant(
-                                stream,
-                                response,
-                                function (androidPlayable) {
-                                    ok({
-                                        provider: 'Collaps',
-                                        directUrl: androidPlayable.url,
-                                        directHeaders: {},
-                                        relayUrl: '',
-                                        relayReady: false,
-                                        externalDirect: true,
-                                        subtitles:
-                                            normalizeSubs(
-                                                item.cc ||
-                                                item.subtitles ||
-                                                []
-                                            ),
-                                        tracks:
-                                            normalizeTracks(
-                                                item.audio ||
-                                                {}
-                                            ),
-                                        quality: '360p–720p',
-                                        resolvedBy:
-                                            response.label +
-                                            (
-                                                kp
-                                                    ? (' • KP ' + kp)
-                                                    : ''
-                                            ) +
-                                            ' • ' + androidPlayable.label,
-                                        collapsVariant: androidPlayable.variant || null,
-                                        collapsBuiltinUrl: androidPlayable.builtinUrl || ''
-                                    });
-                                }
-                            );
-                            return;
-                        }
-
-                        /*
-                         * Не-Android оставляем как было, чтобы не сломать
-                         * подтверждённо рабочий Collaps на LG webOS.
-                         */
-                        if (
-                            stream.indexOf('&vp') === -1
-                        ) {
-                            stream += '&vp';
-                        }
-
-                        /*
-                         * Collaps direct HLS на части Android TV / Lampa
-                         * падает с manifestLoadError: CDN ждёт корректные
-                         * Origin/Referer/User-Agent, а вложенные playlist,
-                         * key и segment URL тоже должны идти с ними.
-                         *
-                         * Поэтому сначала проверяем media relay. Если Worker
-                         * вернул валидный #EXTM3U, встроенный и внешний плеер
-                         * получают уже relay URL. Если relay недоступен,
-                         * оставляем direct fallback с headers.
-                         */
-                        preparePlayableStream(
-                            stream,
-                            response,
-                            function (playable) {
-                                var viaRelay =
-                                    playable &&
-                                    playable.relayReady &&
-                                    playable.relayUrl;
-
-                                ok({
-                                    provider: 'Collaps',
-                                    directUrl:
-                                        viaRelay
-                                            ? playable.relayUrl
-                                            : stream,
-                                    directHeaders:
-                                        viaRelay
-                                            ? {}
-                                            : (
-                                                playable.directHeaders ||
-                                                response.headers ||
-                                                collapsHeadersFor(response.url)
-                                            ),
-                                    relayUrl:
-                                        viaRelay
-                                            ? playable.relayUrl
-                                            : '',
-                                    relayReady:
-                                        Boolean(viaRelay),
-                                    externalDirect: false,
-                                    subtitles:
-                                        normalizeSubs(
-                                            item.cc ||
-                                            item.subtitles ||
-                                            []
-                                        ),
-                                    tracks:
-                                        normalizeTracks(
-                                            item.audio ||
-                                            {}
-                                        ),
-                                    quality:
-                                        '360p–720p',
-                                    resolvedBy:
-                                        response.label +
-                                        (
-                                            kp
-                                                ? (' • KP ' + kp)
-                                                : ''
-                                        ) +
-                                        (
-                                            viaRelay
-                                                ? ' • relay'
-                                                : (
-                                                    ' • direct fallback' +
-                                                    (
-                                                        playable && playable.relayError
-                                                            ? (' [' + playable.relayError + ']')
-                                                            : ''
-                                                    )
-                                                )
-                                        )
-                                });
-                            }
-                        );
-                    },
-                    fail
-                );
-            }
-        );
+    function playbackTarget(mode) {
+        if (mode !== 'external') return 'lampa';
+        if (Lampa.Platform && Lampa.Platform.is('android')) return 'android';
+        if (Lampa.Platform && Lampa.Platform.is('webos')) return 'webos';
+        return '';
     }
 
+    function play(movie, source, imdb, season, episode, epMeta, voice, status, dashMode, formatMode, episodeList, playbackAdapter, playerMode) {
+        var targetPlayer = playbackTarget(playerMode);
+        if (!targetPlayer) { status.text('Внешний плеер недоступен в этой версии Лампы на устройстве.'); return; }
+        var sessionAdapter = playbackAdapter || adapter;
+        var sequence = ++playbackSequence;
+        var busy = false;
+        var playlist = [];
+        var selectedVoice = voice ? { index: voice.index, label: voice.label } : { index: -1, label: 'Авто' };
+        activatePlayback(sessionAdapter);
 
-    function resolveSource(source, imdb, season, episode, qualityLabel, ok, fail) {
-        var type =
-            String(
-                source && source.type || ''
-            ).toLowerCase();
-
-        if (type === 'collaps') {
-            resolveCollaps(
-                source,
-                imdb,
-                season,
-                episode,
-                ok,
-                fail
-            );
-            return;
-        }
-
-        if (
-            type === 'veoveo' ||
-            type === 'veo' ||
-            type.indexOf('veoveo') >= 0
-        ) {
-            resolveVeoVeo(
-                source,
-                imdb,
-                season,
-                episode,
-                qualityLabel,
-                ok,
-                fail
-            );
-            return;
-        }
-
-        fail(new Error(
-            (
-                source &&
-                (
-                    source.name ||
-                    source.type
-                ) ||
-                'Источник'
-            ) +
-            ': адаптер ещё не реализован'
-        ));
-    }
-
-    function playResolved(movie, season, episode, epMeta, source, resolved, runas, voiceChoice) {
-        var title = titleOf(movie);
-
-        if (season !== null && episode !== null) {
-            title += ' • S' + season + 'E' + episode;
-            if (epMeta && epMeta.name) title += ' • ' + epMeta.name;
-        }
-
-        var actualRunas = runas || '';
-        var useExternal = actualRunas === 'android';
-        var externalUrl = '';
-
-        if (useExternal) {
-            if (resolved.relayReady) {
-                externalUrl = resolved.relayUrl;
-            }
-            else if (resolved.externalDirect) {
-                externalUrl = resolved.directUrl;
-            }
-            else {
-                notify(
-                    'MnogoTV: поток требует headers, запускаю Lampa'
-                );
-                actualRunas = 'lampa';
-                useExternal = false;
-            }
-        }
-
-        var currentSourceType = sourceType(source);
-
-        /*
-         * v3.20.0: при внешнем Android-плеере пересобираем synthetic master
-         * уже с выбранной пользователем озвучкой как DEFAULT. Все остальные
-         * дорожки при этом остаются в master и доступны самому плееру.
-         */
-        if (
-            useExternal &&
-            currentSourceType === 'collaps' &&
-            resolved.collapsVariant
-        ) {
-            var voiceAwareSynthetic =
-                collapsSyntheticMasterUrl(
-                    resolved.collapsVariant,
-                    voiceChoice || null
-                );
-            if (voiceAwareSynthetic) externalUrl = voiceAwareSynthetic;
-        }
-
-        var collapsBuiltin =
-            currentSourceType === 'collaps' &&
-            !useExternal;
-
-        /*
-         * Для Collaps во встроенном Lampa.Player повторяем штатный
-         * collaps-provider Lampa максимально буквально: только URL,
-         * title, timeline и subtitles.
-         *
-         * В частности, НЕ передаём isonline:true и НЕ передаём headers:{}
-         * / translate. На Android эти дополнительные поля могут переводить
-         * воспроизведение на другой HLS-путь (WebView/hls.js), где прямой
-         * manifest Collaps падает с manifestLoadError.
-         */
-        var first = collapsBuiltin
-            ? {
-                url: resolved.directUrl,
-                title: title,
-                subtitles: resolved.subtitles || [],
-                timeline: timeline(movie, season, episode)
-            }
-            : {
-                url: useExternal
-                    ? externalUrl
-                    : resolved.directUrl,
-                title: title,
-                subtitles: resolved.subtitles || [],
-                translate: { tracks: resolved.tracks || [] },
-                timeline: timeline(movie, season, episode),
-                headers: useExternal ? {} : (resolved.directHeaders || {}),
-                isonline: true
-            };
-
-        /*
-         * Во встроенном Lampa-плеере пробуем заранее выбрать HLS-аудиотрек.
-         * На сборках, где PlayerVideo не экспортирован глобально, это просто
-         * безопасно пропускается — сам плеер всё равно покажет выбор дорожек.
-         */
-        if (!useExternal) {
+        function active() { return sequence === playbackSequence; }
+        function prepareVoice() {
             try {
                 if (Lampa.PlayerVideo) {
-                    if (
-                        voiceChoice &&
-                        voiceChoice.index >= 0 &&
-                        typeof Lampa.PlayerVideo.setParams === 'function'
-                    ) {
-                        Lampa.PlayerVideo.setParams({ track: voiceChoice.index });
-                    }
-                    else if (
-                        typeof Lampa.PlayerVideo.clearParamas === 'function'
-                    ) {
-                        Lampa.PlayerVideo.clearParamas();
-                    }
+                    if (Lampa.PlayerVideo.clearParamas) Lampa.PlayerVideo.clearParamas();
+                    if (selectedVoice.index >= 0 && Lampa.PlayerVideo.setParams) Lampa.PlayerVideo.setParams({ track: selectedVoice.index });
                 }
-            } catch (e0) {}
+            } catch (e) {}
         }
-
-        if (actualRunas) {
-            try { Lampa.Player.runas(actualRunas); } catch (e) {}
+        function makeItem(number, meta) {
+            var title = titleOf(movie);
+            if (season !== null && number !== null) title += ' • S' + season + 'E' + number + (meta && meta.name ? ' • ' + meta.name : '');
+            return { title: title, season: season, episode: number,
+                timeline: timeline(movie, season, number), isonline: true, launch_player: targetPlayer,
+                mnogotv_player: targetPlayer === 'lampa', mnogotv_collaps: targetPlayer === 'lampa' && sessionAdapter === adapter, mnogotv_next_hint: season !== null && number !== null };
         }
-
-        log('play', {
-            source: source && source.type,
-            runas: actualRunas || 'default',
-            transport: useExternal ? (resolved.relayReady ? 'relay' : 'external-direct') : 'direct',
-            url: first.url
+        function applyResolved(item, resolved) {
+            item.url = resolved.url;
+            if (resolved.quality) item.quality = resolved.quality;
+            if (resolved.voiceovers) item.voiceovers = resolved.voiceovers;
+            item.subtitles = freshSubtitles(resolved.subtitles);
+            item.translate = { tracks: freshTracks(resolved.tracks) };
+            item.headers = resolved.headers || {};
+            prepareVoice();
+            status.text((resolved.provider || 'Collaps') + ' • ' + resolved.transport);
+        }
+        function resolveItem(item, done) {
+            if (!active() || busy) return;
+            busy = true;
+            status.text('Получаю видео • S' + season + 'E' + item.episode + '…');
+            sessionAdapter.resolve({ source: source, imdb: imdb, season: season, episode: item.episode,
+                voice: selectedVoice, dashMode: dashMode, format: formatMode }, function (resolved) {
+                busy = false;
+                if (!active()) return;
+                applyResolved(item, resolved);
+                // Other episodes must be resolved again on return: signed URLs and
+                // provider transport state belong to the newly selected episode.
+                playlist.forEach(function (other) { if (other !== item) arm(other); });
+                done();
+            }, function (e) {
+                busy = false;
+                if (!active()) return;
+                item.url = '';
+                status.text('Ошибка: ' + errText(e));
+                notify('MnogoTV: ' + errText(e));
+                done();
+            });
+        }
+        function arm(item) {
+            item.url = function (done) { resolveItem(item, done); };
+        }
+        var first = makeItem(episode, epMeta);
+        sessionAdapter.resolve({ source: source, imdb: imdb, season: season, episode: episode,
+            voice: selectedVoice, dashMode: dashMode, format: formatMode }, function (resolved) {
+            if (!active()) return;
+            applyResolved(first, resolved);
+            var seen = {};
+            if (season !== null && episode !== null) {
+                (episodeList || []).slice().sort(function (a, b) { return Number(a.episode_number) - Number(b.episode_number); }).forEach(function (ep) {
+                    var n = Number(ep.episode_number);
+                    if (!(n > 0) || n % 1 || seen[n]) return;
+                    seen[n] = true;
+                    var item = n === Number(episode) ? first : makeItem(n, ep);
+                    if (item !== first) arm(item);
+                    playlist.push(item);
+                });
+            }
+            if (playlist.indexOf(first) < 0) {
+                playlist.push(first);
+                playlist.sort(function (a, b) { return Number(a.episode) - Number(b.episode); });
+            }
+            if (playlist.length > 1) first.playlist = playlist;
+            try { Lampa.Player.runas(targetPlayer); } catch (e) {}
+            Lampa.Player.play(first);
+            Lampa.Player.playlist(playlist);
+        }, function (e) {
+            if (!active()) return;
+            status.text('Ошибка: ' + errText(e)); notify('MnogoTV: ' + errText(e));
         });
-
-        Lampa.Player.play(first);
-        Lampa.Player.playlist([first]);
     }
 
+    function viewingProgress(value) {
+        value = value || {};
+        var time = Math.max(0, Number(value.time) || 0);
+        var duration = Math.max(0, Number(value.duration) || 0);
+        var percent = duration ? time / duration * 100 : Number(value.percent) || 0;
+        return { percent: Math.max(0, Math.min(100, percent)), time: time, duration: duration };
+    }
+
+    // Explicit remote navigation: no geometry-dependent jump through the header.
+    function episodeFocusTarget(zone, index, direction, buttons, rows, remembered) {
+        if (zone === 'rows') {
+            if (direction === 'left' || direction === 'up' && index === 0)
+                return { zone: 'bar', index: Math.max(0, Math.min(buttons - 1, remembered || 0)) };
+            return { zone: 'rows', index: Math.max(0, Math.min(rows - 1, index + (direction === 'down' ? 1 : direction === 'up' ? -1 : 0))) };
+        }
+        if (direction === 'up') return { zone: 'head', index: 0 };
+        if (direction === 'left' && index === 0) return { zone: 'menu', index: 0 };
+        if (rows && (direction === 'down' || direction === 'right' && index === buttons - 1))
+            return { zone: 'rows', index: Math.max(0, Math.min(rows - 1, remembered || 0)) };
+        return { zone: 'bar', index: Math.max(0, Math.min(buttons - 1, index + (direction === 'right' ? 1 : direction === 'left' ? -1 : 0))) };
+    }
 
     function addCss() {
-        if (document.getElementById('mnogotv-v318-style')) return;
+        if (document.getElementById('mnogotv-v5-style')) return;
         var css = `
-        .mnogotv-v318{
-            width:100%;
-            height:100%;
-            box-sizing:border-box;
-            padding:.28em 1.05em .62em .7em;
-            overflow:hidden;
-            font-size:1.08em;
-        }
+body.mnogotv-v5-page{background:#111720!important}
 
-        .mnogotv-v318__layout{
-            display:grid;
-            grid-template-columns:18.8em minmax(0,1fr);
-            grid-template-areas:"info content";
-            align-items:stretch;
-            width:100%;
-            height:100%;
-            min-height:0;
-            gap:1.35em;
-            padding-right:4.7em;
-            box-sizing:border-box;
-        }
-
-        .mnogotv-v318__info{
-            grid-area:info;
-            min-width:0;
-            box-sizing:border-box;
-            padding:.55em .35em .45em .08em;
-            overflow:hidden;
-            display:flex;
-            flex-direction:column;
-        }
-
-
-        .mnogotv-v318__info-inner{
-            min-width:0;
-            min-height:0;
-            height:100%;
-            display:flex;
-            flex-direction:column;
-            overflow:hidden;
-        }
-
-        .mnogotv-v318__content{
-            grid-area:content;
-            min-width:0;
-            min-height:0;
-            height:100%;
-            display:flex;
-            flex-direction:column;
-            overflow:hidden;
-            max-width:62em;
-        }
-
-        .mnogotv-v318__info-top{
-            display:flex;
-            gap:.9em;
-            align-items:flex-start;
-            margin-bottom:.68em;
-        }
-
-        .mnogotv-v318__poster{
-            width:7.15em;
-            height:10.72em;
-            flex:0 0 7.15em;
-            border-radius:.34em;
-            overflow:hidden;
-            background:rgba(255,255,255,.08);
-        }
-
-        .mnogotv-v318__poster img{
-            display:block;
-            width:100%;
-            height:100%;
-            object-fit:cover;
-        }
-
-        .mnogotv-v318__info-mini{
-            min-width:0;
-            padding-top:.12em;
-            font-size:.98em;
-            line-height:1.45;
-            opacity:.98;
-        }
-
-        .mnogotv-v318__info-rate{
-            font-size:1.6em;
-            line-height:1;
-            font-weight:760;
-            margin:.5em 0 .55em;
-        }
-
-        .mnogotv-v318__info-age{
-            display:inline-block;
-            padding:.12em .38em;
-            border:.1em solid rgba(255,255,255,.88);
-            border-radius:.14em;
-            font-size:.8em;
-            font-weight:700;
-        }
-
-        .mnogotv-v318__info-title{
-            font-size:1.82em;
-            line-height:1.08;
-            font-weight:760;
-            margin:.3em 0 .34em;
-        }
-
-        .mnogotv-v318__info-genres{
-            font-size:.94em;
-            line-height:1.4;
-            opacity:.96;
-            margin-bottom:.8em;
-        }
-
-        .mnogotv-v318__info-overview{
-            display:-webkit-box;
-            -webkit-box-orient:vertical;
-            -webkit-line-clamp:17;
-            overflow:hidden;
-            font-size:.99em;
-            line-height:1.42;
-            opacity:.98;
-            padding-right:.2em;
-        }
-
-        .mnogotv-v318__info-overview--empty{
-            opacity:.62;
-            font-style:italic;
-        }
-
-
-        .mnogotv-v318__provider-layer{
-            position:fixed;
-            inset:0;
-            z-index:999999;
-            background:#000;
-            display:flex;
-            flex-direction:column;
-        }
-
-        .mnogotv-v318__provider-frame{
-            width:100%;
-            height:100%;
-            flex:1 1 auto;
-            border:0;
-            background:#000;
-        }
-
-        .mnogotv-v318__provider-hint{
-            position:absolute;
-            left:1.1em;
-            top:.75em;
-            z-index:2;
-            padding:.32em .58em;
-            border-radius:.32em;
-            background:rgba(0,0,0,.62);
-            font-size:.82em;
-            opacity:.72;
-            pointer-events:none;
-        }
-
-        .mnogotv-v318__top{
-            flex:0 0 auto;
-            padding:.08em .12em .32em;
-        }
-
-        .mnogotv-v318__toolbar{
-            display:flex;
-            gap:.58em;
-            align-items:center;
-            flex-wrap:nowrap;
-            margin:.04em 0 .48em;
-        }
-
-        .mnogotv-v318__pill,
-        .mnogotv-v318__title-chip{
-            min-width:7.8em;
-            max-width:11.5em;
-            padding:.48em .68em;
-            border-radius:.52em;
-            background:rgba(0,0,0,.25);
-            box-sizing:border-box;
-        }
-
-        .mnogotv-v318__title-chip{
-            display:none;
-        }
-
-        .mnogotv-v318__pill-title{
-            display:block;
-            font-size:.76em;
-            font-weight:700;
-            opacity:.96;
-            margin-bottom:.03em;
-        }
-
-        .mnogotv-v318__pill-value{
-            display:block;
-            font-size:.94em;
-            white-space:nowrap;
-            overflow:hidden;
-            text-overflow:ellipsis;
-        }
-
-        .mnogotv-v318__pill.focus{
-            box-shadow:0 0 0 .13em #fff;
-            background:rgba(255,255,255,.13);
-        }
-
-        /* В референсе отдельной служебной полосы над сериями нет. */
-        .mnogotv-v318__headline{
-            display:none;
-        }
-
-        .mnogotv-v318__status{
-            opacity:.92;
-            margin:.14em 0 .08em .08em;
-            font-size:.84em;
-        }
-
-        .mnogotv-v318__status:empty{ display:none; }
-
-        .mnogotv-v318__scroll{
-            flex:1 1 auto;
-            min-height:0;
-            height:100%;
-            overflow:hidden;
-        }
-
-        .mnogotv-v318__list{
-            padding:.08em .08em .6em 0;
-            box-sizing:border-box;
-        }
-
-        .mnogotv-v318__episode{
-            display:flex;
-            align-items:center;
-            gap:.95em;
-            width:100%;
-            box-sizing:border-box;
-            min-height:7em;
-            padding:.42em .72em .46em .34em;
-            margin:.13em 0;
-            border:.13em solid transparent;
-            border-radius:.38em;
-            position:relative;
-            background:rgba(0,0,0,.035);
-        }
-
-        .mnogotv-v318__episode.focus{
-            border-color:#fff;
-            background:rgba(255,255,255,.095);
-            box-shadow:0 0 .05em rgba(255,255,255,.65);
-        }
-
-        .mnogotv-v318__thumb{
-            position:relative;
-            width:11.25em;
-            height:6.32em;
-            flex:0 0 11.25em;
-            border-radius:.31em;
-            overflow:hidden;
-            background:rgba(255,255,255,.08);
-        }
-
-        .mnogotv-v318__thumb img{
-            width:100%;
-            height:100%;
-            object-fit:cover;
-            display:block;
-        }
-
-        .mnogotv-v318__num{
-            position:absolute;
-            left:.38em;
-            bottom:.23em;
-            font-size:1.58em;
-            font-weight:780;
-            line-height:1;
-            color:#fff;
-            text-shadow:0 .07em .15em #000,0 0 .22em #000;
-        }
-
-        .mnogotv-v318__body{
-            flex:1;
-            min-width:0;
-            padding-right:.12em;
-        }
-
-        .mnogotv-v318__title-row{
-            display:flex;
-            align-items:center;
-            gap:.8em;
-            min-width:0;
-        }
-
-        .mnogotv-v318__title{
-            flex:1 1 auto;
-            min-width:0;
-            font-size:1.48em;
-            line-height:1.13;
-            font-weight:590;
-            white-space:nowrap;
-            overflow:hidden;
-            text-overflow:ellipsis;
-        }
-
-        .mnogotv-v318__duration{
-            flex:0 0 auto;
-            font-size:.83em;
-            opacity:.98;
-            font-weight:670;
-            padding-left:.35em;
-        }
-
-        .mnogotv-v318__line{
-            height:.075em;
-            width:100%;
-            background:rgba(255,255,255,.86);
-            margin:.28em 0 .36em;
-            border-radius:1em;
-        }
-
-        .mnogotv-v318__meta{
-            opacity:.98;
-            font-size:.94em;
-            white-space:nowrap;
-            overflow:hidden;
-            text-overflow:ellipsis;
-        }
-
-        .mnogotv-v318__quality{
-            font-weight:720;
-            opacity:1;
-        }
-
-        .mnogotv-v318__empty{
-            padding:1.6em 0;
-            opacity:.82;
-            font-size:1.05em;
-        }
-
-        @media(max-width:1200px){
-            .mnogotv-v318__layout{
-                grid-template-columns:17em minmax(0,1fr);
-                gap:1em;
-                padding-right:2.7em;
-            }
-            .mnogotv-v318__content{ max-width:none; }
-            .mnogotv-v318__poster{
-                width:6.5em;
-                height:9.75em;
-                flex-basis:6.5em;
-            }
-            .mnogotv-v318__info-title{ font-size:1.62em; }
-            .mnogotv-v318__info-overview{ font-size:.9em; }
-            .mnogotv-v318__thumb{
-                width:10em;
-                height:5.63em;
-                flex-basis:10em;
-            }
-            .mnogotv-v318__title{ font-size:1.32em; }
-            .mnogotv-v318__meta{ font-size:.86em; }
-        }
-
-        @media(max-width:900px){
-            .mnogotv-v318{
-                padding:.2em .42em .45em;
-                font-size:1em;
-            }
-            .mnogotv-v318__layout{
-                grid-template-columns:14.6em minmax(0,1fr);
-                gap:.72em;
-                padding-right:.8em;
-            }
-            .mnogotv-v318__poster{
-                width:5.4em;
-                height:8.1em;
-                flex-basis:5.4em;
-            }
-            .mnogotv-v318__info-mini{ font-size:.82em; }
-            .mnogotv-v318__info-title{ font-size:1.38em; }
-            .mnogotv-v318__info-genres{ font-size:.78em; }
-            .mnogotv-v318__info-overview{
-                font-size:.76em;
-                -webkit-line-clamp:15;
-            }
-            .mnogotv-v318__toolbar{ gap:.36em; }
-            .mnogotv-v318__pill{
-                min-width:6.3em;
-                max-width:8.3em;
-                padding:.35em .45em;
-            }
-            .mnogotv-v318__pill-title{ font-size:.62em; }
-            .mnogotv-v318__pill-value{ font-size:.75em; }
-            .mnogotv-v318__episode{
-                min-height:5.4em;
-                gap:.6em;
-                padding:.31em .46em .34em .28em;
-            }
-            .mnogotv-v318__thumb{
-                width:8.25em;
-                height:4.64em;
-                flex-basis:8.25em;
-            }
-            .mnogotv-v318__num{ font-size:1.24em; }
-            .mnogotv-v318__title{ font-size:1.08em; }
-            .mnogotv-v318__duration{ font-size:.65em; }
-            .mnogotv-v318__meta{ font-size:.7em; }
-        }
+body.mnogotv-v5-page .head{background:transparent!important}
+.mnogotv-v5{box-sizing:border-box;display:flex;height:calc(100vh - 7em);min-height:24em;padding:1.2em 2em 1.5em;color:#f4f7f8;background:transparent;overflow:hidden}
+.mnogotv-v5 *{box-sizing:border-box}
+.mnogotv-v5__sidebar{width:29%;flex-shrink:0;padding-right:2em;overflow:hidden}
+.mnogotv-v5__identity{display:flex;align-items:center;margin-bottom:1.4em}
+.mnogotv-v5__poster{width:42%;border-radius:.45em;background:#203543;object-fit:cover;max-height:15em}
+.mnogotv-v5__facts{padding-left:1em;font-size:1em;line-height:1.7;color:#d2e3e7}
+.mnogotv-v5__rating{font-size:1.5em;color:#fff;margin:.6em 0}
+.mnogotv-v5__title{font-size:1.8em;line-height:1.15;margin:0 0 .5em;font-weight:700}
+.mnogotv-v5__genres{font-size:.95em;color:#a6c9cc;margin-bottom:1.5em}
+.mnogotv-v5__overview{font-size:1.05em;line-height:1.5;color:#cfdbdf;display:-webkit-box;-webkit-line-clamp:10;-webkit-box-orient:vertical;overflow:hidden}
+.mnogotv-v5__main{flex:1;min-width:0;display:flex;flex-direction:column}
+.mnogotv-v5__bar{display:flex;flex-wrap:nowrap;overflow-x:auto;align-items:center;flex-shrink:0;margin:0 -.25em;scrollbar-width:none}
+.mnogotv-v5__bar::-webkit-scrollbar{display:none}
+.mnogotv-v5__pill{flex-shrink:0;padding:.6em .8em;margin:.25em;border-radius:.4em;background:rgba(0,0,0,.22);font-size:1em;max-width:20em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:2px solid transparent}
+.mnogotv-v5__pill.focus{background:#eefafa;color:#12323b;border-color:#fff}
+.mnogotv-v5__status{font-size:.9em;color:#a7c7ca;margin:.6em .3em 1em;min-height:1.2em;flex-shrink:0}
+.mnogotv-v5__list{flex:1;min-height:0;overflow-y:auto;padding:.3em .5em .8em .25em;scrollbar-width:none}
+.mnogotv-v5__list::-webkit-scrollbar{display:none}
+.mnogotv-v5__item{display:flex;align-items:stretch;margin-bottom:.7em;padding:.35em;border:3px solid transparent;border-radius:.6em;background:rgba(0,0,0,.24);min-height:7.6em}
+.mnogotv-v5__item.focus{border-color:#ecffff;background:rgba(12,115,121,.65);box-shadow:0 0 0 1px rgba(255,255,255,.3)}
+.mnogotv-v5__thumb{width:12em;flex-shrink:0;position:relative;overflow:hidden;border-radius:.3em;background:linear-gradient(135deg,#274354,#0e626c)}
+.mnogotv-v5__thumb img{position:absolute;width:100%;height:100%;object-fit:cover}
+.mnogotv-v5__number{position:absolute;bottom:.3em;left:.5em;font-size:1.4em;font-weight:bold;text-shadow:0 2px 5px #000}
+.mnogotv-v5__details{flex:1;min-width:0;padding:.6em 1em;display:flex;flex-direction:column;justify-content:center}
+.mnogotv-v5__rowhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:.7em}
+.mnogotv-v5__name{font-size:1.3em;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:1em}
+.mnogotv-v5__runtime{font-size:.9em;white-space:nowrap;color:#d5e5e6}
+.mnogotv-v5__progress{height:.22em;border-radius:1em;background:rgba(220,240,240,.25);overflow:hidden;width:100%;margin-bottom:.7em}
+.mnogotv-v5__fill{height:100%;width:0;background:#9ff8e5;border-radius:1em}
+.mnogotv-v5__meta{font-size:.9em;color:#c4dfe0;display:flex;justify-content:space-between;flex-wrap:wrap}
+.mnogotv-v5__watched{margin-left:.6em;color:#a7efde}
+@media(max-width:900px){.mnogotv-v5{padding:1em;height:calc(100vh - 6em)}.mnogotv-v5__sidebar{width:27%;padding-right:1em}.mnogotv-v5__thumb{width:9em}.mnogotv-v5__title{font-size:1.4em}.mnogotv-v5__facts{font-size:.85em}}
 `;
-        var style = document.createElement('style');
-        style.id = 'mnogotv-v318-style';
-        style.textContent = css;
-        document.head.appendChild(style);
+        $('body').append('<style id="mnogotv-v5-style">' + css + '</style>');
     }
 
-    function MnogoComponent(object) {
+    function Component(object) {
+        var provider = object.provider || 'collaps';
+        var providerTitle = provider === 'alloha' ? 'Alloha' : provider === 'turbo' ? 'Turbo' : provider === 'veoveo' ? 'VeoVeo' : 'Collaps';
+        var adapter = adapters[provider] || adapters.collaps;
         var movie = object.movie || {};
-        var imdb = '';
-        var sources = [];
-        var source = null;
+        var source = object.source;
+        var providerViews = {};
+        var playerMode = 'internal', sourceBusy = false, sourceCheckSequence = 0;
+        var imdb = object.imdb;
         var season = 1;
-        var seasons = [];
         var episodes = [];
+        var focus = null;
+        var voice = { index: -1, label: 'Авто' };
+        var dashMode = 'default';
+        var formatMode = object.formatMode || 'hls';
         var initialized = false;
-        var last = null;
-        var currentFocus = null;
+        var destroyed = false, listGeneration = 0;
+        var progressRows = [], rowNodes = [], buttonNodes = [];
+        var zone = 'bar', rowIndex = 0, buttonIndex = 0;
+        var root = $('<div class="mnogotv-v5"></div>');
+        var bar = $('<div class="mnogotv-v5__bar"></div>');
+        var sourceButton = $('<div class="mnogotv-v5__pill selector"></div>').text(source ? 'Источник: ' + (provider === 'alloha' ? 'Alloha-HLS' : provider === 'turbo' ? 'Turbo-HLS' : provider === 'veoveo' ? 'VeoVeo-HLS' : 'Collaps-' + formatMode.toUpperCase()) : 'Источник: выберите');
+        var playerButton = $('<div class="mnogotv-v5__pill selector">Плеер: встроенный</div>');
+        var seasonButton = $('<div class="mnogotv-v5__pill selector">Сезон 1</div>');
+        
+        var diagnosticButton = $('<div class="mnogotv-v5__pill selector"></div>');
+        function diagnosticLabel() { diagnosticButton.text('Диагностика: ' + (global.MnogoTVDiagnostics === true ? 'вкл' : 'выкл')); }
+        diagnosticLabel();
+        diagnosticButton.on('hover:enter click', function () {
+            global.MnogoTVDiagnostics = global.MnogoTVDiagnostics !== true;
+            diagnosticLabel();
+            global.MnogoTVLGRefresh();
+            status.text('Режим диагностики применится при следующем запуске видео.');
+        });
+        var status = $('<div class="mnogotv-v5__status"></div>').text(source ? providerTitle + ' готов' : 'Выберите источник вверху карточки.');
+        var list = $('<div class="mnogotv-v5__list"></div>');
+        var last = seasonButton[0];
 
-        // "Авто" сохраняет рабочее поведение VeoVeo.
-        var qualityLabel = 'Авто';
-        var voiceChoice = { index: -1, label: 'Авто', translationId: '', iframeUrl: '', quality: '' };
-        var playerMode = 'lampa';
-
-        try {
-            var storedPlayer = String(Lampa.Storage.get('mnogotv_player_mode') || '').trim();
-            if (storedPlayer === 'auto' || storedPlayer === 'android' || storedPlayer === 'lampa') {
-                playerMode = storedPlayer;
-            }
-        } catch (ePlayer) {}
-
-        var root = $('<div class="mnogotv-v318"></div>');
-        var layout = $('<div class="mnogotv-v318__layout"></div>');
-        var infoPanel = $('<aside class="mnogotv-v318__info"></aside>');
-        var contentPanel = $('<section class="mnogotv-v318__content"></section>');
-        var topPanel = $('<div class="mnogotv-v318__top"></div>');
-        var toolbar = $('<div class="mnogotv-v318__toolbar"></div>');
-        var headline = $('<div class="mnogotv-v318__headline"><span class="icon-play">▶</span><span class="mnogotv-v318__headline-text"></span></div>');
-        var status = $('<div class="mnogotv-v318__status"></div>');
-        var sourceButton = $('<div class="mnogotv-v318__pill selector"><span class="mnogotv-v318__pill-title">Источник</span><span class="mnogotv-v318__pill-value">Загрузка…</span></div>');
-        var seasonButton = $('<div class="mnogotv-v318__pill selector"><span class="mnogotv-v318__pill-title">Фильтр</span><span class="mnogotv-v318__pill-value">Сезон 1</span></div>');
-        var titleChip = $('<div class="mnogotv-v318__title-chip"><span class="mnogotv-v318__title-chip-icon">⌕</span><span class="mnogotv-v318__title-chip-text"></span></div>');
-        var voiceButton = $('<div class="mnogotv-v318__pill selector"><span class="mnogotv-v318__pill-title">Озвучка</span><span class="mnogotv-v318__pill-value">Авто</span></div>');
-        var playerButton = $('<div class="mnogotv-v318__pill selector"><span class="mnogotv-v318__pill-title">Плеер</span><span class="mnogotv-v318__pill-value">Lampa</span></div>');
-        var scroll = new Lampa.Scroll({ mask: true, over: true });
-        var resizeHandler = null;
-        var providerLayer = null;
-        var providerFrame = null;
-
-        function genreText() {
-            var names = [];
-            var genres = movie && movie.genres;
-
-            if (Array.isArray(genres)) {
-                genres.forEach(function (g) {
-                    if (g && g.name) names.push(g.name);
-                });
-            }
-
-            return names.join(', ');
+        function imageUrl(path, size) {
+            if (!path) return '';
+            try { return Lampa.Api.img(path, size); } catch (e) { return ''; }
         }
-
-        function enrichMovieDetails(done) {
-            var id = tmdbId(movie);
-
-            if (!id) {
-                if (done) done();
-                return;
-            }
-
-            var path =
-                (isSeries(movie) ? 'tv/' : 'movie/') +
-                id;
-
-            function finish() {
-                renderInfoPanel();
-                if (done) done();
-            }
-
-            function translationsFallback() {
-                var current =
-                    String(
-                        movie &&
-                        (
-                            movie.overview ||
-                            movie.__mnogotv_overview
-                        ) ||
-                        ''
-                    ).trim();
-
-                if (current) {
-                    finish();
-                    return;
-                }
-
-                try {
-                    Lampa.Api.sources.tmdb.get(
-                        path + '/translations',
-                        {},
-                        function (data) {
-                            var list =
-                                data &&
-                                data.translations ||
-                                [];
-
-                            var picked = null;
-
-                            if (Array.isArray(list)) {
-                                /*
-                                 * Сначала русский, затем английский,
-                                 * затем любое непустое описание.
-                                 */
-                                ['ru', 'en'].some(function (lang) {
-                                    return list.some(function (tr) {
-                                        var overview =
-                                            tr &&
-                                            tr.data &&
-                                            String(
-                                                tr.data.overview ||
-                                                ''
-                                            ).trim();
-
-                                        if (
-                                            tr &&
-                                            tr.iso_639_1 === lang &&
-                                            overview
-                                        ) {
-                                            picked = overview;
-                                            return true;
-                                        }
-
-                                        return false;
-                                    });
-                                });
-
-                                if (!picked) {
-                                    list.some(function (tr) {
-                                        var overview =
-                                            tr &&
-                                            tr.data &&
-                                            String(
-                                                tr.data.overview ||
-                                                ''
-                                            ).trim();
-
-                                        if (overview) {
-                                            picked = overview;
-                                            return true;
-                                        }
-
-                                        return false;
-                                    });
-                                }
-                            }
-
-                            if (picked) {
-                                movie.overview = picked;
-                            }
-
-                            finish();
-                        },
-                        finish
-                    );
-                } catch (e) {
-                    finish();
-                }
-            }
-
-            try {
-                Lampa.Api.sources.tmdb.get(
-                    path,
-                    {},
-                    function (details) {
-                        details = details || {};
-
-                        [
-                            'overview',
-                            'genres',
-                            'production_countries',
-                            'origin_country',
-                            'vote_average',
-                            'poster_path',
-                            'backdrop_path',
-                            'runtime',
-                            'episode_run_time',
-                            'release_date',
-                            'first_air_date',
-                            'adult',
-                            'title',
-                            'name',
-                            'original_title',
-                            'original_name'
-                        ].forEach(function (key) {
-                            if (
-                                details[key] !== undefined &&
-                                details[key] !== null &&
-                                details[key] !== ''
-                            ) {
-                                movie[key] = details[key];
-                            }
-                        });
-
-                        translationsFallback();
-                    },
-                    translationsFallback
-                );
-            } catch (e) {
-                translationsFallback();
-            }
+        function addImage(parent, path, size, className) {
+            var url = imageUrl(path, size);
+            if (!url) return;
+            var img = $('<img alt="">').attr('src', url);
+            if (className) img.addClass(className);
+            img.on('error', function () { $(this).remove(); });
+            parent.append(img);
         }
-
-
-        function renderInfoPanel() {
-            var year = String(
-                movie &&
-                (movie.release_date || movie.first_air_date) ||
-                ''
-            ).slice(0, 4);
-
-            var country = '';
-            try {
-                if (
-                    Array.isArray(movie.origin_country) &&
-                    movie.origin_country.length
-                ) {
-                    country = movie.origin_country[0];
-                }
-                else if (
-                    Array.isArray(movie.production_countries) &&
-                    movie.production_countries.length
-                ) {
-                    country =
-                        movie.production_countries[0].name ||
-                        movie.production_countries[0].iso_3166_1 ||
-                        '';
-                }
-            } catch (e) {}
-
-            var poster = '';
-            try {
-                if (
-                    movie.poster_path &&
-                    Lampa.TMDB &&
-                    Lampa.TMDB.image
-                ) {
-                    poster =
-                        Lampa.TMDB.image(
-                            't/p/w300' +
-                            movie.poster_path
-                        );
-                }
-            } catch (e2) {}
-
-            /*
-             * В 3.14/3.15 было несколько top-level элементов:
-             * $( '<div>...</div><div class="title">...</div>...' )
-             * После этого html.find('.title') НЕ находил сам top-level
-             * .title. Постер жил, а title/genres/overview оставались пустыми.
-             *
-             * Один root-wrapper закрывает этот замечательный JS-капкан.
-             */
-            var html = $(
-                '<div class="mnogotv-v318__info-inner">' +
-                    '<div class="mnogotv-v318__info-top">' +
-                        '<div class="mnogotv-v318__poster"><img></div>' +
-                        '<div class="mnogotv-v318__info-mini">' +
-                            '<div class="mnogotv-v318__info-year"></div>' +
-                            '<div class="mnogotv-v318__info-rate"></div>' +
-                            '<div class="mnogotv-v318__info-age"></div>' +
-                        '</div>' +
-                    '</div>' +
-                    '<div class="mnogotv-v318__info-title"></div>' +
-                    '<div class="mnogotv-v318__info-genres"></div>' +
-                    '<div class="mnogotv-v318__info-overview"></div>' +
-                '</div>'
-            );
-
-            if (poster) {
-                html.find(
-                    '.mnogotv-v318__poster img'
-                ).attr(
-                    'src',
-                    poster
-                );
-            }
-            else {
-                html.find(
-                    '.mnogotv-v318__poster'
-                ).hide();
-            }
-
-            html.find(
-                '.mnogotv-v318__info-year'
-            ).text(
-                [year, country]
-                    .filter(Boolean)
-                    .join(' • ')
-            );
-
-            html.find(
-                '.mnogotv-v318__info-rate'
-            ).text(
-                '★ ' +
-                (
-                    movie &&
-                    movie.vote_average
-                        ? parseFloat(
-                            movie.vote_average
-                        ).toFixed(1)
-                        : '—'
-                )
-            );
-
-            var ageText =
-                movie &&
-                movie.adult
-                    ? '18+'
-                    : '';
-
-            var ageNode =
-                html.find(
-                    '.mnogotv-v318__info-age'
-                );
-
-            if (ageText) {
-                ageNode.text(ageText);
-            }
-            else {
-                ageNode.hide();
-            }
-
-            html.find(
-                '.mnogotv-v318__info-title'
-            ).text(
-                titleOf(movie)
-            );
-
-            var genres =
-                genreText();
-
-            html.find(
-                '.mnogotv-v318__info-genres'
-            ).text(
-                genres
-            );
-
-            var overview = String(
-                movie &&
-                (
-                    movie.overview ||
-                    movie.__mnogotv_overview
-                ) ||
-                ''
-            )
-                .replace(/\s+/g, ' ')
-                .trim();
-
-            var overviewNode =
-                html.find(
-                    '.mnogotv-v318__info-overview'
-                );
-
-            if (overview) {
-                overviewNode
-                    .removeClass(
-                        'mnogotv-v318__info-overview--empty'
-                    )
-                    .text(overview);
-            }
-            else {
-                overviewNode
-                    .addClass(
-                        'mnogotv-v318__info-overview--empty'
-                    )
-                    .text(
-                        'Описание отсутствует'
-                    );
-            }
-
-            infoPanel
-                .empty()
-                .append(html);
-
-            titleChip
-                .find(
-                    '.mnogotv-v318__title-chip-text'
-                )
-                .text(
-                    titleOf(movie)
-                );
+        function sidebar() {
+            var side = $('<div class="mnogotv-v5__sidebar"></div>');
+            var identity = $('<div class="mnogotv-v5__identity"></div>');
+            addImage(identity, movie.poster_path, 'w300', 'mnogotv-v5__poster');
+            var facts = $('<div class="mnogotv-v5__facts"></div>');
+            var year = String(movie.release_date || movie.first_air_date || '').slice(0, 4);
+            facts.append($('<div></div>').text([year, (movie.origin_country || []).join(', ')].filter(Boolean).join(' • ')));
+            if (Number(movie.vote_average) > 0) facts.append($('<div class="mnogotv-v5__rating"></div>').text('★ ' + Number(movie.vote_average).toFixed(1)));
+            facts.append($('<div class="mnogotv-v5__provider"></div>').text(source ? 'MnogoTV • ' + providerTitle : 'MnogoTV'));
+            identity.append(facts); side.append(identity);
+            side.append($('<h2 class="mnogotv-v5__title"></h2>').text(titleOf(movie)));
+            side.append($('<div class="mnogotv-v5__genres"></div>').text((movie.genres || []).map(function (g) { return g.name; }).filter(Boolean).join(', ')));
+            side.append($('<div class="mnogotv-v5__overview"></div>').text(movie.overview || 'Описание пока недоступно.'));
+            return side;
         }
-
-
-        function updateScrollSpace() {
-            try {
-                scroll.minus(topPanel);
-            } catch (e) {}
-        }
-
-        function focusInside(target) {
-            try {
-                if (target) {
-                    last = target;
-                    Lampa.Controller.collectionSet(root);
-                    Lampa.Controller.collectionFocus(target, root);
-                }
-            } catch (e) {}
-        }
-
-        function updateHeadline(ep) {
-            var parts = [];
-            parts.push(source ? (source.name || source.type || 'Источник') : 'MnogoTV');
-            if (isSeries(movie)) parts.push('Сезон ' + season);
-            if (ep && ep.episode_number) parts.push('Серия ' + ep.episode_number);
-            if (ep && ep.name) parts.push(ep.name);
-            headline.find('.mnogotv-v318__headline-text').text(parts.join('  •  '));
-        }
-
-        function setSourceLabel() {
-            var value =
-                source
-                    ? (source.name || source.type || 'Источник')
-                    : 'Нет';
-
-            var type =
-                String(
-                    source && source.type || ''
-                ).toLowerCase();
-
-            if (
-                source &&
-                (
-                    type === 'veoveo' ||
-                    type === 'veo' ||
-                    type.indexOf('veoveo') >= 0
-                )
-            ) {
-                value += ' • ' + qualityLabel;
-            }
-            else if (
-                source &&
-                (
-                    type === 'alloha' ||
-                    type === 'turbo'
-                )
-            ) {
-                value += ' • web';
-            }
-            else if (
-                source &&
-                type === 'collaps'
-            ) {
-                value += ' • Lampa';
-            }
-
-            sourceButton
-                .find('.mnogotv-v318__pill-value')
-                .text(value);
-
-            updateHeadline(
-                currentFocus ||
-                episodes[0] ||
-                null
-            );
-        }
-
-        function setSeasonLabel() {
-            seasonButton.find('.mnogotv-v318__pill-value').text('Сезон ' + season);
-            updateHeadline(currentFocus || episodes[0] || null);
-        }
-
-
-        function setVoiceLabel() {
-            voiceButton.find('.mnogotv-v318__pill-value').text(
-                voiceChoice && voiceChoice.label ? voiceChoice.label : 'Авто'
-            );
-        }
-
-        function setPlayerLabel() {
-            var names = {
-                lampa: 'Lampa',
-                android: 'Android',
-                auto: 'Авто'
-            };
-            playerButton.find('.mnogotv-v318__pill-value').text(names[playerMode] || 'Lampa');
-        }
-
-        function resetVoice() {
-            voiceChoice = {
-                index: -1,
-                label: 'Авто',
-                translationId: '',
-                iframeUrl: '',
-                quality: ''
-            };
-            setVoiceLabel();
-        }
-
-        function trackTitle(track, index) {
-            track = track || {};
-            var parts = [];
-            var language = String(track.language || track.name || '').trim();
-            var label = String(track.label || '').trim();
-
-            if (language) parts.push(language);
-            if (label && label !== language) parts.push(label);
-            if (!parts.length) parts.push('Дорожка ' + (index + 1));
-
-            return parts.join(' / ');
-        }
-
-        function choosePlayer() {
-            var items = [
-                { title: 'Встроенный Lampa', mode: 'lampa', selected: playerMode === 'lampa' },
-                { title: 'Android / внешний', mode: 'android', selected: playerMode === 'android' },
-                { title: 'Авто', mode: 'auto', selected: playerMode === 'auto' },
-                { title: '← Назад', goBack: true }
-            ];
-
-            Lampa.Select.show({
-                title: 'MnogoTV — плеер',
-                items: items,
-                onBack: function () { Lampa.Controller.toggle('content'); },
-                onSelect: function (item) {
-                    if (item.goBack) {
-                        Lampa.Controller.toggle('content');
-                        return;
-                    }
-
-                    playerMode = item.mode || 'lampa';
-                    try { Lampa.Storage.set('mnogotv_player_mode', playerMode); } catch (e) {}
-                    setPlayerLabel();
-                    Lampa.Controller.toggle('content');
-                }
+        function refreshProgress() {
+            progressRows.forEach(function (entry) {
+                var progress = viewingProgress(timeline(movie, entry.season, entry.episode));
+                entry.fill.css('width', progress.percent + '%');
+                entry.track.attr('aria-valuenow', Math.round(progress.percent));
+                entry.label.text(progress.percent ? 'Просмотрено ' + Math.round(progress.percent) + '%' : 'Не просмотрено');
             });
         }
-
-        function chooseVoice() {
-            if (!source) {
-                notify('MnogoTV: источник не выбран');
+        function revealRow(node) {
+            var box = list[0];
+            if (!node || !box) return;
+            var rect = node.getBoundingClientRect(), bounds = box.getBoundingClientRect();
+            if (rect.bottom > bounds.bottom) box.scrollTop += rect.bottom - bounds.bottom + 8;
+            else if (rect.top < bounds.top) box.scrollTop -= bounds.top - rect.top + 8;
+        }
+        function focusNode(node) {
+            if (!node || destroyed) return;
+            last = node;
+            Lampa.Controller.collectionSet(root);
+            Lampa.Controller.collectionFocus(node, root);
+            if (zone === 'rows') revealRow(node);
+            else {
+                var rect = node.getBoundingClientRect(), bounds = bar[0].getBoundingClientRect();
+                if (rect.right > bounds.right) bar[0].scrollLeft += rect.right - bounds.right + 8;
+                else if (rect.left < bounds.left) bar[0].scrollLeft -= bounds.left - rect.left + 8;
+            }
+        }
+        function navigate(direction) {
+            var target = episodeFocusTarget(zone, zone === 'rows' ? rowIndex : buttonIndex,
+                direction, buttonNodes.length, rowNodes.length, zone === 'rows' ? buttonIndex : rowIndex);
+            if (target.zone === 'head' || target.zone === 'menu') {
+                Lampa.Controller.toggle(target.zone);
                 return;
             }
-
-            if (isWebProviderSource(source)) {
-                var translations =
-                    Array.isArray(source.translations)
-                        ? source.translations
-                        : [];
-
-                var items = [{
-                    title: 'Авто',
-                    translationId: '',
-                    iframeUrl: '',
-                    quality: '',
-                    label: 'Авто',
-                    selected:
-                        !voiceChoice.translationId &&
-                        voiceChoice.label === 'Авто'
-                }];
-
-                translations.forEach(function (tr) {
-                    if (!tr) return;
-
-                    var name =
-                        String(
-                            tr.name ||
-                            tr.title ||
-                            ('Озвучка ' + tr.id)
-                        ).trim();
-
-                    var quality =
-                        String(
-                            tr.quality ||
-                            ''
-                        ).trim();
-
-                    var title =
-                        name +
-                        (
-                            quality
-                                ? (' • ' + quality)
-                                : ''
-                        );
-
-                    items.push({
-                        title: title,
-                        translationId:
-                            tr.id !== undefined
-                                ? String(tr.id)
-                                : '',
-                        iframeUrl:
-                            tr.iframeUrl || '',
-                        quality: quality,
-                        label: name,
-                        selected:
-                            String(
-                                voiceChoice.translationId ||
-                                ''
-                            ) ===
-                            String(
-                                tr.id !== undefined
-                                    ? tr.id
-                                    : ''
-                            )
-                    });
-                });
-
-                if (!translations.length) {
-                    items.push({
-                        title:
-                            'Источник не вернул список озвучек',
-                        disabled: true
-                    });
-                }
-
-                items.push({
-                    title: '← Назад',
-                    goBack: true
-                });
-
-                Lampa.Select.show({
-                    title:
-                        'MnogoTV — озвучка ' +
-                        (
-                            source.name ||
-                            source.type ||
-                            ''
-                        ),
-                    items: items,
-                    onBack: function () {
-                        Lampa.Controller.toggle('content');
-                    },
-                    onSelect: function (item) {
-                        if (item.goBack) {
-                            Lampa.Controller.toggle('content');
-                            return;
-                        }
-
-                        if (item.disabled) return;
-
-                        voiceChoice = {
-                            index: -1,
-                            label:
-                                item.label ||
-                                item.title ||
-                                'Авто',
-                            translationId:
-                                item.translationId || '',
-                            iframeUrl:
-                                item.iframeUrl || '',
-                            quality:
-                                item.quality || ''
-                        };
-
-                        setVoiceLabel();
-                        Lampa.Controller.toggle('content');
-                    }
-                });
-
-                return;
+            zone = target.zone;
+            if (zone === 'rows') { rowIndex = target.index; focusNode(rowNodes[rowIndex]); }
+            else { buttonIndex = target.index; focusNode(buttonNodes[buttonIndex]); }
+        }
+        function makeRow(ep, number, rowSeason) {
+            var row = $('<div class="mnogotv-v5__item selector"></div>');
+            var thumb = $('<div class="mnogotv-v5__thumb"></div>');
+            addImage(thumb, ep.still_path || movie.backdrop_path, 'w300');
+            thumb.append($('<span class="mnogotv-v5__number"></span>').text(number === null ? '▶' : ('0' + number).slice(-2)));
+            var details = $('<div class="mnogotv-v5__details"></div>');
+            var head = $('<div class="mnogotv-v5__rowhead"></div>');
+            head.append($('<div class="mnogotv-v5__name"></div>').text(number === null ? 'Смотреть фильм' : ep.name || 'Серия ' + number));
+            var runtime = Number(ep.runtime || movie.runtime || (movie.episode_run_time || [])[0]) || 0;
+            head.append($('<div class="mnogotv-v5__runtime"></div>').text(runtime ? runtime + ' мин' : ''));
+            var track = $('<div class="mnogotv-v5__progress" role="progressbar" aria-label="Прогресс просмотра" aria-valuemin="0" aria-valuemax="100"></div>');
+            var fill = $('<div class="mnogotv-v5__fill"></div>');track.append(fill);
+            var meta = $('<div class="mnogotv-v5__meta"></div>');
+            var rating = Number(ep.vote_average) > 0 ? '★ ' + Number(ep.vote_average).toFixed(1) : '';
+            meta.append($('<span></span>').text([rating, ep.air_date || '', number === null ? (source ? providerTitle : 'Источник не выбран') : 'S' + rowSeason + ' • E' + number].filter(Boolean).join('  •  ')));
+            var watched = $('<span class="mnogotv-v5__watched"></span>');meta.append(watched);
+            details.append(head).append(track).append(meta);row.append(thumb).append(details);
+            var index = rowNodes.length; rowNodes.push(row[0]);
+            progressRows.push({ season: rowSeason, episode: number, fill: fill, track: track, label: watched });
+            row.on('hover:focus', function () { zone = 'rows'; rowIndex = index; focus = ep; last = row[0]; revealRow(last); refreshProgress(); });
+            row.on('hover:enter click', function () { focus = ep; last = row[0]; if (sourceBusy) return; if (!source) { chooseSource(); return; } play(movie, source, imdb, rowSeason, number, ep, voice, status, dashMode, formatMode, episodes, adapter, playerMode); });
+            list.append(row);
+        }
+        function renderList() {
+            var generation = ++listGeneration;
+            list.empty(); list[0].scrollTop = 0;
+            focus = null; rowNodes = []; progressRows = []; rowIndex = 0;
+            zone = 'bar'; last = buttonNodes[buttonIndex] || seasonButton[0];
+            if (!isSeries(movie)) {
+                makeRow({}, null, null); refreshProgress();
+                zone = source ? 'rows' : 'bar';last = source ? rowNodes[0] : sourceButton[0];return;
             }
-
-            var ep = currentFocus || episodes[0] || {};
-            var epNum = isSeries(movie) ? parseInt(ep.episode_number || 0, 10) : null;
-
-            status.text('Получаем аудиодорожки…');
-
-            resolveSource(
-                source,
-                imdb,
-                isSeries(movie) ? season : null,
-                epNum,
-                qualityLabel,
-                function (resolved) {
-                    status.text('');
-
-                    var tracks = Array.isArray(resolved.tracks) ? resolved.tracks : [];
-                    var items = [{
-                        title: 'Авто',
-                        index: -1,
-                        label: 'Авто',
-                        selected: voiceChoice.index < 0
-                    }];
-
-                    tracks.forEach(function (track, index) {
-                        var actualIndex = track.index !== undefined ? parseInt(track.index, 10) : index;
-                        var label = trackTitle(track, index);
-                        items.push({
-                            title: label,
-                            index: isNaN(actualIndex) ? index : actualIndex,
-                            label: label,
-                            selected: voiceChoice.index === (isNaN(actualIndex) ? index : actualIndex)
-                        });
-                    });
-
-                    if (!tracks.length) {
-                        items.push({
-                            title: 'В HLS нет подписанных аудиодорожек',
-                            disabled: true
-                        });
-                    }
-
-                    items.push({ title: '← Назад', goBack: true });
-
-                    Lampa.Select.show({
-                        title: 'MnogoTV — озвучка',
-                        items: items,
-                        onBack: function () { Lampa.Controller.toggle('content'); },
-                        onSelect: function (item) {
-                            if (item.goBack) {
-                                Lampa.Controller.toggle('content');
-                                return;
-                            }
-                            if (item.disabled) return;
-
-                            voiceChoice = {
-                                index: item.index,
-                                label: item.label || item.title || 'Авто',
-                                translationId: '',
-                                iframeUrl: '',
-                                quality: ''
-                            };
-                            setVoiceLabel();
-                            Lampa.Controller.toggle('content');
-                        }
-                    });
-                },
-                function (e) {
-                    status.text('Озвучка: ' + errText(e));
-                    notify('MnogoTV: ' + errText(e));
+            if (!sourceBusy) status.text('Загрузка серий…');
+            var requestedSeason = season;
+            getEpisodes(movie, requestedSeason, function (items) {
+                if (destroyed || generation !== listGeneration) return;
+                episodes = items.slice().sort(function (a, b) { return Number(a.episode_number) - Number(b.episode_number); });
+                if (!sourceBusy) status.text(source ? providerTitle + ' • подключено • ↓ Серии • ↑ Кнопки' : 'Выберите источник вверху карточки.');
+                episodes.forEach(function (ep) { makeRow(ep, parseInt(ep.episode_number || 0, 10), requestedSeason); });
+                refreshProgress();
+                // Refresh the controller collection after asynchronous rendering.
+                // Preserve a menu/dialog focus if it is currently open.
+                var enabled = Lampa.Controller.enabled && Lampa.Controller.enabled();
+                if (!sourceBusy && enabled && enabled.name === 'content') {
+                    zone = source ? 'rows' : 'bar';rowIndex = 0;focusNode(source ? rowNodes[0] : sourceButton[0]);
                 }
-            );
-        }
-
-
-        function updateVeoEpisodeBadges() {
-            var type = String(source && source.type || '').toLowerCase();
-            if (!(type === 'veoveo' || type === 'veo' || type.indexOf('veoveo') >= 0)) return;
-
-            getVeoCatalog(
-                source,
-                imdb,
-                function (result) {
-                    (result.catalog || []).forEach(function (catalogItem) {
-                        var sNum = catalogItem && catalogItem.season ? parseInt(catalogItem.season.order, 10) : 0;
-                        var eNum = parseInt(catalogItem && (catalogItem.order || catalogItem.episode || catalogItem.episodeNumber), 10);
-                        if (Number(sNum) !== Number(season) || !eNum) return;
-
-                        var q = veoQualitySummary(catalogItem);
-                        var row = scroll.render().find('.mnogotv-v318__episode[data-episode="' + eNum + '"]');
-                        if (row.length) row.find('.mnogotv-v318__quality').text(q);
-                    });
-                },
-                function () {}
-            );
-        }
-
-        function chooseSource() {
-            var items = [];
-            sources.forEach(function (s) {
-                var type =
-                    String(
-                        s && s.type || ''
-                    ).toLowerCase();
-
-                var suffix = '';
-
-                if (
-                    type === 'turbo'
-                ) {
-                    suffix =
-                        ' • экспериментальный, пульт не работает';
-                }
-                else if (
-                    type === 'collaps'
-                ) {
-                    suffix =
-                        ' • HLS через relay';
-                }
-                else if (!s.supported) {
-                    suffix =
-                        ' • пока без адаптера';
-                }
-                else if (
-                    type === 'alloha'
-                ) {
-                    suffix =
-                        ' • работает';
-                }
-                else if (
-                    type === 'veoveo' ||
-                    type === 'veo' ||
-                    type.indexOf('veoveo') >= 0
-                ) {
-                    suffix =
-                        ' • рекомендуется';
-                }
-
-                items.push({
-                    title:
-                        (s.name || s.type || 'Источник') +
-                        suffix,
-                    source: s,
-                    selected: source === s
-                });
+            }, function (e) {
+                if (!destroyed && generation === listGeneration) status.text('Ошибка серий: ' + errText(e));
             });
-            items.push({ title: '← Назад', goBack: true });
-
-            Lampa.Select.show({
-                title: 'MnogoTV — источник',
-                items: items,
-                onBack: function () { Lampa.Controller.toggle('content'); },
-                onSelect: function (item) {
-                    if (item.goBack) { Lampa.Controller.toggle('content'); return; }
-                    if (!item.source.supported) {
-                        var disabledType =
-                            sourceType(
-                                item.source
-                            );
-
-                        var reason =
-                            disabledType === 'turbo'
-                                ? 'Turbo открывается, но его iframe не управляется пультом и не принимает выбранную серию.'
-                                : (
-                                    disabledType === 'collaps'
-                                        ? 'Collaps на этой приставке даёт manifestLoadError. Нужен отдельный proxy/native адаптер.'
-                                        : (
-                                            (
-                                                item.source.name ||
-                                                item.source.type ||
-                                                'Источник'
-                                            ) +
-                                            ' пока без отдельного адаптера'
-                                        )
-                                );
-
-                        notify(
-                            'MnogoTV: ' +
-                            reason
-                        );
-
-                        Lampa.Controller.toggle(
-                            'content'
-                        );
-
-                        return;
-                    }
-                    source = item.source;
-                    qualityLabel = 'Авто';
-                    resetVoice();
-                    status.text('');
-                    setSourceLabel();
-                    Lampa.Controller.toggle('content');
-                    renderEpisodes();
-                }
-            });
-        }
-
-        function chooseQuality() {
-            var type =
-                String(
-                    source &&
-                    source.type ||
-                    ''
-                ).toLowerCase();
-
-            if (
-                !source ||
-                !(
-                    type === 'veoveo' ||
-                    type === 'veo' ||
-                    type.indexOf('veoveo') >= 0
-                )
-            ) {
-                notify(
-                    'MnogoTV: выбор качества доступен для VeoVeo'
-                );
-                return;
-            }
-
-            var ep =
-                currentFocus ||
-                episodes[0];
-
-            if (!ep) {
-                notify(
-                    'MnogoTV: сначала выбери серию'
-                );
-                return;
-            }
-
-            status.text(
-                'VeoVeo: получаю варианты качества…'
-            );
-
-            getVeoQualityOptions(
-                source,
-                imdb,
-                season,
-                parseInt(
-                    ep.episode_number ||
-                    0,
-                    10
-                ),
-                function (options) {
-                    status.text('');
-
-                    var items = [{
-                        title: 'Авто',
-                        quality: 'Авто',
-                        selected:
-                            qualityLabel === 'Авто'
-                    }];
-
-                    options.forEach(function (opt) {
-                        items.push({
-                            title: opt.label,
-                            quality: opt.label,
-                            selected:
-                                qualityLabel ===
-                                opt.label
-                        });
-                    });
-
-                    items.push({
-                        title: '← Назад',
-                        goBack: true
-                    });
-
-                    Lampa.Select.show({
-                        title: 'VeoVeo — качество',
-                        items: items,
-
-                        onBack: function () {
-                            Lampa.Controller.toggle('content');
-                        },
-
-                        onSelect: function (item) {
-                            if (item.goBack) {
-                                Lampa.Controller.toggle('content');
-                                return;
-                            }
-
-                            qualityLabel =
-                                item.quality ||
-                                'Авто';
-                            resetVoice();
-
-                            setSourceLabel();
-
-                            Lampa.Controller.toggle('content');
-                        }
-                    });
-                },
-                function (e) {
-                    status.text(
-                        'Качество: ' +
-                        errText(e)
-                    );
-
-                    notify(
-                        'MnogoTV: ' +
-                        errText(e)
-                    );
-                }
-            );
         }
 
         function chooseSeason() {
-            var items = seasons.map(function (n) { return { title: 'Сезон ' + n, season: n, selected: Number(n) === Number(season) }; });
-            items.push({ title: '← Назад', goBack: true });
-            Lampa.Select.show({
-                title: 'MnogoTV — сезон',
-                items: items,
-                onBack: function () { Lampa.Controller.toggle('content'); },
-                onSelect: function (item) {
-                    if (item.goBack) { Lampa.Controller.toggle('content'); return; }
-                    season = item.season;
-                    resetVoice();
-                    setSeasonLabel();
+            getSeasons(movie, function (seasons) {
+                var items = seasons.map(function (n) { return { title: 'Сезон ' + n, season: n, selected: n === season }; });
+                items.push({ title: '← Назад', back: true });
+                Lampa.Select.show({ title: providerTitle + ' — сезон', items: items, onBack: function () { Lampa.Controller.toggle('content'); }, onSelect: function (item) {
+                    if (!item.back) { season = item.season; seasonButton.text('Сезон ' + season); voice = { index: -1, label: 'Авто' }; renderList(); }
                     Lampa.Controller.toggle('content');
-                    renderEpisodes();
+                }});
+            }, function (e) { status.text(errText(e)); });
+        }
+
+        function chooseSource() {
+            var check = ++sourceCheckSequence;
+            sourceBusy = false;
+            showSourceMenu(movie, imdb, {
+                provider: source ? provider : null, mode: formatMode,
+                alive: function () { return !destroyed && check === sourceCheckSequence; },
+                back: function () { Lampa.Controller.toggle('content'); },
+                onPending: function (item) {
+                    sourceBusy = true;
+                    status.text('Подключение к ' + item.title + '…');
+                    Lampa.Controller.toggle('content');
+                },
+                onError: function (error) {
+                    sourceBusy = false;
+                    status.text('Не удалось подключиться: ' + errText(error));
+                },
+                onReady: function (item, nextSource, id) {
+                    sourceBusy = false;
+                    providerViews[provider] = { voice: voice, dashMode: dashMode, playerMode: playerMode };
+                    if (provider !== item.provider) {
+                        playbackSequence++;
+                        adapter.cleanup('source-switch');
+                        if (currentPlayback === adapter) currentPlayback = null;
+                    }
+                    provider = item.provider; adapter = adapters[provider];
+                    providerTitle = provider === 'alloha' ? 'Alloha' : provider === 'turbo' ? 'Turbo' : provider === 'veoveo' ? 'VeoVeo' : 'Collaps';
+                    source = nextSource; imdb = id; formatMode = item.mode;
+                    var saved = providerViews[provider];
+                    voice = saved ? saved.voice : {index:-1,label:'Авто'};
+                    dashMode = saved ? saved.dashMode : 'default';
+                    playerMode = saved && saved.playerMode || 'internal';
+                    playerButton.text('Плеер: ' + (playerMode === 'external' ? 'внешний' : 'встроенный'));
+                    sourceButton.text('Источник: ' + item.title);
+                    status.text(providerTitle + ' готов');
+                    root.find('.mnogotv-v5__provider').text('MnogoTV • ' + providerTitle);
+                    renderList();
+                    Lampa.Controller.toggle('content');
+                },
+                selectCurrent: function (item) {
+                    formatMode = item.mode; dashMode = 'default';
+                    sourceButton.text('Источник: ' + item.title);
+                    status.text('Запустите фильм или серию. Доступность потока проверяется при запуске.');
+                    Lampa.Controller.toggle('content');
                 }
             });
         }
-
-        function closeProviderPlayer() {
-            try {
-                if (providerLayer) {
-                    providerLayer.remove();
+        playerButton.on('hover:enter click', function () {
+            Lampa.Select.show({title:'Плеер',items:[
+                {title:'Встроенный — Lampa',mode:'internal',selected:playerMode === 'internal'},
+                {title:'Внешний',mode:'external',selected:playerMode === 'external',
+                 subtitle:'Запуск средствами устройства. Совместимость потока зависит от плеера.'}
+            ],onBack:function(){Lampa.Controller.toggle('content');},onSelect:function(item){
+                if (Lampa.Select.close) Lampa.Select.close();
+                if (!playbackTarget(item.mode)) status.text('На этом устройстве внешний плеер недоступен.');
+                else {
+                    playerMode = item.mode;
+                    playerButton.text('Плеер: ' + (playerMode === 'external' ? 'внешний' : 'встроенный'));
+                    status.text(playerMode === 'external' ? 'Следующий запуск — во внешнем плеере устройства.' : 'Следующий запуск — во встроенном плеере Lampa.');
                 }
-            } catch (e) {}
-
-            providerLayer = null;
-            providerFrame = null;
-
-            try {
                 Lampa.Controller.toggle('content');
-            } catch (e2) {}
-        }
-
-        function providerPlayerUrl(ep) {
-            var base =
-                voiceChoice &&
-                voiceChoice.iframeUrl
-                    ? voiceChoice.iframeUrl
-                    : (
-                        source &&
-                        source.iframeUrl ||
-                        ''
-                    );
-
-            if (!base) return '';
-
-            var type =
-                sourceType(source);
-
-            /*
-             * Turbo:
-             * iframeUrl из Kinobox уже готовый opaque URL.
-             * Ничего к нему не дописываем.
-             *
-             * У Turbo параметры season/episode Kinobox не документирует,
-             * и именно наша дописка превращала URL в 404.
-             *
-             * Collaps direct HLS на этой приставке стабильно ловил
-             * manifestLoadError, поэтому используем родной iframe.
-             */
-            if (
-                type === 'turbo'
-            ) {
-                return base;
-            }
-
-            if (type === 'alloha') {
-                var epNum =
-                    isSeries(movie)
-                        ? parseInt(
-                            ep &&
-                            ep.episode_number ||
-                            0,
-                            10
-                        )
-                        : 0;
-
-                var params = {
-                    autoplay: 1
-                };
-
-                /*
-                 * Официальные iframe params Alloha:
-                 * episode, translation, autoplay.
-                 * Параметр season отсутствует — больше его не передаём.
-                 */
-                if (epNum > 0) {
-                    params.episode =
-                        epNum;
-                }
-
-                /*
-                 * Если выбран translation iframe, он уже относится
-                 * к этой озвучке. Для base iframe можно передать ID.
-                 */
-                if (
-                    voiceChoice &&
-                    voiceChoice.translationId &&
-                    !voiceChoice.iframeUrl
-                ) {
-                    params.translation =
-                        voiceChoice.translationId;
-                }
-
-                return appendUrlParams(
-                    base,
-                    params
-                );
-            }
-
-            return base;
-        }
-
-
-        function openProviderPlayer(ep) {
-            var url =
-                providerPlayerUrl(ep);
-
-            if (!url) {
-                notify(
-                    'MnogoTV: iframe источника не найден'
-                );
-                return;
-            }
-
-            closeProviderPlayer();
-
-            providerLayer = $(
-                '<div class="mnogotv-v318__provider-layer">' +
-                    '<div class="mnogotv-v318__provider-hint">' +
-                        (
-                            source &&
-                            (
-                                source.name ||
-                                source.type
-                            ) ||
-                            'Источник'
-                        ) +
-                        ' • Back — назад' +
-                    '</div>' +
-                    '<iframe class="mnogotv-v318__provider-frame" ' +
-                        'allow="autoplay; fullscreen; picture-in-picture" ' +
-                        'allowfullscreen ' +
-                        'referrerpolicy="origin" ' +
-                        'frameborder="0" tabindex="0"></iframe>' +
-                '</div>'
-            );
-
-            providerFrame =
-                providerLayer.find(
-                    '.mnogotv-v318__provider-frame'
-                );
-
-            providerFrame.attr(
-                'src',
-                url
-            );
-
-            $('body').append(
-                providerLayer
-            );
-
-            Lampa.Controller.add(
-                'mnogotv_provider_web',
-                {
-                    toggle: function () {},
-                    up: function () {},
-                    down: function () {},
-                    left: function () {},
-                    right: function () {},
-                    back: closeProviderPlayer,
-                    menu: closeProviderPlayer,
-                    escape: closeProviderPlayer
-                }
-            );
-
-            Lampa.Controller.toggle(
-                'mnogotv_provider_web'
-            );
-
-            setTimeout(function () {
-                try {
-                    providerFrame[0].focus();
-                } catch (e) {}
-            }, 150);
-        }
-
-        function playerMenu(ep) {
-            /*
-             * v3.19.3 diagnostic: на Android Collaps должен реально
-             * показывать меню выбора плеера. Раньше этот special-case
-             * безусловно отправлял long-OK обратно в Lampa, поэтому
-             * тест внешнего Android-плеера фактически не выполнялся.
-             * На не-Android сохраняем прежнее поведение Collaps -> Lampa.
-             */
-            if (
-                source &&
-                sourceType(source) === 'collaps'
-            ) {
-                var isAndroidForCollaps = false;
-                try {
-                    isAndroidForCollaps = Boolean(
-                        Lampa.Platform &&
-                        Lampa.Platform.is &&
-                        Lampa.Platform.is('android')
-                    );
-                } catch (eCollapsPlatform) {}
-
-                if (!isAndroidForCollaps) {
-                    playEpisode(ep, 'lampa');
-                    return;
-                }
-            }
-
-            if (
-                source &&
-                isWebProviderSource(source)
-            ) {
-                playEpisode(ep, '');
-                return;
-            }
-
-            if (!Lampa.Platform || !Lampa.Platform.is || !Lampa.Platform.is('android')) {
-                playEpisode(ep, '');
-                return;
-            }
-            Lampa.Select.show({
-                title: 'Играть',
-                items: [
-                    { title: 'По умолчанию', runas: '' },
-                    { title: 'Android / внешний плеер', runas: 'android' },
-                    { title: 'Lampa', runas: 'lampa' }
-                ],
-                onBack: function () { Lampa.Controller.toggle('content'); },
-                onSelect: function (item) {
-                    Lampa.Controller.toggle('content');
-                    playEpisode(ep, item.runas || '');
-                }
-            });
-        }
-
-        function playEpisode(ep, runas) {
-            if (!source) { notify('MnogoTV: источник не выбран'); return; }
-
-            if (isWebProviderSource(source)) {
-                status.text(
-                    'Открываем ' +
-                    (source.name || source.type || 'источник') +
-                    '…'
-                );
-
-                openProviderPlayer(ep);
-
-                setTimeout(function () {
-                    status.text('');
-                }, 400);
-
-                return;
-            }
-
-            var epNum = isSeries(movie) ? parseInt(ep.episode_number || 0, 10) : null;
-
-            /*
-             * v3.19.4: Collaps больше не принуждается к Lampa на Android.
-             * Это важно: выбор "Android / внешний" в верхнем меню должен
-             * реально дойти до Lampa.Player.runas('android').
-             * На LG/webOS сохраняем прежнее поведение: Collaps -> Lampa.
-             */
-            var forceCollapsLampa = false;
-            if (sourceType(source) === 'collaps') {
-                var isAndroidCollapsPlay = false;
-                try {
-                    isAndroidCollapsPlay = Boolean(
-                        Lampa.Platform &&
-                        Lampa.Platform.is &&
-                        Lampa.Platform.is('android')
-                    );
-                } catch (eCollapsPlayPlatform) {}
-                forceCollapsLampa = !isAndroidCollapsPlay;
-            }
-
-            status.text('Получаем поток ' + (source.name || source.type || '') + '…');
-            resolveSource(
-                source,
-                imdb,
-                isSeries(movie) ? season : null,
-                epNum,
-                qualityLabel,
-                function (resolved) {
-                var actualRunas = runas;
-
-                if (!actualRunas) {
-                    if (forceCollapsLampa) {
-                        actualRunas = 'lampa';
-                    }
-                    else if (playerMode === 'lampa') {
-                        actualRunas = 'lampa';
-                    }
-                    else if (playerMode === 'android') {
-                        actualRunas = 'android';
-                    }
-                    else {
-                        try {
-                            if (
-                                Lampa.Platform &&
-                                Lampa.Platform.is &&
-                                Lampa.Platform.is('android') &&
-                                (resolved.relayReady || resolved.externalDirect)
-                            ) {
-                                actualRunas = 'android';
-                            }
-                            else {
-                                actualRunas = 'lampa';
-                            }
-                        } catch (e) {
-                            actualRunas = 'lampa';
-                        }
-                    }
-                }
-
-                if (
-                    resolved.quality &&
-                    resolved.quality !== 'Вариант'
-                ) {
-                    qualityLabel =
-                        resolved.quality;
-
-                    setSourceLabel();
-                }
-
-                status.text(
-                    (resolved.provider || 'Источник') +
-                    ' • ' +
-                    (
-                        resolved.quality ||
-                        qualityLabel ||
-                        'Авто'
-                    ) +
-                    ' • ' +
-                    (resolved.resolvedBy || 'resolver')
-                );
-
-                playResolved(
-                    movie,
-                    isSeries(movie) ? season : null,
-                    epNum,
-                    ep,
-                    source,
-                    resolved,
-                    actualRunas,
-                    voiceChoice
-                );
-            }, function (e) {
-                status.text('Ошибка: ' + errText(e));
-                notify('MnogoTV: ' + errText(e));
-            });
-        }
-
-        function makeEpisode(ep) {
-            var num = parseInt(ep.episode_number || 0, 10);
-            var title = ep.name || ('Серия ' + num);
-            var item = $('<div class="mnogotv-v318__episode selector" data-episode="' + num + '"><div class="mnogotv-v318__thumb"><img><div class="mnogotv-v318__num"></div></div><div class="mnogotv-v318__body"><div class="mnogotv-v318__title-row"><div class="mnogotv-v318__title"></div><div class="mnogotv-v318__duration"></div></div><div class="mnogotv-v318__line"></div><div class="mnogotv-v318__meta"><span class="mnogotv-v318__rating"></span><span>  •  </span><span class="mnogotv-v318__date"></span><span>  •  </span><span class="mnogotv-v318__quality">HLS</span></div></div></div>');
-
-            item.find('.mnogotv-v318__num').text(('0' + num).slice(-2));
-            item.find('.mnogotv-v318__title').text(title);
-            item.find('.mnogotv-v318__duration').text(episodeRuntime(ep, movie));
-            item.find('.mnogotv-v318__rating').text('★ ' + (ep.vote_average ? parseFloat(ep.vote_average).toFixed(1) : '—'));
-            item.find('.mnogotv-v318__date').text(episodeDate(ep.air_date));
-
-            var image = episodeImage(ep);
-            if (image) item.find('img').attr('src', image);
-            else item.find('img').hide();
-
-            item.on('hover:focus', function (e) {
-                last = e.target;
-                currentFocus = ep;
-                updateHeadline(ep);
-                try { scroll.update(item, true); } catch (err) {}
-            });
-
-            item.on('hover:enter click', function () { playEpisode(ep, ''); });
-            item.on('hover:long', function () { playerMenu(ep); });
-            return item;
-        }
-
-        function makeMovieItem() {
-            var item = $('<div class="mnogotv-v318__episode selector mnogotv-v318__movie"><div class="mnogotv-v318__thumb"><img><div class="mnogotv-v318__num">▶</div></div><div class="mnogotv-v318__body"><div class="mnogotv-v318__title">Смотреть фильм</div><div class="mnogotv-v318__line"></div><div class="mnogotv-v318__meta"></div></div></div>');
-            var meta = [];
-            var year = (movie && (movie.release_date || movie.first_air_date) || '').slice(0, 4);
-            meta.push(source ? (source.name || source.type || 'MnogoTV') : 'MnogoTV');
-            if (movie && movie.vote_average) meta.push('★ ' + parseFloat(movie.vote_average).toFixed(1));
-            if (year) meta.push(year);
-            item.find('.mnogotv-v318__meta').text(meta.join('  •  '));
-            var image = movieImage(movie);
-            if (image) item.find('img').attr('src', image); else item.find('img').hide();
-
-            item.on('hover:focus', function (e) {
-                last = e.target;
-                currentFocus = null;
-                updateHeadline(null);
-                try { scroll.update(item, true); } catch (err) {}
-            });
-
-            item.on('hover:enter click', function () { playEpisode({}, ''); });
-            item.on('hover:long', function () { playerMenu({}); });
-            return item;
-        }
-
-        function renderMovie() {
-            scroll.clear();
-            var item = makeMovieItem();
-            scroll.append(item);
-            last = item[0];
-            updateHeadline(null);
-            setTimeout(function () {
-                try {
-                    Lampa.Controller.toggle('content');
-                    Lampa.Controller.collectionFocus(item[0], root);
-                } catch (e) {}
-            }, 0);
-        }
-
-        function renderEpisodes() {
-            scroll.clear();
-            currentFocus = null;
-            last = sourceButton[0];
-            if (!isSeries(movie)) { renderMovie(); return; }
-            status.text('Загрузка серий…');
-            getEpisodes(movie, season, function (list) {
-                episodes = list;
-                scroll.clear();
-                status.text('');
-                if (!episodes.length) {
-                    scroll.append($('<div class="mnogotv-v318__empty">Серии не найдены</div>'));
-                    updateHeadline(null);
-                    return;
-                }
-                currentFocus = episodes[0];
-                updateHeadline(currentFocus);
-                episodes.forEach(function (ep) { scroll.append(makeEpisode(ep)); });
-                updateVeoEpisodeBadges();
-                try { Lampa.Controller.toggle('content'); } catch (e) {}
-            }, function (e) {
-                status.text('Ошибка: ' + errText(e));
-            });
-        }
-
-        function initData() {
-            status.text('Подключение к MnogoTV…');
-            getImdb(movie, function (id) {
-                imdb = id;
-                enrichMovieDetails();
-                getSources(imdb, function (list) {
-                    sources = list;
-                    source = null;
-
-                    for (
-                        var i = 0;
-                        i < sources.length;
-                        i++
-                    ) {
-                        if (
-                            sources[i] &&
-                            sources[i].supported &&
-                            sources[i].preferred
-                        ) {
-                            source = sources[i];
-                            break;
-                        }
-                    }
-
-                    if (!source) {
-                        for (
-                            var j = 0;
-                            j < sources.length;
-                            j++
-                        ) {
-                            if (
-                                sources[j] &&
-                                sources[j].supported
-                            ) {
-                                source = sources[j];
-                                break;
-                            }
-                        }
-                    }
-                    setSourceLabel();
-                    if (!source) { status.text('Нет поддерживаемых источников'); return; }
-                    if (isSeries(movie)) {
-                        getSeasons(movie, function (listSeasons) {
-                            seasons = listSeasons;
-                            season = seasons[0] || 1;
-                            setSeasonLabel();
-                            status.text('');
-                            renderEpisodes();
-                        }, function (e) { status.text('Ошибка сезонов: ' + errText(e)); });
-                    } else {
-                        seasonButton.hide();
-                        updateScrollSpace();
-                        status.text('');
-                        renderMovie();
-                    }
-                }, function (e) {
-                    status.text('Resolver: ' + errText(e));
-                });
-            }, function (e) { status.text('IMDb: ' + errText(e)); });
-        }
-
-        sourceButton.on('hover:focus', function (e) {
-            last = e.target;
+            }});
         });
-
-        seasonButton.on('hover:focus', function (e) {
-            last = e.target;
-        });
-
-        sourceButton.on(
-            'hover:enter click',
-            chooseSource
-        );
-
-        sourceButton.on(
-            'hover:long',
-            chooseQuality
-        );
-
-        seasonButton.on(
-            'hover:enter click',
-            chooseSeason
-        );
-
-
-        voiceButton.on('hover:focus', function (e) { last = e.target; });
-        playerButton.on('hover:focus', function (e) { last = e.target; });
-        voiceButton.on('hover:enter click', chooseVoice);
-        playerButton.on('hover:enter click', choosePlayer);
+        sourceButton.on('hover:enter click', chooseSource);
+        seasonButton.on('hover:focus', function (e) { last = e.target; }).on('hover:enter click', chooseSeason);
 
         this.create = function () { return this.render(); };
+        this.render = function () { return root; };
         this.start = function () {
-            if (Lampa.Activity.active().activity !== this.activity) return;
+            document.body.classList.add('mnogotv-v5-page');
+            var art = imageUrl(movie.backdrop_path || movie.poster_path, 'w300');
+            if (art && Lampa.Background && Lampa.Background.change) Lampa.Background.change(art);
             if (!initialized) {
-                initialized = true;
-                addCss();
-                renderInfoPanel();
-                enrichMovieDetails(function () {
-                    try {
-                        var bg2 = Lampa.Utils.cardImgBackgroundBlur(movie);
-                        if (bg2) Lampa.Background.immediately(bg2);
-                    } catch (eBg) {}
+                initialized = true; addCss();
+                bar.append(sourceButton);
+                if (isSeries(movie)) bar.append(seasonButton); else seasonButton.hide();
+                bar.append(playerButton).append(diagnosticButton);
+
+                var main = $('<div class="mnogotv-v5__main"></div>');
+                main.append(bar).append(status).append(list);
+                root.append(sidebar()).append(main);
+                bar.find('.selector').each(function (index) {
+                    var node = this; buttonNodes.push(node);
+                    $(node).on('hover:focus', function () { zone = 'bar'; buttonIndex = index; last = node; });
                 });
-                setVoiceLabel();
-                setPlayerLabel();
-
-                toolbar.append(sourceButton);
-                toolbar.append(seasonButton);
-                toolbar.append(voiceButton);
-                toolbar.append(playerButton);
-
-                topPanel.append(toolbar);
-                topPanel.append(headline);
-                topPanel.append(status);
-
-                scroll.render().addClass('mnogotv-v318__scroll');
-                try { scroll.body().addClass('mnogotv-v318__list'); } catch (e0) {}
-
-                contentPanel.append(topPanel);
-                contentPanel.append(scroll.render());
-                layout.append(infoPanel);
-                layout.append(contentPanel);
-                root.append(layout);
-
-                updateScrollSpace();
-                resizeHandler = function () { updateScrollSpace(); };
-                window.addEventListener('resize', resizeHandler, false);
-
-                try {
-                    var bg = Lampa.Utils.cardImgBackgroundBlur(movie);
-                    if (bg) Lampa.Background.immediately(bg);
-                } catch (e) {}
-                initData();
+                renderList();
             }
+            refreshProgress();
             Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(root);
-                    Lampa.Controller.collectionFocus(last || sourceButton[0], root);
-                },
-                up: function () {
-                    if (Navigator.canmove('up')) {
-                        Navigator.move('up');
-                    }
-                    else {
-                        /*
-                         * Штатный переход в верхнюю панель Lampa.
-                         * Обратно head возвращается именно в controller 'content'.
-                         */
-                        Lampa.Controller.toggle('head');
-                    }
-                },
-                down: function () {
-                    if (Navigator.canmove('down')) Navigator.move('down');
-                },
-                left: function () {
-                    if (Navigator.canmove('left')) Navigator.move('left');
-                    else Lampa.Controller.toggle('menu');
-                },
-                right: function () {
-                    if (Navigator.canmove('right')) Navigator.move('right');
-                },
-                back: function () {
-                    try { Lampa.Activity.backward(); } catch (e) {}
-                },
-                menu: function () {
-                    try { Lampa.Activity.backward(); } catch (e) {}
-                },
-                escape: function () {
-                    try { Lampa.Activity.backward(); } catch (e) {}
-                }
+                toggle: function () { refreshProgress(); focusNode(last || rowNodes[0] || buttonNodes[0]); },
+                up: function () { navigate('up'); }, down: function () { navigate('down'); },
+                left: function () { navigate('left'); }, right: function () { navigate('right'); },
+                back: function () { Lampa.Activity.backward(); }
             });
             Lampa.Controller.toggle('content');
         };
-        this.render = function () { return root; };
         this.pause = function () {};
-        this.stop = function () {};
-        this.destroy = function () {
-            try {
-                if (resizeHandler) window.removeEventListener('resize', resizeHandler, false);
-            } catch (e) {}
-
-            try {
-                if (providerLayer) providerLayer.remove();
-            } catch (eProvider) {}
-
-            providerLayer = null;
-            providerFrame = null;
-
-            try { scroll.destroy(); } catch (e2) {}
-            root.remove();
-        };
+        this.stop = function () { document.body.classList.remove('mnogotv-v5-page'); };
+        this.destroy = function () { document.body.classList.remove('mnogotv-v5-page'); destroyed = true; listGeneration++; playbackSequence++; adapter.cleanup('component-destroy'); root.remove(); };
     }
 
-    function registerComponent() {
-        try {
-            if (!Lampa.Component || typeof Lampa.Component.add !== 'function') return false;
-            try { Lampa.Component.add(COMPONENT, MnogoComponent); } catch (e) {}
-            return true;
-        } catch (e2) { return false; }
-    }
-
-    function openComponent(movie) {
-        if (!registerComponent()) { notify('MnogoTV: Lampa.Component недоступен'); return; }
-        Lampa.Activity.push({ title: 'MnogoTV', component: COMPONENT, movie: movie, page: 1, noinfo: true });
-    }
+    function register() { try { Lampa.Component.add(COMPONENT, Component); return true; } catch (e) { log(e); return false; } }
 
     function addButton(e) {
         if (!e || e.type !== 'complite') return;
-        try {
-            var root = e.object && e.object.activity && e.object.activity.render ? e.object.activity.render() : null;
-            if (!root || !root.length) return;
-            if (root.find('.mnogotv-v318-button').length) return;
-            var movie = (e.data && e.data.movie) || e.movie || e.object.card || {};
+        var page = e.object && e.object.activity && e.object.activity.render ? e.object.activity.render() : null;
+        if (!page || !page.length || page.find('.mnogotv-v5-button').length) return;
+        var movie = e.data && e.data.movie || e.movie || e.object && e.object.card || {};
+        // The launcher never depends on resolver availability or a provider probe.
+        var button = $('<div class="full-start__button selector view--online mnogotv-v5-button" data-subtitle="MnogoTV"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 8L17 12L10 16Z" fill="currentColor"/></svg><span>MnogoTV</span></div>');
+        button.on('hover:enter click', function () {
+            Lampa.Activity.push({title:'MnogoTV',component:COMPONENT,movie:movie,page:1,noinfo:true});
+        });
+        var box = page.find('.full-start-new__buttons, .full-start__buttons').first();
+        var torrent = page.find('.view--torrent').first();
+        if (torrent.length) torrent.after(button); else if (box.length) box.append(button);
+    }
 
-            try {
-                var cardOverview =
-                    extractOverviewFromFull(
-                        root
-                    );
-
-                if (cardOverview) {
-                    movie.__mnogotv_overview =
-                        cardOverview;
-
-                    if (
-                        !String(
-                            movie.overview ||
-                            ''
-                        ).trim()
-                    ) {
-                        movie.overview =
-                            cardOverview;
-                    }
+    function showSourceMenu(movie, imdb, options) {
+        options = options || {};
+        var serial = 0, closed = false, menuVisible = true;
+        var items = [
+            {title:'Alloha-HLS (тест)', provider:'alloha', mode:'hls'},
+            {title:'Turbo-HLS', provider:'turbo', mode:'hls'},
+            {title:'VeoVeo-HLS', provider:'veoveo', mode:'hls'},
+            {title:'Collaps-HLS', provider:'collaps', mode:'hls'},
+            {title:'Collaps-AV1', provider:'collaps', mode:'av1'},
+            {title:'Collaps-VP9', provider:'collaps', mode:'vp9'}
+        ];
+        items.forEach(function(item) {
+            item.selected = item.provider === options.provider && item.mode === options.mode;
+        });
+        Lampa.Select.show({
+            title: 'MnogoTV — источники', items: items,
+            onBack: function () {
+                // Select.close also invokes onBack during a programmatic close.
+                if (!menuVisible) return;
+                menuVisible = false; closed = true; serial++;
+                if (options.back) options.back();
+            },
+            onSelect: function (item) {
+                var ticket = ++serial;
+                function alive() { return !closed && ticket === serial && (!options.alive || options.alive()); }
+                function close(keepRequest) {
+                    if (!keepRequest) closed = true;
+                    var wasVisible = menuVisible;
+                    menuVisible = false;
+                    if (wasVisible && Lampa.Select.close) Lampa.Select.close();
                 }
-            } catch (eOverview) {}
+                if (item.provider === options.provider && options.selectCurrent) {
+                    close(); options.selectCurrent(item); return;
+                }
+                if (options.onPending) { close(true); options.onPending(item); }
+                function failed(error) {
+                    if (!alive()) return;
+                    if (options.onError) options.onError(error); else notify(errText(error));
+                }
+                function lookup(id) {
+                    if (!alive()) return;
+                    if (!id) return failed(new Error('Не найден IMDb ID фильма/сериала'));
+                    function ready(source) {
+                        if (!alive()) return;
+                        close();
+                        if (options.onReady) { options.onReady(item, source, id); return; }
+                        Lampa.Activity.push({title:'MnogoTV', component:COMPONENT,
+                            provider:item.provider, formatMode:item.mode,
+                            movie:movie, imdb:id, source:source, page:1, noinfo:true});
+                    }
+                    if (item.provider === 'alloha') checkAllohaSource(id, ready, failed);
+                    else if (item.provider === 'turbo') checkTurboSource(id, ready, failed);
+                    else if (item.provider === 'veoveo') checkVeoSource(id, ready, failed);
+                    else findCollapsSource(id, function(source) {
+                        if (!alive()) return;
+                        adapters.collaps.availability({source:source, imdb:id}, function(available) {
+                            if (available) ready(source);
+                            else failed(new Error('Collaps: доступное видео не найдено'));
+                        }, failed);
+                    }, failed);
+                }
+                if (imdb) lookup(imdb); else getImdb(movie, lookup, failed);
+            }
+        });
+    }
 
-            var button = $('<div class="full-start__button selector view--online mnogotv-v318-button" data-subtitle="MnogoTV"><svg class="button__icon" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/><path d="M10 9l5 3-5 3V9z" fill="currentColor"/></svg><span>MnogoTV</span></div>');
-            button.on('hover:enter click', function () { openComponent(movie); });
-            var torrent = root.find('.view--torrent').first();
-            var online = root.find('.view--online').last();
-            var box = root.find('.full-start-new__buttons, .full-start__buttons').first();
-            if (torrent.length) torrent.after(button);
-            else if (online.length) online.after(button);
-            else if (box.length) box.append(button);
-        } catch (err) { log('addButton error', err); }
+    function checkVeoSource(imdb, ok, fail) {
+        requestJson(resolverUrl('/sources',{imdb:imdb}),function(response){
+            var found = null;
+            (response && Array.isArray(response.sources) ? response.sources : []).some(function(source){
+                var type = String(source && source.type || '').trim().toLowerCase();
+                if (type === 'veo' || type.indexOf('veoveo') >= 0) { found = source; return true; } return false;
+            });
+            if (!found) return fail(new Error('VeoVeo: resolver не вернул источник для этого видео'));
+            var source = {}; Object.keys(found).forEach(function(k){source[k]=found[k];});
+            source.kinopoiskId = response.kp || '';
+            adapters.veoveo.availability({source:source,imdb:imdb},function(available){
+                if (!available) return fail(new Error('VeoVeo: каталог не содержит доступного видео'));
+                ok(source);
+            },fail);
+        },function(){fail(new Error('VeoVeo: не удалось получить список источников'));});
+    }
+
+    function checkTurboSource(imdb, ok, fail) {
+        requestJson(resolverUrl('/sources',{imdb:imdb}),function(response){
+            var found = null;
+            (response && Array.isArray(response.sources) ? response.sources : []).some(function(source){
+                if (String(source && source.type || '').trim().toLowerCase() === 'turbo') { found=source; return true; }
+                return false;
+            });
+            if (!found) return fail(new Error('Turbo: источник не найден для этого видео'));
+            var source={};Object.keys(found).forEach(function(k){source[k]=found[k];});
+            adapters.turbo.availability({source:source,imdb:imdb},function(available){
+                if(available)ok(source);else fail(new Error('Turbo: доступное видео не найдено'));
+            },fail);
+        },function(){fail(new Error('Turbo: не удалось получить список источников'));});
+    }
+
+    function checkAllohaSource(imdb, ok, fail) {
+        requestJson(resolverUrl('/sources',{imdb:imdb}),function(response){
+            var found = null;
+            (response && Array.isArray(response.sources) ? response.sources : []).some(function(source){
+                if (String(source && source.type || '').trim().toLowerCase() === 'alloha') { found=source; return true; }
+                return false;
+            });
+            if (!found) return fail(new Error('Alloha: источник не найден для этого видео'));
+            var source={};Object.keys(found).forEach(function(k){source[k]=found[k];});
+            adapters.alloha.availability({source:source,imdb:imdb},function(available){
+                if(available)ok(source);else fail(new Error('Alloha: доступное видео не найдено'));
+            },fail);
+        },function(){fail(new Error('Alloha: не удалось получить список источников'));});
     }
 
     function start() {
-        if (!window.Lampa || !Lampa.Listener || !Lampa.Player) { setTimeout(start, 500); return; }
-        registerComponent();
-        Lampa.Listener.follow('full', function (e) { if (e && e.type === 'complite') addButton(e); });
-        notify('MnogoTV v' + VERSION + ' • stable sources');
+        if (!global.Lampa || !Lampa.Listener || !Lampa.Player || !global.MnogoTVCollapsAdapter || !global.MnogoTVVeoVeoAdapter || !global.MnogoTVTurboAdapter) return setTimeout(start, 500);
+        adapter = new global.MnogoTVCollapsAdapter(core);
+        adapters.collaps = adapter;
+        adapters.veoveo = new global.MnogoTVVeoVeoAdapter(core);
+        adapters.turbo = new global.MnogoTVTurboAdapter(core);
+        if (global.MnogoTVAllohaAdapter) adapters.alloha = new global.MnogoTVAllohaAdapter(core);
+        register();
+        installNextEpisodeHint();
+        installPlayerAutoHide();
+        Lampa.Listener.follow('full', addButton);
+        global.__mnogotv_v5_diagnostics = function () { return { version: VERSION, core: core.hlsRouter.diagnostics(), collaps: adapter.diagnostics(), veoveo: adapters.veoveo.diagnostics(), turbo: adapters.turbo.diagnostics(), alloha: adapters.alloha ? adapters.alloha.diagnostics() : null }; };
+        notify('MnogoTV v' + VERSION);
         log('started', { resolver: CONFIG.resolver });
     }
 
     start();
-})();
+})(window);
