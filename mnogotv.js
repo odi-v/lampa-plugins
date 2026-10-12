@@ -10,9 +10,9 @@ function render(){
  document.body.appendChild(panel);}
  var l=g.Lampa||{},platform='не определена';
  try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
- panel.textContent='MnogoTV LG-d3 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ panel.textContent='MnogoTV LG-d3.1 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
  '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
- '\n'+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
+ '\n'+(g.MnogoTVLGBackStatus ? g.MnogoTVLGBackStatus+'\n' : '')+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
 }
 g.MnogoTVLGRefresh=render;
 g.MnogoTVLGNetwork=function(provider){
@@ -4293,7 +4293,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.4-lg-d3';
+    var VERSION = '5.3.4-lg-d3.1';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4541,6 +4541,63 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
         currentPlayback = next;
     }
 
+    // Fallback only for our built-in Turbo session on webOS.
+    function installLGTurboBack() {
+        if (!Lampa.Platform || !Lampa.Platform.is('webos') || !Lampa.Player.listener ||
+            typeof Lampa.Player.close !== 'function' || typeof Lampa.Player.opened !== 'function') return;
+        var active = false, timer = null, serial = 0;
+        function note(text) {
+            global.MnogoTVLGBackStatus = text;
+            if (global.MnogoTVLGRefresh) global.MnogoTVLGRefresh();
+        }
+        function controllerName() {
+            var c = Lampa.Controller.enabled();
+            return c && c.name || '';
+        }
+        function menuOpen() {
+            return (Lampa.Select && Lampa.Select.opened && Lampa.Select.opened()) ||
+                (Lampa.Modal && Lampa.Modal.opened && Lampa.Modal.opened());
+        }
+        function keydown(event) {
+            var code = event.keyCode || event.which;
+            if (code !== 461 || !active || !Lampa.Player.opened() || event.repeat || timer !== null) return;
+            var name = controllerName();
+            if (menuOpen() || ['player','player_panel','player_rewind','player-loading'].indexOf(name) < 0) return;
+            var generation = serial;
+            // Allow Lampa's normal handler first; suppress only browser navigation.
+            event.preventDefault();
+            note('Назад 461: ' + name);
+            timer = setTimeout(function () {
+                timer = null;
+                if (!active || generation !== serial || !Lampa.Player.opened() || menuOpen()) return;
+                if (controllerName() !== name) return;
+                try {
+                    if (name === 'player_panel' || name === 'player_rewind') {
+                        if (Lampa.PlayerPanel && Lampa.PlayerPanel.toPlayer) Lampa.PlayerPanel.toPlayer();
+                        note('Назад: панель скрыта; повторное нажатие — выход');
+                    } else {
+                        Lampa.Player.close();
+                        note(Lampa.Player.opened() ? 'Назад: плеер остался открыт' : 'Назад: плеер закрыт');
+                    }
+                } catch (e) {
+                    note('Назад: ошибка закрытия');
+                    log('LG Turbo close failed', e);
+                    notify('Turbo: ошибка закрытия плеера');
+                }
+            }, 150);
+        }
+        Lampa.Player.listener.follow('start', function (data) {
+            serial++; clearTimeout(timer); timer = null;
+            active = !!(data && data.mnogotv_lg_turbo);
+            global.removeEventListener('keydown', keydown, true);
+            if (active) global.addEventListener('keydown', keydown, true);
+        });
+        Lampa.Player.listener.follow('destroy', function () {
+            active = false; serial++; clearTimeout(timer); timer = null;
+            global.removeEventListener('keydown', keydown, true);
+        });
+    }
+
     function installPlayerAutoHide() {
         if (!Lampa.Player.listener || !Lampa.Controller.listener) return;
         var active = false, timer = null;
@@ -4630,7 +4687,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
             if (season !== null && number !== null) title += ' • S' + season + 'E' + number + (meta && meta.name ? ' • ' + meta.name : '');
             return { title: title, season: season, episode: number,
                 timeline: timeline(movie, season, number), isonline: true, launch_player: targetPlayer,
-                mnogotv_player: targetPlayer === 'lampa', mnogotv_collaps: targetPlayer === 'lampa' && sessionAdapter === adapter, mnogotv_next_hint: season !== null && number !== null };
+                mnogotv_lg_turbo: targetPlayer === 'lampa' && sessionAdapter === adapters.turbo, mnogotv_player: targetPlayer === 'lampa', mnogotv_collaps: targetPlayer === 'lampa' && sessionAdapter === adapter, mnogotv_next_hint: season !== null && number !== null };
         }
         function applyResolved(item, resolved) {
             item.url = resolved.url;
@@ -5174,6 +5231,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         register();
         installNextEpisodeHint();
         installPlayerAutoHide();
+        installLGTurboBack();
         Lampa.Listener.follow('full', addButton);
         global.__mnogotv_v5_diagnostics = function () { return { version: VERSION, core: core.hlsRouter.diagnostics(), collaps: adapter.diagnostics(), veoveo: adapters.veoveo.diagnostics(), turbo: adapters.turbo.diagnostics(), alloha: adapters.alloha ? adapters.alloha.diagnostics() : null }; };
         notify('MnogoTV v' + VERSION);
