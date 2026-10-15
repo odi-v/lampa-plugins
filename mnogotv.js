@@ -10,7 +10,7 @@ function render(){
  document.body.appendChild(panel);}
  var l=g.Lampa||{},platform='не определена';
  try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
- panel.textContent='MnogoTV LG-d3.1 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ panel.textContent='MnogoTV LG-d4 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
  '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
  '\n'+(g.MnogoTVLGBackStatus ? g.MnogoTVLGBackStatus+'\n' : '')+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
 }
@@ -3968,6 +3968,10 @@ function subtitles(response) {
     function request(g,url,phase,post,extra,ok,fail,binary){
         if(g.closed)return;
         last={phase:phase};var net,ended=false;
+        var lgRelay=!!(Lampa.Platform && Lampa.Platform.is('webos') && !binary && (phase==='каталог' || phase==='служебный ключ' || phase==='API'));
+        var requestUrl=lgRelay?core.lgAllohaUrl():url;
+        var transportPost=lgRelay?{target:url,ref:g.embed || url,kind:phase==='каталог'?'page':phase==='API'?'api':'script',payload:JSON.stringify(post || {}),borth:String((extra || {}).Borth || '')}:post;
+
         try{net=new (Lampa.Reguest || Lampa.Request)();}catch(e){return fail(error(phase,'сетевой API недоступен'));}
         var slot={net:net,timer:null};g.requests.push(slot);
         var headers={'Referer':phase==='каталог'?'https://mnogotv.com/':g.embed || 'https://mnogotv.com/','Accept':phase==='каталог'?'text/html,application/xhtml+xml,*/*;q=0.8':'*/*'};
@@ -3978,11 +3982,12 @@ function subtitles(response) {
             if(err)return fail(err);
             if(binary)return ok(body,url,{});
             var meta;try{meta=typeof body==='string' && /^\s*\{/.test(body)?JSON.parse(body):body;}catch(e){}
+            if(lgRelay && (!meta || meta.ok!==true || typeof meta.body!=='string' || !safeURL(meta.currentUrl)))return fail(error(phase,'LG relay: '+(meta && meta.error || 'неверный ответ; обновите Worker')));
             if(meta && typeof meta.body==='string')return ok(meta.body,meta.currentUrl || url,meta.headers || {});
             ok(typeof body==='string'?body:JSON.stringify(body),url,{});
         }
         slot.timer=setTimeout(function(){end(error(phase,'тайм-аут 20 с'));try{net.clear();}catch(e){}},20000);
-        try{net.timeout(20000);(net.native || net.silent).call(net,url,function(b){end(null,b);},function(e){end(error(phase,'HTTP '+(Number(e && e.status)||0)));},post || false,{dataType:binary?'base64':'text',headers:headers,returnHeaders:!binary});}
+        try{net.timeout(20000);(net.native || net.silent).call(net,requestUrl,function(b){end(null,b);},function(e){end(error(phase,'HTTP '+(Number(e && e.status)||0)));},transportPost || false,{dataType:binary?'base64':'text',headers:lgRelay?{}:headers,returnHeaders:lgRelay?false:!binary});}
         catch(e){end(error(phase,'запрос не выполнен'));}
         return function(){if(ended)return;ended=true;clearTimeout(slot.timer);g.requests=g.requests.filter(function(r){return r!==slot;});try{net.clear();}catch(e){}};
     }
@@ -4012,7 +4017,8 @@ function subtitles(response) {
         g.embed=safeURL(req.source && req.source.iframeUrl);
         if(!g.embed)return fail(error('каталог','iframe отсутствует'));
         g.origin=new URL(g.embed).origin;
-        request(g,g.embed,'каталог',false,{},function(html){
+        request(g,g.embed,'каталог',false,{},function(html,finalUrl){
+            if(Lampa.Platform && Lampa.Platform.is('webos') && finalUrl){g.embed=finalUrl;g.origin=new URL(finalUrl).origin;}
             try{var data=parseEmbed(html);g.token=data.token;g.challenge=data.challenge;g.catalog=data.catalog;g.html=html;ok(data.catalog);}catch(e){fail(error('каталог','конфигурация не распознана'));}
         },fail);
     }
@@ -4293,7 +4299,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.4-lg-d3.1';
+    var VERSION = '5.3.4-lg-d4';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4507,6 +4513,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
     }
 
     var core = {
+        lgAllohaUrl: function() { return resolverUrl('/lg/alloha', {}); },
         lgTurboUrl: function(url, page, ref) { return resolverUrl('/lg/turbo', {url:url,kind:page?'page':'hls',ref:ref}); },
         version: VERSION,
         resolverUrl: resolverUrl,
