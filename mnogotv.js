@@ -1,16 +1,26 @@
 (function(g){
 'use strict';
-var rows=[],panel=null,seq=0;
+var rows=[],panel=null,seq=0,activeProvider='',enabled=true;
+g.MnogoTVLGDiagnosticSource=function(provider){
+ if(activeProvider!==provider)rows=[];
+ activeProvider=provider || '';
+ g.MnogoTVDiagnostics=activeProvider==='alloha' && enabled;
+ render();
+};
+g.MnogoTVLGDiagnosticToggle=function(){
+ if(activeProvider!=='alloha')return;
+ enabled=!enabled;g.MnogoTVDiagnostics=enabled;render();
+};
 function supported(type){try{return !!(g.MediaSource&&g.MediaSource.isTypeSupported(type));}catch(e){return false;}}
 function render(){
- if(!g.MnogoTVDiagnostics){if(panel&&panel.parentNode)panel.parentNode.removeChild(panel);panel=null;return;}
+ if(activeProvider!=='alloha'||!g.MnogoTVDiagnostics){if(panel&&panel.parentNode)panel.parentNode.removeChild(panel);panel=null;return;}
  if(!document.body)return;
  if(!panel){panel=document.createElement('div');panel.id='mnogotv-lg-network';
  panel.style.cssText='position:fixed;left:3%;top:14%;max-width:92%;z-index:2147483646;background:rgba(0,0,0,.88);color:white;font:20px/1.4 sans-serif;padding:12px 16px;white-space:pre-wrap;pointer-events:none;';
  document.body.appendChild(panel);}
  var l=g.Lampa||{},platform='не определена';
  try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
- panel.textContent='MnogoTV LG-d4 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ panel.textContent='MnogoTV LG-d5 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
  '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
  '\n'+(g.MnogoTVLGBackStatus ? g.MnogoTVLGBackStatus+'\n' : '')+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
 }
@@ -21,6 +31,7 @@ g.MnogoTVLGNetwork=function(provider){
   if(typeof Original!=='function')return Original;
   return function(){
    var net=new Original(),active=[];
+   if(provider!=='Alloha')return net;
    ['native','silent'].forEach(function(method){
     if(typeof net[method]!=='function')return;
     var original=net[method];
@@ -38,6 +49,20 @@ g.MnogoTVLGNetwork=function(provider){
        if(/^\s*#EXTM3U/.test(text))r.info+='; M3U8';
        else if(/^\s*</.test(text))r.info+='; HTML/XML';
        else if(/^\s*[{[]/.test(text))r.info+='; JSON/обёртка';
+       if(provider==='Alloha')try{
+        var meta=typeof value==='string'?JSON.parse(value):value,d=meta&&meta.diagnostic;
+        if(d&&d.version==='lg-alloha-diag-2'){
+         var allowed=function(v,list){return list.indexOf(v)>=0?v:'?';};
+         r.state=meta.ok===true?'ответ Alloha':'ошибка Alloha';
+         r.info='HTTP '+(Number(d.status)||0)+' | '+allowed(d.phase,['page','script','api'])+
+          ' | '+allowed(d.server,['cloudflare','angie','nginx','other'])+' | '+allowed(d.format,['html','json','other'])+
+          '\n'+allowed(d.page,['catalog','challenge','cf1010','not-found','unknown'])+' | '+(Number(d.chars)||0)+' симв. | redirects '+(Number(d.redirects)||0)+
+          '\nHTTP: '+(Array.isArray(d.statuses)?d.statuses.map(function(s){return Number(s)||0;}).join(' > '):'?')+
+          ' | cookies '+(Number(d.cookies)||0)+' | retry '+(Number(d.cookieRetry)||0)+
+          ' | cache '+allowed(d.cache,['HIT','MISS','BYPASS','DYNAMIC','EXPIRED','REVALIDATED','none','other']);
+        }
+       }catch(ignore){}
+
       }
       render();
      }
@@ -4299,7 +4324,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.4-lg-d4';
+    var VERSION = '5.3.4-lg-d5';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4827,6 +4852,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
 
     function Component(object) {
         var provider = object.provider || 'collaps';
+        global.MnogoTVLGDiagnosticSource(provider);
         var providerTitle = provider === 'alloha' ? 'Alloha' : provider === 'turbo' ? 'Turbo' : provider === 'veoveo' ? 'VeoVeo' : 'Collaps';
         var adapter = adapters[provider] || adapters.collaps;
         var movie = object.movie || {};
@@ -4851,7 +4877,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         var seasonButton = $('<div class="mnogotv-v5__pill selector">Сезон 1</div>');
         
         var diagnosticButton = $('<div class="mnogotv-v5__pill selector"></div>');
-        function diagnosticLabel() { diagnosticButton.text('Диагностика: ' + (global.MnogoTVDiagnostics === true ? 'вкл' : 'выкл')); }
+        function diagnosticLabel() { diagnosticButton.text(global.MnogoTVDiagnostics === true ? 'Диагностика Alloha: вкл' : 'Диагностика Alloha: выкл'); }
         diagnosticLabel();
         var diagnosticLastEvent = '', diagnosticLastTime = 0;
         diagnosticButton.on('hover:enter click', function (event) {
@@ -4859,7 +4885,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
             if (diagnosticLastEvent && diagnosticLastEvent !== eventType && now - diagnosticLastTime < 500) return;
             diagnosticLastEvent = eventType;
             diagnosticLastTime = now;
-            global.MnogoTVDiagnostics = global.MnogoTVDiagnostics !== true;
+            global.MnogoTVLGDiagnosticToggle();
             diagnosticLabel();
             global.MnogoTVLGRefresh();
             status.text('Режим диагностики применится при следующем запуске видео.');
@@ -5004,6 +5030,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
                 back: function () { Lampa.Controller.toggle('content'); },
                 onPending: function (item) {
                     sourceBusy = true;
+                    diagnosticLabel();
                     status.text('Подключение к ' + item.title + '…');
                     Lampa.Controller.toggle('content');
                 },
@@ -5020,6 +5047,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
                         if (currentPlayback === adapter) currentPlayback = null;
                     }
                     provider = item.provider; adapter = adapters[provider];
+                    global.MnogoTVLGDiagnosticSource(provider); diagnosticLabel();
                     providerTitle = provider === 'alloha' ? 'Alloha' : provider === 'turbo' ? 'Turbo' : provider === 'veoveo' ? 'VeoVeo' : 'Collaps';
                     source = nextSource; imdb = id; formatMode = item.mode;
                     var saved = providerViews[provider];
@@ -5068,7 +5096,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
             if (art && Lampa.Background && Lampa.Background.change) Lampa.Background.change(art);
             if (!initialized) {
                 initialized = true; addCss();
-                global.MnogoTVDiagnostics = true;
+                global.MnogoTVLGDiagnosticSource(provider);
                 diagnosticLabel();
                 global.MnogoTVLGRefresh();
                 bar.append(sourceButton);
@@ -5095,7 +5123,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         };
         this.pause = function () {};
         this.stop = function () { document.body.classList.remove('mnogotv-v5-page'); };
-        this.destroy = function () { document.body.classList.remove('mnogotv-v5-page'); destroyed = true; listGeneration++; playbackSequence++; adapter.cleanup('component-destroy'); root.remove(); };
+        this.destroy = function () { global.MnogoTVLGDiagnosticSource(''); document.body.classList.remove('mnogotv-v5-page'); destroyed = true; listGeneration++; playbackSequence++; adapter.cleanup('component-destroy'); root.remove(); };
     }
 
     function register() { try { Lampa.Component.add(COMPONENT, Component); return true; } catch (e) { log(e); return false; } }
@@ -5138,6 +5166,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
                 if (options.back) options.back();
             },
             onSelect: function (item) {
+                global.MnogoTVLGDiagnosticSource(item.provider);
                 var ticket = ++serial;
                 function alive() { return !closed && ticket === serial && (!options.alive || options.alive()); }
                 function close(keepRequest) {
