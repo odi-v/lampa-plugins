@@ -1,6 +1,6 @@
 (function(g){
 'use strict';
-var rows=[],panel=null,seq=0,activeProvider='',enabled={alloha:false,collaps:true};
+var rows=[],panel=null,seq=0,activeProvider='',enabled={alloha:false,turbo:false,veoveo:false,collaps:false};
 g.MnogoTVLGDiagnosticSource=function(provider){
  if(activeProvider!==provider)rows=[];
  activeProvider=provider || '';
@@ -8,7 +8,7 @@ g.MnogoTVLGDiagnosticSource=function(provider){
  render();
 };
 g.MnogoTVLGDiagnosticToggle=function(){
- if(activeProvider!=='alloha' && activeProvider!=='collaps')return;
+ if(!Object.prototype.hasOwnProperty.call(enabled,activeProvider))return;
  enabled[activeProvider]=!enabled[activeProvider];g.MnogoTVDiagnostics=enabled[activeProvider];render();
 };
 function supported(type){try{return !!(g.MediaSource&&g.MediaSource.isTypeSupported(type));}catch(e){return false;}}
@@ -20,7 +20,7 @@ function render(){
  document.body.appendChild(panel);}
  var l=g.Lampa||{},platform='не определена';
  try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
- panel.textContent='MnogoTV LG-d5.1 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ panel.textContent='MnogoTV LG-d5.2 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
  '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
  '\n'+(g.MnogoTVLGBackStatus ? g.MnogoTVLGBackStatus+'\n' : '')+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
 }
@@ -31,7 +31,6 @@ g.MnogoTVLGNetwork=function(provider){
   if(typeof Original!=='function')return Original;
   return function(){
    var net=new Original(),active=[];
-   if(provider!=='Alloha' && provider!=='Collaps')return net;
    ['native','silent'].forEach(function(method){
     if(typeof net[method]!=='function')return;
     var original=net[method];
@@ -4325,7 +4324,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.4-lg-d5.1';
+    var VERSION = '5.3.4-lg-d5.2';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4889,7 +4888,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
             global.MnogoTVLGDiagnosticToggle();
             diagnosticLabel();
             global.MnogoTVLGRefresh();
-            status.text('Режим диагностики применится при следующем запуске видео.');
+            status.text(global.MnogoTVDiagnostics ? 'Диагностика включена. Для проверки потока запустите видео.' : 'Диагностика выключена.');
         });
         var status = $('<div class="mnogotv-v5__status"></div>').text(source ? providerTitle + ' готов' : 'Выберите источник вверху карточки.');
         var list = $('<div class="mnogotv-v5__list"></div>');
