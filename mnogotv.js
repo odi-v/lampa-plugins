@@ -20,12 +20,12 @@ function render(){
  document.body.appendChild(panel);}
  var l=g.Lampa||{},platform='не определена';
  try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
- panel.textContent='MnogoTV LG-d6 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ panel.textContent='MnogoTV LG-d5.2 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
  '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
  '\n'+(g.MnogoTVLGBackStatus ? g.MnogoTVLGBackStatus+'\n' : '')+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
 }
 g.MnogoTVLGRefresh=render;
-g.MnogoTVLGNetwork=function(provider,Transport){
+g.MnogoTVLGNetwork=function(provider){
  var real=g.Lampa,local=Object.create(real);
  function wrap(Original){
   if(typeof Original!=='function')return Original;
@@ -76,7 +76,7 @@ g.MnogoTVLGNetwork=function(provider,Transport){
    return net;
   };
  }
- local.Reguest=wrap(Transport || real.Reguest);local.Request=wrap(Transport || real.Request);
+ local.Reguest=wrap(real.Reguest);local.Request=wrap(real.Request);
  return local;
 };
 })(window);
@@ -1042,36 +1042,6 @@ g.MnogoTVLGNetwork=function(provider,Transport){
         COLLAPS_NATIVE_HLS.uiInstalled = true;
     }
 
-
-    // webOS HLS only: raw binary XHR through the dedicated relay.
-    function LGCollapsHlsTransport() {
-        var pending=[],timeout=20000;
-        this.timeout=function(value){timeout=Math.max(1000,Number(value)||20000);};
-        this.clear=function(){var list=pending;pending=[];list.forEach(function(item){item.cancel();});};
-        this.native=function(url,ok,fail,post,options){
-            options=options || {};
-            var xhr=new XMLHttpRequest(),ended=false,item={cancel:function(){if(ended)return;ended=true;release();xhr.abort();}};
-            function release(){pending=pending.filter(function(x){return x!==item;});}
-            function finish(error,value){if(ended)return;ended=true;release();if(error)fail(error);else ok(value);}
-            pending.push(item);
-            try {
-                xhr.open('GET',url,true);
-                xhr.timeout=timeout;
-                var binary=options.dataType==='base64';
-                if(binary)xhr.responseType='arraybuffer';
-                var range=(options.headers || {}).Range || (options.headers || {}).range;
-                if(range)xhr.setRequestHeader('Range',range);
-                xhr.onload=function(){
-                    if(xhr.status>=200 && xhr.status<300)finish(null,binary?xhr.response:xhr.responseText);
-                    else finish({status:xhr.status,responseText:'Collaps LG relay HTTP '+xhr.status});
-                };
-                xhr.onerror=function(){finish({status:0,responseText:'Collaps LG relay network error'});};
-                xhr.ontimeout=function(){finish({status:0,responseText:'Collaps LG relay timeout'});};
-                xhr.send(null);
-            } catch(e){finish({status:0,responseText:'Collaps LG relay XHR failed'});}
-        };
-    }
-
     function configureCollapsNativeHls(rawUrl, clientUrl, unixTime, key, headers) {
         COLLAPS_NATIVE_HLS.unixTime = parseInt(unixTime || 0, 10) || 0;
         COLLAPS_NATIVE_HLS.key = String(key || '');
@@ -1184,12 +1154,9 @@ g.MnogoTVLGNetwork=function(provider,Transport){
                     (Number(context.rangeEnd) - 1);
             }
 
-            var lgHls = !!(Lampa.Platform && Lampa.Platform.is('webos'));
-            var transportUrl = lgHls ? core.resolverUrl('/lg/collaps/hls', {url:requestUrl}) : requestUrl;
-            var HlsNetwork = lgHls ? global.MnogoTVLGNetwork('Collaps',LGCollapsHlsTransport) : Lampa;
             var network = null;
-            try { network = new HlsNetwork.Reguest(); } catch (e) {
-                try { network = new HlsNetwork.Request(); } catch (e2) {}
+            try { network = new Lampa.Reguest(); } catch (e) {
+                try { network = new Lampa.Request(); } catch (e2) {}
             }
             if (!network || typeof network.native !== 'function') {
                 callbacks.onError({ code: 0, text: 'Lampa.Reguest.native unavailable' }, context, null, this.stats);
@@ -1220,7 +1187,7 @@ g.MnogoTVLGNetwork=function(provider,Transport){
 
             try {
                 collapsDashRequest(
-                    network, transportUrl,
+                    network, requestUrl,
                     function (response) {
                         if (stale()) return;
                         var now = (window.performance && performance.now) ? performance.now() : Date.now();
@@ -4357,7 +4324,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.4-lg-d6';
+    var VERSION = '5.3.4-lg-d5.2';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
