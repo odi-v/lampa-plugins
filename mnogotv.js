@@ -1,26 +1,26 @@
 (function(g){
 'use strict';
-var rows=[],panel=null,seq=0,activeProvider='',enabled=true;
+var rows=[],panel=null,seq=0,activeProvider='',enabled={alloha:false,collaps:true};
 g.MnogoTVLGDiagnosticSource=function(provider){
  if(activeProvider!==provider)rows=[];
  activeProvider=provider || '';
- g.MnogoTVDiagnostics=activeProvider==='alloha' && enabled;
+ g.MnogoTVDiagnostics=enabled[activeProvider] === true;
  render();
 };
 g.MnogoTVLGDiagnosticToggle=function(){
- if(activeProvider!=='alloha')return;
- enabled=!enabled;g.MnogoTVDiagnostics=enabled;render();
+ if(activeProvider!=='alloha' && activeProvider!=='collaps')return;
+ enabled[activeProvider]=!enabled[activeProvider];g.MnogoTVDiagnostics=enabled[activeProvider];render();
 };
 function supported(type){try{return !!(g.MediaSource&&g.MediaSource.isTypeSupported(type));}catch(e){return false;}}
 function render(){
- if(activeProvider!=='alloha'||!g.MnogoTVDiagnostics){if(panel&&panel.parentNode)panel.parentNode.removeChild(panel);panel=null;return;}
+ if(!g.MnogoTVDiagnostics){if(panel&&panel.parentNode)panel.parentNode.removeChild(panel);panel=null;return;}
  if(!document.body)return;
  if(!panel){panel=document.createElement('div');panel.id='mnogotv-lg-network';
  panel.style.cssText='position:fixed;left:3%;top:14%;max-width:92%;z-index:2147483646;background:rgba(0,0,0,.88);color:white;font:20px/1.4 sans-serif;padding:12px 16px;white-space:pre-wrap;pointer-events:none;';
  document.body.appendChild(panel);}
  var l=g.Lampa||{},platform='не определена';
  try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
- panel.textContent='MnogoTV LG-d5 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ panel.textContent='MnogoTV LG-d5.1 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
  '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
  '\n'+(g.MnogoTVLGBackStatus ? g.MnogoTVLGBackStatus+'\n' : '')+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
 }
@@ -31,11 +31,12 @@ g.MnogoTVLGNetwork=function(provider){
   if(typeof Original!=='function')return Original;
   return function(){
    var net=new Original(),active=[];
-   if(provider!=='Alloha')return net;
+   if(provider!=='Alloha' && provider!=='Collaps')return net;
    ['native','silent'].forEach(function(method){
     if(typeof net[method]!=='function')return;
     var original=net[method];
     net[method]=function(url,ok,fail,post,options){
+     if(provider.toLowerCase()!==activeProvider)return original.apply(net,arguments);
      var host='?',kind=options&&options.dataType||'default';
      try{host=new URL(url).hostname;}catch(e){}
      var r={id:++seq,provider:provider,method:method,kind:kind,host:host,state:'запрос',ms:0,info:''},start=Date.now(),ended=false;
@@ -4324,7 +4325,7 @@ global.MnogoTVAllohaAdapter=AllohaAdapter;
 (function (global) {
     'use strict';
 
-    var VERSION = '5.3.4-lg-d5';
+    var VERSION = '5.3.4-lg-d5.1';
     var PLUGIN_ID = 'mnogotv_v5_collaps';
     var COMPONENT = 'mnogotv_v5_collaps_component';
     var DEFAULT_RESOLVER = 'https://mnogotv-relay-v4-test.odi-84v.workers.dev';
@@ -4877,7 +4878,7 @@ body.mnogotv-v5-page .head{background:transparent!important}
         var seasonButton = $('<div class="mnogotv-v5__pill selector">Сезон 1</div>');
         
         var diagnosticButton = $('<div class="mnogotv-v5__pill selector"></div>');
-        function diagnosticLabel() { diagnosticButton.text(global.MnogoTVDiagnostics === true ? 'Диагностика Alloha: вкл' : 'Диагностика Alloha: выкл'); }
+        function diagnosticLabel() { diagnosticButton.text(global.MnogoTVDiagnostics === true ? 'Диагностика: вкл' : 'Диагностика: выкл'); }
         diagnosticLabel();
         var diagnosticLastEvent = '', diagnosticLastTime = 0;
         diagnosticButton.on('hover:enter click', function (event) {
