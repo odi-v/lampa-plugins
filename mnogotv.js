@@ -20,7 +20,7 @@ function render(){
  document.body.appendChild(panel);}
  var l=g.Lampa||{},platform='не определена';
  try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
- panel.textContent='MnogoTV LG-d6.3 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ panel.textContent='MnogoTV LG-d6.4 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
  '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
  '\n'+(g.MnogoTVLGBackStatus ? g.MnogoTVLGBackStatus+'\n' : '')+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
 }
@@ -202,7 +202,16 @@ g.MnogoTVLGNetwork=function(provider,Transport){
         return false;
     }
 
-    function collapsEmbedConfig(attempt, season, episode, ok, fail) {
+    function collapsEmbedConfig(attempt, season, episode, ok, fail, relayPage) {
+        if(relayPage && Lampa.Platform && Lampa.Platform.is('webos')) {
+            var pageUrl='https://mnogotv-collaps-lg-test.odi-84v.workers.dev/lg/collaps/page?url='+encodeURIComponent(attempt.url);
+            nativeText(pageUrl,{},function(html){
+                var cfg;try{cfg=parseCollapsHtml(html);}catch(e){return fail(new Error('Collaps C3: конфигурация не распознана'));}
+                if(!cfg)return fail(new Error('Collaps C3: makePlayer не найден'));
+                ok(cfg,'LG-worker-page-C3');
+            },function(e){fail(new Error('Collaps C3 page: '+errText(e)));});
+            return;
+        }
         var nativeError = null;
         var nativeHtml = '';
         var nativeCfg = null;
@@ -1050,30 +1059,9 @@ g.MnogoTVLGNetwork=function(provider,Transport){
         this.clear=function(){var list=pending;pending=[];list.forEach(function(item){item.cancel();});};
         this.native=function(url,ok,fail,post,options){
             options=options || {};
-            var xhr=new XMLHttpRequest(),probe=null,ended=false,item={cancel:function(){if(ended)return;ended=true;release();xhr.abort();if(probe)probe.abort();}};
+            var xhr=new XMLHttpRequest(),ended=false,item={cancel:function(){if(ended)return;ended=true;release();xhr.abort();}};
             function release(){pending=pending.filter(function(x){return x!==item;});}
-            function deliver(error,value){if(ended)return;ended=true;release();if(error)fail(error);else ok(value);}
-            function finish(error,value){
-                if(ended)return;
-                if(!error || binary || global.MnogoTVDiagnostics!==true || !Number(error.status))return deliver(error,value);
-                if(COLLAPS_NATIVE_HLS.compareStarted){
-                    if(COLLAPS_NATIVE_HLS.compareResult)error.responseText+=' | '+COLLAPS_NATIVE_HLS.compareResult;
-                    return deliver(error,value);
-                }
-                var target;
-                try{var relay=new URL(url);target=new URL(relay.searchParams.get('url'));if(target.protocol!=='https:' || target.username || target.password || (target.port && target.port!=='443') || !(target.hostname==='interkh.com'||/\.interkh\.com$/.test(target.hostname)))return deliver(error,value);}catch(e){return deliver(error,value);}
-                COLLAPS_NATIVE_HLS.compareStarted=true;
-                var done=false;
-                function result(label){if(done||ended)return;done=true;COLLAPS_NATIVE_HLS.compareResult='DIRECT '+label;error.responseText+=' | '+COLLAPS_NATIVE_HLS.compareResult;deliver(error,value);}
-                try{
-                    probe=new XMLHttpRequest();probe.open('GET',target.href,true);probe.timeout=6000;
-                    // Browser controls Origin/Referer/UA; this is a route test, not identical headers.
-                    probe.onload=function(){var text=String(probe.responseText||'');result('HTTP '+probe.status+' '+(/^\s*#EXTM3U/.test(text)?'M3U8':/^\s*</.test(text)?'HTML':'other'));};
-                    probe.onerror=function(){result('HTTP 0 (CORS/network/TLS)');};
-                    probe.ontimeout=function(){result('timeout 6s');};
-                    probe.send(null);
-                }catch(e){result('XHR failed');}
-            }
+            function finish(error,value){if(ended)return;ended=true;release();if(error)fail(error);else ok(value);}
             pending.push(item);
             try {
                 xhr.open('GET',url,true);
@@ -1100,8 +1088,6 @@ g.MnogoTVLGNetwork=function(provider,Transport){
     }
 
     function configureCollapsNativeHls(rawUrl, clientUrl, unixTime, key, headers) {
-        COLLAPS_NATIVE_HLS.compareStarted = false;
-        COLLAPS_NATIVE_HLS.compareResult = '';
         COLLAPS_NATIVE_HLS.unixTime = parseInt(unixTime || 0, 10) || 0;
         COLLAPS_NATIVE_HLS.key = String(key || '');
         COLLAPS_NATIVE_HLS.headers = headers || {};
@@ -1476,7 +1462,7 @@ g.MnogoTVLGNetwork=function(provider,Transport){
         );
     }
 
-    function tryCollapsUrls(source, imdb, kp, season, episode, ok, fail) {
+    function tryCollapsUrls(source, imdb, kp, season, episode, ok, fail, relayPage) {
         var urls = [];
         var seen = {};
 
@@ -1589,7 +1575,8 @@ g.MnogoTVLGNetwork=function(provider,Transport){
                         attempt.label + ': ' + errText(e)
                     );
                     next();
-                }
+                },
+                relayPage
             );
         }
 
@@ -3126,7 +3113,8 @@ g.MnogoTVLGNetwork=function(provider,Transport){
 
                         fail(new Error('Collaps: совместимый media path не найден'));
                     },
-                    fail
+                    fail,
+                    !dashMode && String(format || 'hls').toLowerCase() === 'hls'
                 );
             }
         );
