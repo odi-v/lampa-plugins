@@ -20,7 +20,7 @@ function render(){
  document.body.appendChild(panel);}
  var l=g.Lampa||{},platform='не определена';
  try{platform=l.Platform.is('webos')?'webOS':l.Platform.is('android')?'Android':'другая';}catch(e){}
- panel.textContent='MnogoTV LG-d6.1 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
+ panel.textContent='MnogoTV LG-d6.2 | '+platform+' | PalmServiceBridge: '+(typeof g.PalmServiceBridge==='function'?'есть':'нет')+
  '\nMSE: AVC '+(+supported('video/mp4; codecs="avc1.42E01E"'))+' | VP9 '+(+supported('video/webm; codecs="vp9"'))+' | AV1 '+(+supported('video/webm; codecs="av01.0.08M.08"'))+' | Opus '+(+supported('audio/webm; codecs="opus"'))+
  '\n'+(g.MnogoTVLGBackStatus ? g.MnogoTVLGBackStatus+'\n' : '')+rows.map(function(r){return '#'+r.id+' '+r.provider+' '+r.method+' '+r.kind+' '+r.host+'\n'+r.state+' | '+r.ms+' мс'+(r.info?' | '+r.info:'');}).join('\n');
 }
@@ -1063,7 +1063,13 @@ g.MnogoTVLGNetwork=function(provider,Transport){
                 if(range)xhr.setRequestHeader('Range',range);
                 xhr.onload=function(){
                     if(xhr.status>=200 && xhr.status<300)finish(null,binary?xhr.response:xhr.responseText);
-                    else finish({status:xhr.status,responseText:'Collaps LG relay HTTP '+xhr.status});
+                    else {
+                        var relay='',upstream='',detail='';
+                        try{relay=xhr.getResponseHeader('X-MnogoTV-Relay')||'';upstream=xhr.getResponseHeader('X-MnogoTV-Upstream-Status')||'';detail=xhr.getResponseHeader('X-MnogoTV-Diagnostic')||'';}catch(ignore){}
+                        var known=relay==='collaps-c2';
+                        var valid=/^C2 upstream=\d{3} redirects=\d body=(?:[a-z,-]+)(?: cf=\d{1,4} server=(?:cloudflare|nginx|angie|other) type=(?:json|html|text|other) bytes=\d+\+?)?$/.test(detail);
+                        finish({status:xhr.status,responseText:'Collaps HTTP '+xhr.status+' | relay='+(known?'C2':'unconfirmed')+' upstream='+(/^\d{3}$/.test(upstream)?upstream:'unknown')+(known&&valid?' | '+detail:'')});
+                    }
                 };
                 xhr.onerror=function(){finish({status:0,responseText:'Collaps LG relay network error'});};
                 xhr.ontimeout=function(){finish({status:0,responseText:'Collaps LG relay timeout'});};
